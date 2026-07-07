@@ -233,6 +233,36 @@ python rv_analysis.py bf --spectrum tayf.txt --template sablon.txt \
 `--site` astropy gözlemevi adıdır (`tug` = TÜBİTAK Ulusal Gözlemevi,
 `paranal`, `lapalma`...). Düzeltme ölçülen RV'ye **eklenir**.
 
+### 4) Zaman serisi → dikine hız eğrisi (`batch`)
+
+Tezdeki iş akışının son adımı: bir tayf serisinin her elemanına BF (veya CCF)
+uygulayıp PyWD2015'e verilecek dikine hız eğrisini üretmek. `batch` bunu tek
+komutla yapar:
+
+```bash
+python rv_analysis.py batch --spectra 'gozlemler/*.fits' \
+    --template sablon.prf --normalize --poly-order 5 \
+    --components 2 --vel-range 400 \
+    --object "TIC 82224114" --site tug \
+    --t0 2458870.695130 --period 0.376124
+```
+
+Her tayf için sırasıyla: (isteğe bağlı `--normalize` ile) süreklilik
+normalizasyonu, BF ölçümü, FITS başlığındaki `DATE-OBS`/`EXPTIME` ile poz
+ortası **BJD_TDB** hesabı ve barycentric düzeltme yapılır. Koordinatlar bir
+kez `--object` (SIMBAD) ya da `--ra/--dec` ile alınır; zaman her dosyanın
+kendi başlığından okunur.
+
+- SB2 modunda bileşen etiketleri evreler arasında karışmaz: BF alanı (ışık
+  katkısı) büyük olan her zaman **Component 1** olarak raporlanır.
+- `--t0` ve `--period` verilirse grafik yörünge evresine katlanır; verilmezse
+  BJD'ye karşı çizilir.
+- Çıktılar: `result_RV_curve.txt` (dosya, BJD_TDB, bileşen başına RV ± hata)
+  ve `result_RV_curve.png`.
+- Kavuşum evrelerine (0.0 / 0.5 civarı) denk gelen tayflarda iki tepe
+  tamamen harmanlanır; bu noktaların hatası büyük çıkar — yörünge çözümüne
+  sokmadan önce ayıklamak en sağlıklısıdır.
+
 ## Önemli parametreler (BF)
 
 | Parametre | Anlamı | Öneri |
