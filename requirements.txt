@@ -1,0 +1,6 @@
+numpy
+scipy
+matplotlib
+astropy
+# İsteğe bağlı: PHOENIX şablon tayflarını otomatik indirmek için
+# expecto
