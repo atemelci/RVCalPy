@@ -2,5 +2,6 @@ numpy
 scipy
 matplotlib
 astropy
+PyAstronomy
 # İsteğe bağlı: PHOENIX şablon tayflarını otomatik indirmek için
 # expecto
