@@ -71,17 +71,61 @@ python rv_analysis.py
 ```
 
 - Sisteminizde **tkinter** varsa sade, İngilizce bir widget penceresi açılır:
-  1. **Normalized spectrum** ve **Synthetic spectrum** dosyalarını
+  1. **Target** — yıldız adını yazıp **SIMBAD** düğmesine basın; koordinatlar
+     (RA/Dec) otomatik dolar. SIMBAD'da bulunamazsa RA/Dec alanlarına elle
+     girilir. Gözlem zamanı (ISOT) ve gözlemevi ile birlikte doluysa RV'ye
+     **barycentric hız düzeltmesi** uygulanır (hepsi isteğe bağlıdır).
+  2. **Normalized spectrum** ve **Synthetic spectrum** dosyalarını
      "Browse..." ile seçin; istenirse dalgaboyu aralığı girin.
-  2. **Method** — CCF veya BF işaretlenir; seçime göre yalnızca ilgili
+     Elinizde normalize tayf yoksa **"Normalize raw..."** düğmesi ham tayfı
+     (genellikle .fits) widget içinde normalize eder (aşağıya bakın).
+  3. **Method** — CCF veya BF işaretlenir; seçime göre yalnızca ilgili
      parametre alanları görünür (CCF: RV tarama aralığı; BF: hız penceresi
      ve bileşen sayısı).
-  3. **Run** — sonuç metni pencerede, uyum grafiği pencereye gömülü olarak
+  4. **Run** — sonuç metni pencerede, uyum grafiği pencereye gömülü olarak
      gösterilir; aynı anda `result_CCF.txt`/`result_BF.txt` ve
      `result_CCF.png`/`result_BF.png` diske kaydedilir.
 - tkinter/ekran yoksa aynı akış **terminal soru-cevap sihirbazı** olarak
-  çalışır (dosya yolları, yöntem seçimi `[1] CCF / [2] BF`, parametreler,
-  isteğe bağlı barycentric düzeltme) ve aynı çıktı dosyaları üretilir.
+  çalışır (SIMBAD sorgusu, gerekirse normalizasyon, yöntem seçimi
+  `[1] CCF / [2] BF`, parametreler) ve aynı çıktı dosyaları üretilir.
+
+### Ham tayfın normalizasyonu (FEROS yaklaşımı)
+
+FEROS tayflarındaki gibi *"iteratif olarak ve sentetik tayf ile etkileşimli
+karşılaştırma yoluyla"* süreklilik normalizasyonu yapılır:
+
+1. Ham tayfa (echelle ise basamak basamak) bir polinom uyumlanır.
+2. Uyumun **altında** kalan noktalar (soğurma çizgileri) sıkı, üstünde
+   kalanlar (kozmik/emisyon) gevşek eşikle atılır ve uyum yinelenir; polinom
+   böylece üst zarfa — sürekliliğe — yakınsar.
+3. Sonuç, sentetik tayfın üzerine bindirilmiş olarak gösterilir
+   (`result_normalization.png`); uyuşmuyorsa polinom derecesini değiştirip
+   tekrar denersiniz — "etkileşimli karşılaştırma" adımı budur. Widget'ta
+   **Preview** tam bunu yapar; **Use** normalize tayfı `<girdi>_norm.txt`
+   olarak kaydedip analiz alanına yerleştirir.
+
+Komut satırından:
+
+```bash
+python rv_analysis.py normalize --spectrum raw_feros.fits \
+    --poly-order 5 --iterations 8 --template synth.prf
+# çıktı: raw_feros_norm.txt + result_normalization.png
+```
+
+Desteklenen ham FITS düzenleri: ESPRESSO S2D, FEROS/HARPS phase-3 tarzı
+WAVE/FLUX binary tabloları ve CRVAL1/CDELT1'li klasik 1B IRAF görüntüleri.
+
+### SIMBAD ve barycentric düzeltme
+
+- Widget'taki **SIMBAD** düğmesi veya CLI'daki `--object "51 Peg"` yıldız
+  adını (astropy/Sesame üzerinden) koordinata çevirir; bulunamazsa elle
+  `--ra/--dec` girilir.
+- Gözlem zamanı `--obstime` ile verilmezse ham FITS başlığındaki
+  `DATE-OBS`'tan okunur (widget'taki normalizasyon adımı RA/Dec, DATE-OBS ve
+  OBJECT alanlarını başlıktan otomatik doldurur).
+- Koordinat + zaman + gözlemevi (`--site tug`, `paranal`, ...) tamamsa
+  düzeltme hesaplanıp RV'ye eklenir; eksikse analiz düzeltmesiz sürer ve
+  bunu belirtir.
 
 ### Desteklenen dosya biçimleri
 

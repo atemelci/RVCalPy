@@ -8,3 +8,4 @@ __pycache__/
 *.png
 *_sonuc.txt
 result_*.txt
+*_norm.txt

@@ -143,26 +143,186 @@ def read_ascii_spectrum(path):
     return data[order, 0], data[order, 1]
 
 
+def read_fits_spectrum(path):
+    """FITS spectrum reader for the common layouts of raw/pipeline data.
+
+    Supported:
+      - ESPRESSO S2D (flux ext=1, wavelength ext=4, 2D echelle orders)
+      - phase-3 style binary tables with WAVE/LAMBDA and FLUX columns
+        (FEROS, HARPS, UVES, ...)
+      - simple 1D image HDU with a linear wavelength WCS (CRVAL1/CDELT1),
+        the classic IRAF product
+    Returns a list of (wavelength, flux) pairs (one per echelle order).
+    """
+    from astropy.io import fits
+    with fits.open(path) as hdul:
+        # 1) ESPRESSO S2D layout
+        try:
+            flux = np.array(hdul[1].data, dtype=float)
+            wvl = np.array(hdul[4].data, dtype=float)
+            if flux.ndim == 2 and flux.shape == wvl.shape:
+                return [(w, f) for w, f in zip(wvl, flux)]
+        except (IndexError, TypeError, ValueError):
+            pass
+        # 2) binary table with wave/flux columns (FEROS/HARPS phase-3)
+        for hdu in hdul:
+            if not isinstance(hdu, fits.BinTableHDU):
+                continue
+            cols = {c.name.upper(): c.name for c in hdu.columns}
+            wname = next((cols[k] for k in
+                          ("WAVE", "WAVELENGTH", "LAMBDA", "AWAV") if k in cols),
+                         None)
+            fname = next((cols[k] for k in
+                          ("FLUX", "FLUX_REDUCED", "INTENSITY") if k in cols),
+                         None)
+            if wname and fname:
+                wl = np.ravel(np.asarray(hdu.data[wname], dtype=float))
+                fx = np.ravel(np.asarray(hdu.data[fname], dtype=float))
+                order = np.argsort(wl)
+                return [(wl[order], fx[order])]
+        # 3) 1D image with linear wavelength WCS
+        for hdu in hdul:
+            if hdu.data is None:
+                continue
+            data = np.asarray(hdu.data, dtype=float)
+            h = hdu.header
+            if data.ndim == 1 and "CRVAL1" in h:
+                cdelt = h.get("CDELT1", h.get("CD1_1"))
+                if cdelt:
+                    crpix = h.get("CRPIX1", 1.0)
+                    wl = h["CRVAL1"] + (np.arange(data.size) + 1 - crpix) * cdelt
+                    return [(wl, data)]
+    raise ValueError(f"{path}: unrecognized FITS layout (expected S2D, a "
+                     "WAVE/FLUX binary table, or a 1D image with CRVAL1/CDELT1).")
+
+
 def read_spectrum(path, fmt="auto"):
     """Read a spectrum. Returns a list of (wavelength, flux) pairs
-    (one pair per echelle order for S2D files).
+    (one pair per echelle order for multi-order files).
 
-    fmt: 'auto' | 's2d' | 'text'
+    fmt: 'auto' | 's2d' | 'text'  ('s2d' accepts any supported FITS layout)
     """
     if fmt == "auto":
         fmt = "s2d" if path.lower().endswith((".fits", ".fit", ".fits.gz")) else "text"
-
     if fmt == "s2d":
-        from astropy.io import fits
-        with fits.open(path) as hdu:
-            flux = np.array(hdu[1].data, dtype=float)
-            wvl = np.array(hdu[4].data, dtype=float)
-        if flux.ndim == 1:
-            return [(wvl, flux)]
-        return [(w, f) for w, f in zip(wvl, flux)]
-
+        return read_fits_spectrum(path)
     wl, fx = read_ascii_spectrum(path)
     return [(wl, fx)]
+
+
+def fits_header_info(path):
+    """Extract OBJECT, DATE-OBS, RA, Dec from a FITS primary header.
+
+    Returns dict with keys object/obstime/ra/dec (values may be None).
+    RA/Dec are converted to degrees; sexagesimal strings ('hh:mm:ss') are
+    interpreted as hourangle/deg.
+    """
+    from astropy.io import fits
+    info = {"object": None, "obstime": None, "ra": None, "dec": None}
+    try:
+        with fits.open(path) as hdul:
+            h = hdul[0].header
+    except Exception:
+        return info
+    info["object"] = h.get("OBJECT")
+    info["obstime"] = h.get("DATE-OBS") or h.get("DATE_OBS")
+    ra, dec = h.get("RA"), h.get("DEC")
+    try:
+        if isinstance(ra, (int, float)) and isinstance(dec, (int, float)):
+            info["ra"], info["dec"] = float(ra), float(dec)
+        elif ra is not None and dec is not None:
+            from astropy.coordinates import Angle
+            import astropy.units as u
+            ra_unit = u.hourangle if ":" in str(ra) else u.deg
+            info["ra"] = Angle(str(ra), unit=ra_unit).deg
+            info["dec"] = Angle(str(dec), unit=u.deg).deg
+    except Exception:
+        pass
+    return info
+
+
+def resolve_target(name):
+    """Resolve a target name to ICRS coordinates [deg] via SIMBAD (Sesame).
+
+    Raises ValueError when the name cannot be resolved (no match or no
+    network); the caller should then fall back to manual coordinate entry.
+    """
+    from astropy.coordinates import SkyCoord
+    try:
+        c = SkyCoord.from_name(name)
+    except Exception as exc:
+        raise ValueError(f"SIMBAD lookup failed for '{name}': {exc}") from exc
+    return float(c.ra.deg), float(c.dec.deg)
+
+
+def normalize_continuum(wl, flux, poly_order=5, iterations=8,
+                        low_clip=1.0, high_clip=4.0):
+    """Iterative continuum normalization of a raw spectrum (FEROS-style).
+
+    'All FEROS spectra were normalised to the continuum level iteratively':
+    a polynomial is fitted to the spectrum, then points lying more than
+    low_clip*sigma BELOW the fit (absorption lines) or high_clip*sigma
+    above it (cosmics/emission) are rejected and the fit is repeated, so
+    the polynomial converges onto the upper envelope — the continuum.
+    The interactive comparison with a synthetic spectrum happens in the
+    widget / normalize command, where the result is overplotted on the
+    template so the user can tune poly_order and re-run.
+
+    Returns (normalized_flux, continuum). Pixels where the continuum is
+    not positive come back as NaN.
+    """
+    wl = np.asarray(wl, dtype=float)
+    flux = np.asarray(flux, dtype=float)
+    good = np.isfinite(wl) & np.isfinite(flux) & (flux > 0)
+    if good.sum() < poly_order + 2:
+        raise ValueError("Too few valid pixels for continuum fitting.")
+    # scale x to [-1, 1] to keep the polynomial fit well conditioned
+    x = 2.0 * (wl - wl[good].min()) / (wl[good].max() - wl[good].min()) - 1.0
+
+    mask = good.copy()
+    cont = None
+    for _ in range(iterations):
+        coeff = np.polyfit(x[mask], flux[mask], poly_order)
+        cont = np.polyval(coeff, x)
+        resid = flux - cont
+        sigma = np.std(resid[mask])
+        if sigma <= 0:
+            break
+        new_mask = good & (resid > -low_clip * sigma) & (resid < high_clip * sigma)
+        if new_mask.sum() < poly_order + 2 or np.array_equal(new_mask, mask):
+            break
+        mask = new_mask
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        norm = np.where(cont > 0, flux / cont, np.nan)
+    return norm, cont
+
+
+def normalize_spectrum_file(path, fmt="auto", poly_order=5, iterations=8,
+                            low_clip=1.0, high_clip=4.0):
+    """Normalize a raw spectrum file order by order and merge.
+
+    Returns (wl, norm_flux, orders_raw) where orders_raw is the list of
+    (wl, flux, continuum) per order for diagnostic plotting.
+    """
+    orders = read_spectrum(path, fmt)
+    normed, diag = [], []
+    for wl, fx in orders:
+        good = np.isfinite(wl) & np.isfinite(fx)
+        wl, fx = wl[good], fx[good]
+        if wl.size < poly_order + 2:
+            continue
+        nf, cont = normalize_continuum(wl, fx, poly_order, iterations,
+                                       low_clip, high_clip)
+        keep = np.isfinite(nf)
+        normed.append((wl[keep], nf[keep]))
+        diag.append((wl, fx, cont))
+    if not normed:
+        raise ValueError(f"{path}: no order could be normalized.")
+    wl = np.concatenate([w for w, _ in normed])
+    nf = np.concatenate([f for _, f in normed])
+    order_ = np.argsort(wl)
+    return wl[order_], nf[order_], diag
 
 
 def load_template(args):
@@ -192,6 +352,47 @@ def barycentric_correction(ra_deg, dec_deg, obstime_isot, site):
     coord = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg)
     t = Time(obstime_isot, format="isot", scale="utc")
     return coord.radial_velocity_correction(obstime=t, location=loc).to(u.km / u.s).value
+
+
+def get_bary_correction(args):
+    """Resolve target info and return the barycentric correction [km/s].
+
+    Coordinate priority: explicit --ra/--dec, then SIMBAD lookup of
+    --object, then the FITS header of the spectrum. The observation time
+    comes from --obstime or the FITS header (DATE-OBS). Returns 0.0 when
+    the correction cannot be computed (with a note on what was missing).
+    """
+    ra, dec = args.ra, args.dec
+    obstime = args.obstime
+
+    if ra is None and getattr(args, "object", None):
+        try:
+            ra, dec = resolve_target(args.object)
+            print(f"SIMBAD: '{args.object}' -> RA = {ra:.5f} deg, "
+                  f"Dec = {dec:.5f} deg")
+        except ValueError as exc:
+            print(f"Warning: {exc}\n  -> give coordinates manually "
+                  "with --ra/--dec.")
+
+    if (ra is None or obstime is None) and \
+            str(args.spectrum).lower().endswith((".fits", ".fit", ".fits.gz")):
+        hdr = fits_header_info(args.spectrum)
+        if ra is None and hdr["ra"] is not None:
+            ra, dec = hdr["ra"], hdr["dec"]
+            print(f"FITS header: RA = {ra:.5f} deg, Dec = {dec:.5f} deg")
+        if obstime is None and hdr["obstime"]:
+            obstime = hdr["obstime"]
+            print(f"FITS header: DATE-OBS = {obstime}")
+
+    if ra is None or dec is None or not obstime:
+        if getattr(args, "object", None) or args.ra is not None or obstime:
+            print("Note: barycentric correction skipped "
+                  "(needs coordinates AND observation time).")
+        return 0.0
+
+    v = barycentric_correction(ra, dec, obstime, args.site)
+    print(f"Barycentric correction: {v:+.4f} km/s (added to the RV)")
+    return v
 
 
 # ----------------------------------------------------------------------
@@ -458,10 +659,7 @@ def cmd_ccf(args):
     print(f"Computing the CCF over {len(orders)} order(s)/segment(s)...")
     result = run_ccf(orders, tpl_wl, tpl_flux, args.rv_min, args.rv_max, args.rv_step)
 
-    vbary = 0.0
-    if args.ra is not None:
-        vbary = barycentric_correction(args.ra, args.dec, args.obstime, args.site)
-        print(f"Barycentric correction: {vbary:+.4f} km/s")
+    vbary = get_bary_correction(args)
 
     rv = result["rv"] + vbary
     tpl_name = args.template or f"PHOENIX T={args.teff}K"
@@ -518,10 +716,7 @@ def cmd_bf(args):
     comps, popt = fit_bf_peaks(bf_result["velocity"], bf_result["bf_smooth"],
                                components=args.components, min_sep=args.min_sep)
 
-    vbary = 0.0
-    if args.ra is not None:
-        vbary = barycentric_correction(args.ra, args.dec, args.obstime, args.site)
-        print(f"Barycentric correction: {vbary:+.4f} km/s")
+    vbary = get_bary_correction(args)
 
     tpl_name = args.template or f"PHOENIX T={args.teff}K"
     lines = ["================ BF RESULT =================",
@@ -557,6 +752,75 @@ def cmd_bf(args):
 
     return dict(method="BF", fig=fig, text=summary,
                 output=outfile, plot=plotfile)
+
+
+def make_norm_figure(diag, wl, nf, tpl=None):
+    """Two-panel normalization figure: raw + continuum fits, and the
+    normalized spectrum overplotted on the synthetic template (the
+    'interactive comparison with a synthetic spectrum' step)."""
+    from matplotlib.figure import Figure
+    fig = Figure(figsize=(9, 6))
+    ax0, ax1 = fig.subplots(2, 1, sharex=True)
+
+    for w, f, cont in diag:
+        ax0.plot(w, f, lw=0.5, alpha=0.6)
+        ax0.plot(w, cont, "r-", lw=1.0, alpha=0.8)
+    ax0.set_ylabel("Raw flux")
+    ax0.set_title("Raw spectrum and fitted continuum (red)")
+
+    ax1.plot(wl, nf, "k-", lw=0.6, label="Normalized spectrum")
+    if tpl is not None:
+        tw, tf = tpl
+        sel = (tw >= wl.min()) & (tw <= wl.max())
+        if sel.any():
+            ax1.plot(tw[sel], tf[sel] / np.nanmax(tf[sel]), "C0-", lw=0.8,
+                     alpha=0.7, label="Synthetic template")
+    ax1.axhline(1.0, color="0.6", ls=":", lw=1)
+    ax1.set_ylim(-0.1, 1.6)
+    ax1.set_xlabel("Wavelength [Å]")
+    ax1.set_ylabel("Normalized flux")
+    ax1.legend()
+    fig.tight_layout()
+    return fig
+
+
+def cmd_normalize(args):
+    """Normalize a raw spectrum to the continuum and write an ASCII file
+    that can be fed directly into the CCF/BF analysis."""
+    print(f"Normalizing {args.spectrum} "
+          f"(poly order {args.poly_order}, {args.iterations} iterations)...")
+    wl, nf, diag = normalize_spectrum_file(
+        args.spectrum, args.format, poly_order=args.poly_order,
+        iterations=args.iterations, low_clip=args.low_clip,
+        high_clip=args.high_clip)
+
+    tpl = None
+    if args.template or args.teff is not None:
+        tpl = load_template(args)
+
+    outfile = args.output or \
+        os.path.splitext(os.path.basename(args.spectrum))[0] + "_norm.txt"
+    np.savetxt(outfile, np.column_stack([wl, nf]),
+               fmt="%.4f %.5f",
+               header=f"normalized from {args.spectrum} "
+                      f"(poly order {args.poly_order}, "
+                      f"{args.iterations} iterations)")
+    print(f"Normalized spectrum written: {outfile}")
+
+    plotfile = args.plot or "result_normalization.png"
+    fig = make_norm_figure(diag, wl, nf, tpl)
+    save_figure(fig, plotfile)
+
+    summary = ("============ NORMALIZATION DONE ============\n"
+               f"Raw spectrum : {args.spectrum}\n"
+               f"Output       : {outfile}\n"
+               f"Check the continuum fit in {plotfile}; if the normalized\n"
+               "spectrum does not match the synthetic template, adjust the\n"
+               "polynomial order and run again.\n"
+               "============================================")
+    print("\n" + summary)
+    return dict(method="normalize", fig=fig, text=summary,
+                output=outfile, plot=plotfile, wl=wl, flux=nf)
 
 
 def cmd_demo(args):
@@ -672,11 +936,12 @@ def make_args(**overrides):
     base = dict(spectrum=None, format="auto", template=None,
                 teff=None, logg=4.5, feh=0.0,
                 wave_min=None, wave_max=None,
-                ra=None, dec=None, obstime=None, site="paranal",
+                object=None, ra=None, dec=None, obstime=None, site="paranal",
                 plot=None, output=None,
                 rv_min=-200.0, rv_max=200.0, rv_step=0.5,
                 vel_range=400.0, dv=None, svd_rcond=1e-3, smooth=None,
-                components=1, min_sep=30.0)
+                components=1, min_sep=30.0,
+                poly_order=5, iterations=8, low_clip=1.0, high_clip=4.0)
     base.update(overrides)
     return argparse.Namespace(**base)
 
@@ -704,15 +969,65 @@ def ask(prompt, default=None, cast=str, validate=None, allow_empty=False):
         return val
 
 
-def _ask_common_inputs():
-    """Inputs shared by both methods: files and wavelength range."""
-    spectrum = ask("Normalized spectrum file (ASCII or S2D FITS)",
-                   cast=str, validate=os.path.isfile)
+def _ask_target(kw):
+    """Target identification: SIMBAD name lookup, manual coords as fallback."""
+    name = ask("Star name for SIMBAD lookup (empty: skip / manual coords)",
+               allow_empty=True)
+    if name:
+        try:
+            ra, dec = resolve_target(name)
+            print(f"  SIMBAD: RA = {ra:.5f} deg, Dec = {dec:.5f} deg")
+            kw["object"], kw["ra"], kw["dec"] = name, ra, dec
+        except ValueError as exc:
+            print(f"  {exc}")
+            name = None
+    if not name:
+        manual = ask("Enter coordinates manually? (y/n)", default="n",
+                     cast=str, validate=lambda s: s.lower() in ("y", "n"))
+        if manual.lower() == "y":
+            kw["ra"] = ask("  RA [deg]", cast=float)
+            kw["dec"] = ask("  Dec [deg]", cast=float)
+    if kw.get("ra") is not None:
+        kw["obstime"] = ask("Observation time (ISOT, e.g. 2024-12-03T02:30:00;"
+                            " empty: read from FITS header)", allow_empty=True)
+        kw["site"] = ask("Observatory (astropy site name: tug, paranal, ...)",
+                         default="tug")
+    return kw
+
+
+def _ask_common_inputs(kw):
+    """Inputs shared by both methods: files and wavelength range.
+    Mutates and returns kw (which may already hold the target info)."""
+    have_norm = ask("Do you already have a normalized spectrum? (y/n)",
+                    default="y", cast=str,
+                    validate=lambda s: s.lower() in ("y", "n"))
+    if have_norm.lower() == "y":
+        spectrum = ask("Normalized spectrum file (ASCII or FITS)",
+                       cast=str, validate=os.path.isfile)
+    else:
+        raw = ask("Raw spectrum file (FITS or ASCII)",
+                  cast=str, validate=os.path.isfile)
+        order = ask("  Continuum polynomial order", default=5, cast=int)
+        iters = ask("  Clipping iterations", default=8, cast=int)
+        payload = cmd_normalize(make_args(spectrum=raw, poly_order=order,
+                                          iterations=iters))
+        spectrum = payload["output"]
+        print(f"  Using normalized spectrum: {spectrum}\n")
+        # carry target info over from the raw FITS header (fill gaps only)
+        hdr = fits_header_info(raw)
+        if not kw.get("obstime") and hdr["obstime"]:
+            kw["obstime"] = hdr["obstime"]
+            print(f"  FITS header: DATE-OBS = {kw['obstime']}")
+        if kw.get("ra") is None and hdr["ra"] is not None:
+            kw["ra"], kw["dec"] = hdr["ra"], hdr["dec"]
+            print(f"  FITS header: RA = {kw['ra']:.5f} deg, "
+                  f"Dec = {kw['dec']:.5f} deg")
+
     template = ask("Synthetic template file (.prf/.obs/ASCII; "
                    "empty: download PHOENIX)",
                    allow_empty=True,
                    validate=lambda p: p is None or os.path.isfile(p))
-    kw = dict(spectrum=spectrum, template=template)
+    kw.update(spectrum=spectrum, template=template)
     if template is None:
         kw["teff"] = ask("  Template T_eff [K]", cast=float)
         kw["logg"] = ask("  Template log g", default=4.5, cast=float)
@@ -724,25 +1039,14 @@ def _ask_common_inputs():
     return kw
 
 
-def _ask_barycentric(kw):
-    yanit = ask("Apply barycentric correction? (y/n)", default="n",
-                cast=str, validate=lambda s: s.lower() in ("y", "n"))
-    if yanit.lower() == "y":
-        kw["ra"] = ask("  RA [deg]", cast=float)
-        kw["dec"] = ask("  Dec [deg]", cast=float)
-        kw["obstime"] = ask("  Observation time (ISOT, e.g. 2024-12-03T02:30:00)")
-        kw["site"] = ask("  Observatory (astropy site name: tug, paranal, ...)",
-                         default="tug")
-    return kw
-
-
 def run_terminal_wizard():
     """Step-by-step RV analysis in the terminal (when the GUI cannot open)."""
     print("=" * 60)
     print(" RV ANALYSIS — interactive terminal mode")
     print("=" * 60)
 
-    kw = _ask_common_inputs()
+    kw = _ask_target({})
+    kw = _ask_common_inputs(kw)
 
     print("\nWhich method do you want to continue with?")
     print("  [1] CCF — cross-correlation (practical for single stars / SB1)")
@@ -754,7 +1058,6 @@ def run_terminal_wizard():
         kw["rv_min"] = ask("RV scan lower limit [km/s]", default=-200.0, cast=float)
         kw["rv_max"] = ask("RV scan upper limit [km/s]", default=200.0, cast=float)
         kw["rv_step"] = ask("RV step [km/s]", default=0.5, cast=float)
-        kw = _ask_barycentric(kw)
         print()
         cmd_ccf(make_args(**kw))
     else:
@@ -765,7 +1068,6 @@ def run_terminal_wizard():
         kw["smooth"] = ask("BF smoothing FWHM [km/s] (empty: auto)",
                            allow_empty=True, cast=float)
         kw["svd_rcond"] = ask("SVD cutoff", default=1e-3, cast=float)
-        kw = _ask_barycentric(kw)
         print()
         cmd_bf(make_args(**kw))
 
@@ -774,11 +1076,14 @@ def run_terminal_wizard():
 
 
 def run_gui():
-    """Minimal tkinter widget: file pickers, CCF/BF choice, embedded fit plot.
+    """Minimal tkinter widget.
 
-    The analysis core is shared with the CLI (cmd_ccf/cmd_bf); the result
-    text is shown in the window and the files (result_*.txt, result_*.png)
-    are written to disk as usual.
+    Sections, top to bottom: target (SIMBAD lookup with manual-coordinate
+    fallback, for the barycentric correction), input files (with a
+    'Normalize raw...' dialog for un-normalized spectra), wavelength
+    range, CCF/BF method choice, Run, result text and the embedded fit
+    plot. The analysis core is shared with the CLI (cmd_ccf/cmd_bf); the
+    result files (result_*.txt, result_*.png) are written to disk as usual.
     """
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox
@@ -793,9 +1098,6 @@ def run_gui():
     root.rowconfigure(0, weight=1)
     main.columnconfigure(1, weight=1)
 
-    spec_var = tk.StringVar()
-    tpl_var = tk.StringVar()
-
     def browse(var, title):
         p = filedialog.askopenfilename(
             title=title,
@@ -805,25 +1107,77 @@ def run_gui():
         if p:
             var.set(p)
 
-    # --- input files ---
-    ttk.Label(main, text="Normalized spectrum:").grid(row=0, column=0, sticky="w")
-    ttk.Entry(main, textvariable=spec_var, width=48).grid(row=0, column=1,
-                                                          sticky="ew", padx=4)
-    ttk.Button(main, text="Browse...",
-               command=lambda: browse(spec_var, "Select normalized spectrum")
-               ).grid(row=0, column=2)
+    # --- target / barycentric correction ---
+    target_var = tk.StringVar()
+    ra_var, dec_var = tk.StringVar(), tk.StringVar()
+    time_var, site_var = tk.StringVar(), tk.StringVar(value="paranal")
 
-    ttk.Label(main, text="Synthetic spectrum:").grid(row=1, column=0, sticky="w")
-    ttk.Entry(main, textvariable=tpl_var, width=48).grid(row=1, column=1,
+    trow = ttk.LabelFrame(main, text="Target (optional, for barycentric "
+                                     "correction)", padding=6)
+    trow.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+
+    ttk.Label(trow, text="Name:").grid(row=0, column=0, sticky="w")
+    ttk.Entry(trow, textvariable=target_var, width=18).grid(row=0, column=1,
+                                                            padx=2)
+
+    def simbad_lookup():
+        name = target_var.get().strip()
+        if not name:
+            messagebox.showinfo("SIMBAD", "Enter a star name first.")
+            return
+        try:
+            ra, dec = resolve_target(name)
+        except ValueError as exc:
+            messagebox.showwarning(
+                "SIMBAD", f"{exc}\n\nEnter the coordinates manually "
+                          "in the RA/Dec fields.")
+            return
+        ra_var.set(f"{ra:.5f}")
+        dec_var.set(f"{dec:.5f}")
+
+    ttk.Button(trow, text="SIMBAD", command=simbad_lookup).grid(row=0, column=2,
+                                                                padx=(2, 12))
+    ttk.Label(trow, text="RA [deg]:").grid(row=0, column=3)
+    ttk.Entry(trow, textvariable=ra_var, width=10).grid(row=0, column=4, padx=2)
+    ttk.Label(trow, text="Dec [deg]:").grid(row=0, column=5)
+    ttk.Entry(trow, textvariable=dec_var, width=10).grid(row=0, column=6, padx=2)
+
+    ttk.Label(trow, text="Obs time (ISOT):").grid(row=1, column=0, columnspan=2,
+                                                  sticky="w", pady=(4, 0))
+    ttk.Entry(trow, textvariable=time_var, width=20).grid(row=1, column=2,
+                                                          columnspan=2,
+                                                          sticky="w",
+                                                          pady=(4, 0))
+    ttk.Label(trow, text="Site:").grid(row=1, column=4, sticky="e", pady=(4, 0))
+    ttk.Entry(trow, textvariable=site_var, width=10).grid(row=1, column=5,
+                                                          columnspan=2,
+                                                          sticky="w",
+                                                          pady=(4, 0))
+
+    # --- input files ---
+    spec_var = tk.StringVar()
+    tpl_var = tk.StringVar()
+
+    ttk.Label(main, text="Normalized spectrum:").grid(row=1, column=0, sticky="w")
+    ttk.Entry(main, textvariable=spec_var, width=48).grid(row=1, column=1,
+                                                          sticky="ew", padx=4)
+    fbtns = ttk.Frame(main)
+    fbtns.grid(row=1, column=2, sticky="w")
+    ttk.Button(fbtns, text="Browse...",
+               command=lambda: browse(spec_var, "Select normalized spectrum")
+               ).pack(side="left")
+
+    ttk.Label(main, text="Synthetic spectrum:").grid(row=2, column=0, sticky="w")
+    ttk.Entry(main, textvariable=tpl_var, width=48).grid(row=2, column=1,
                                                          sticky="ew", padx=4)
     ttk.Button(main, text="Browse...",
                command=lambda: browse(tpl_var, "Select synthetic spectrum")
-               ).grid(row=1, column=2)
+               ).grid(row=2, column=2, sticky="w")
 
     # --- wavelength range ---
     wmin_var, wmax_var = tk.StringVar(), tk.StringVar()
     wrow = ttk.Frame(main)
-    wrow.grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
+    wrow.grid(row=3, column=0, columnspan=3, sticky="w", pady=(6, 0))
     ttk.Label(wrow, text="Wavelength range [Å]:").pack(side="left")
     ttk.Entry(wrow, textvariable=wmin_var, width=8).pack(side="left", padx=(4, 2))
     ttk.Label(wrow, text="–").pack(side="left")
@@ -833,7 +1187,7 @@ def run_gui():
     # --- method ---
     method_var = tk.StringVar(value="BF")
     mrow = ttk.Frame(main)
-    mrow.grid(row=3, column=0, columnspan=3, sticky="w", pady=(6, 0))
+    mrow.grid(row=4, column=0, columnspan=3, sticky="w", pady=(6, 0))
     ttk.Label(mrow, text="Method:").pack(side="left")
 
     ccf_frame = ttk.Frame(main)
@@ -842,10 +1196,10 @@ def run_gui():
     def on_method_change():
         if method_var.get() == "CCF":
             bf_frame.grid_remove()
-            ccf_frame.grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 0))
+            ccf_frame.grid(row=5, column=0, columnspan=3, sticky="w", pady=(4, 0))
         else:
             ccf_frame.grid_remove()
-            bf_frame.grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 0))
+            bf_frame.grid(row=5, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
     ttk.Radiobutton(mrow, text="CCF (single star)", variable=method_var,
                     value="CCF", command=on_method_change
@@ -876,42 +1230,21 @@ def run_gui():
                  state="readonly").grid(row=0, column=4, padx=4)
     on_method_change()
 
-    # --- run + results + plot ---
-    result_text = tk.Text(main, height=7, width=90, state="disabled",
+    # --- results + plot ---
+    result_text = tk.Text(main, height=8, width=90, state="disabled",
                           font=("Courier", 10))
-    result_text.grid(row=6, column=0, columnspan=3, sticky="ew", pady=6)
+    result_text.grid(row=7, column=0, columnspan=3, sticky="ew", pady=6)
 
     plot_frame = ttk.Frame(main)
-    plot_frame.grid(row=7, column=0, columnspan=3, sticky="nsew")
-    main.rowconfigure(7, weight=1)
+    plot_frame.grid(row=8, column=0, columnspan=3, sticky="nsew")
+    main.rowconfigure(8, weight=1)
     canvas_holder = {"canvas": None}
 
     def _f(var, default=None):
         s = var.get().strip()
         return float(s) if s else default
 
-    def run_analysis():
-        try:
-            if not spec_var.get().strip():
-                raise ValueError("No normalized spectrum file selected.")
-            if not tpl_var.get().strip():
-                raise ValueError("No synthetic spectrum file selected.")
-            kw = dict(spectrum=spec_var.get().strip(),
-                      template=tpl_var.get().strip(),
-                      wave_min=_f(wmin_var), wave_max=_f(wmax_var))
-            if method_var.get() == "CCF":
-                kw.update(rv_min=_f(rvmin_var, -200.0),
-                          rv_max=_f(rvmax_var, 200.0),
-                          rv_step=_f(rvstep_var, 0.5))
-                payload = cmd_ccf(make_args(**kw))
-            else:
-                kw.update(vel_range=_f(vrange_var, 400.0),
-                          components=int(comp_var.get()))
-                payload = cmd_bf(make_args(**kw))
-        except Exception as exc:
-            messagebox.showerror("Error", str(exc))
-            return
-
+    def show_payload(payload):
         result_text.configure(state="normal")
         result_text.delete("1.0", "end")
         result_text.insert("1.0", payload["text"] + "\n"
@@ -925,8 +1258,110 @@ def run_gui():
         canvas.get_tk_widget().pack(fill="both", expand=True)
         canvas_holder["canvas"] = canvas
 
+    # --- normalization dialog for raw spectra ---
+    def normalize_dialog():
+        dlg = tk.Toplevel(root)
+        dlg.title("Normalize raw spectrum")
+        dlg.transient(root)
+        frm = ttk.Frame(dlg, padding=10)
+        frm.grid(row=0, column=0)
+
+        raw_var = tk.StringVar()
+        ord_var = tk.StringVar(value="5")
+        it_var = tk.StringVar(value="8")
+
+        ttk.Label(frm, text="Raw spectrum (FITS/ASCII):").grid(row=0, column=0,
+                                                               sticky="w")
+        ttk.Entry(frm, textvariable=raw_var, width=42).grid(row=0, column=1,
+                                                            padx=4)
+        ttk.Button(frm, text="Browse...",
+                   command=lambda: browse(raw_var, "Select raw spectrum")
+                   ).grid(row=0, column=2)
+
+        prow = ttk.Frame(frm)
+        prow.grid(row=1, column=0, columnspan=3, sticky="w", pady=6)
+        ttk.Label(prow, text="Polynomial order").pack(side="left")
+        ttk.Entry(prow, textvariable=ord_var, width=4).pack(side="left", padx=(2, 12))
+        ttk.Label(prow, text="Iterations").pack(side="left")
+        ttk.Entry(prow, textvariable=it_var, width=4).pack(side="left", padx=2)
+
+        ttk.Label(frm, text="Preview overlays the result on the synthetic\n"
+                            "spectrum; adjust the order until they match, "
+                            "then press Use.", justify="left"
+                  ).grid(row=2, column=0, columnspan=3, sticky="w")
+
+        state = {"payload": None}
+
+        def do_preview():
+            try:
+                if not raw_var.get().strip():
+                    raise ValueError("No raw spectrum file selected.")
+                kw = dict(spectrum=raw_var.get().strip(),
+                          template=tpl_var.get().strip() or None,
+                          poly_order=int(ord_var.get()),
+                          iterations=int(it_var.get()))
+                state["payload"] = cmd_normalize(make_args(**kw))
+            except Exception as exc:
+                messagebox.showerror("Error", str(exc), parent=dlg)
+                return
+            show_payload(state["payload"])
+            # auto-fill target info from the FITS header, if present
+            hdr = fits_header_info(raw_var.get().strip())
+            if hdr["obstime"] and not time_var.get().strip():
+                time_var.set(hdr["obstime"])
+            if hdr["ra"] is not None and not ra_var.get().strip():
+                ra_var.set(f"{hdr['ra']:.5f}")
+                dec_var.set(f"{hdr['dec']:.5f}")
+            if hdr["object"] and not target_var.get().strip():
+                target_var.set(str(hdr["object"]))
+
+        def do_use():
+            if state["payload"] is None:
+                do_preview()
+            if state["payload"] is not None:
+                spec_var.set(state["payload"]["output"])
+                dlg.destroy()
+
+        brow = ttk.Frame(frm)
+        brow.grid(row=3, column=0, columnspan=3, pady=(8, 0))
+        ttk.Button(brow, text="Preview", command=do_preview).pack(side="left",
+                                                                  padx=4)
+        ttk.Button(brow, text="Use", command=do_use).pack(side="left", padx=4)
+
+    ttk.Button(fbtns, text="Normalize raw...", command=normalize_dialog
+               ).pack(side="left", padx=(4, 0))
+
+    def run_analysis():
+        try:
+            if not spec_var.get().strip():
+                raise ValueError("No normalized spectrum file selected "
+                                 "(use 'Normalize raw...' if you only have "
+                                 "a raw spectrum).")
+            if not tpl_var.get().strip():
+                raise ValueError("No synthetic spectrum file selected.")
+            kw = dict(spectrum=spec_var.get().strip(),
+                      template=tpl_var.get().strip(),
+                      wave_min=_f(wmin_var), wave_max=_f(wmax_var),
+                      object=target_var.get().strip() or None,
+                      ra=_f(ra_var), dec=_f(dec_var),
+                      obstime=time_var.get().strip() or None,
+                      site=site_var.get().strip() or "paranal")
+            if method_var.get() == "CCF":
+                kw.update(rv_min=_f(rvmin_var, -200.0),
+                          rv_max=_f(rvmax_var, 200.0),
+                          rv_step=_f(rvstep_var, 0.5))
+                payload = cmd_ccf(make_args(**kw))
+            else:
+                kw.update(vel_range=_f(vrange_var, 400.0),
+                          components=int(comp_var.get()))
+                payload = cmd_bf(make_args(**kw))
+        except Exception as exc:
+            messagebox.showerror("Error", str(exc))
+            return
+        show_payload(payload)
+
     ttk.Button(main, text="Run", command=run_analysis
-               ).grid(row=5, column=0, columnspan=3, pady=6)
+               ).grid(row=6, column=0, columnspan=3, pady=6)
 
     root.mainloop()
 
@@ -958,6 +1393,8 @@ def add_common_args(p):
     p.add_argument("--feh", type=float, default=0.0, help="Template [Fe/H]")
     p.add_argument("--wave-min", type=float, help="Minimum wavelength to use [A]")
     p.add_argument("--wave-max", type=float, help="Maximum wavelength to use [A]")
+    p.add_argument("--object", help="Star name; coordinates are resolved via "
+                                    "SIMBAD for the barycentric correction")
     p.add_argument("--ra", type=float, help="RA [deg] for barycentric correction")
     p.add_argument("--dec", type=float, help="Dec [deg] for barycentric correction")
     p.add_argument("--obstime", help="Observation time (ISOT, e.g. 2024-12-03T02:30:00)")
@@ -1008,6 +1445,31 @@ def main():
     p_bf.add_argument("--min-sep", type=float, default=30.0,
                       help="Minimum separation of the two peaks [km/s]")
     p_bf.set_defaults(func=cmd_bf)
+
+    p_norm = sub.add_parser("normalize",
+                            help="Continuum-normalize a raw spectrum "
+                                 "(iterative polynomial fitting)")
+    p_norm.add_argument("--spectrum", required=True, help="Raw spectrum file")
+    p_norm.add_argument("--format", default="auto",
+                        choices=["auto", "s2d", "text"])
+    p_norm.add_argument("--poly-order", type=int, default=5,
+                        help="Continuum polynomial order")
+    p_norm.add_argument("--iterations", type=int, default=8,
+                        help="Sigma-clipping iterations")
+    p_norm.add_argument("--low-clip", type=float, default=1.0,
+                        help="Rejection threshold below the fit [sigma]")
+    p_norm.add_argument("--high-clip", type=float, default=4.0,
+                        help="Rejection threshold above the fit [sigma]")
+    p_norm.add_argument("--template",
+                        help="Synthetic spectrum to overlay for comparison")
+    p_norm.add_argument("--teff", type=float, help="Template T_eff [K] (expecto)")
+    p_norm.add_argument("--logg", type=float, default=4.5, help="Template log g")
+    p_norm.add_argument("--feh", type=float, default=0.0, help="Template [Fe/H]")
+    p_norm.add_argument("--output", help="Output ASCII file "
+                                         "(default: <input>_norm.txt)")
+    p_norm.add_argument("--plot", help="Figure PNG file name "
+                                       "(default: result_normalization.png)")
+    p_norm.set_defaults(func=cmd_normalize)
 
     p_demo = sub.add_parser("demo",
                             help="CCF vs BF comparison on synthetic SB2 data")
