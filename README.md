@@ -70,18 +70,51 @@ Argümansız çalıştırın:
 python rv_analysis.py
 ```
 
-- Sisteminizde **tkinter** varsa bir widget penceresi açılır:
-  1. **Veri dosyaları** — gözlemsel tayf ve sentetik/şablon tayf dosyalarını
-     "Gözat..." ile seçin (şablon boş bırakılırsa T_eff/log g/[Fe/H] alanlarıyla
-     PHOENIX modeli indirilir), istenirse dalgaboyu aralığı girin.
-  2. **Yöntem seçimi** — "Hangi yöntemle devam etmek istiyorsun?": CCF veya BF
-     işaretlenir; seçime göre ilgili parametre alanları görünür.
-  3. **Hesapla** — sonuç metni pencerede, uyum grafiği pencereye gömülü olarak
+- Sisteminizde **tkinter** varsa sade, İngilizce bir widget penceresi açılır:
+  1. **Normalized spectrum** ve **Synthetic spectrum** dosyalarını
+     "Browse..." ile seçin; istenirse dalgaboyu aralığı girin.
+  2. **Method** — CCF veya BF işaretlenir; seçime göre yalnızca ilgili
+     parametre alanları görünür (CCF: RV tarama aralığı; BF: hız penceresi
+     ve bileşen sayısı).
+  3. **Run** — sonuç metni pencerede, uyum grafiği pencereye gömülü olarak
      gösterilir; aynı anda `result_CCF.txt`/`result_BF.txt` ve
      `result_CCF.png`/`result_BF.png` diske kaydedilir.
 - tkinter/ekran yoksa aynı akış **terminal soru-cevap sihirbazı** olarak
   çalışır (dosya yolları, yöntem seçimi `[1] CCF / [2] BF`, parametreler,
   isteğe bağlı barycentric düzeltme) ve aynı çıktı dosyaları üretilir.
+
+### Desteklenen dosya biçimleri
+
+Metin okuyucu kasıtlı olarak toleranslıdır — gerçek veri dosyalarında sık
+görülen şu durumların hepsi otomatik ele alınır:
+
+- `.txt`, `.dat`, `.ascii`, `.obs`, `.prf` (synth3/SynthV çıktısı) ve benzeri
+  her ASCII tablo: ilk iki sayısal sütun dalgaboyu [Å] ve akı kabul edilir
+- `#`, `;`, `!`, `%` ile başlayan yorum satırları atlanır
+- SynthV `.prf` başlık satırları gibi, veri satırlarından farklı sütun
+  sayısına sahip satırlar elenir
+- **`-` gibi sayı olmayan yer tutucular** NaN sayılır ve o satır atılır
+  (BinMag'daki `could not convert string '-' to float64` hatası burada oluşmaz)
+- Fortran `D`-üslü sayılar (`0.995D+00`) desteklenir
+- ESPRESSO S2D FITS (çok basamaklı echelle) ayrıca desteklenir
+
+### Örnek veri dosyaları (BinMag'daki gibi)
+
+`examples/` klasöründe bilinen cevaplı iki örnek dosya vardır:
+
+| Dosya | İçerik |
+|---|---|
+| `examples/example_observed.obs` | Normalize gözlemsel tayf (sentetik SB2 çifti, 5000–5500 Å). Gerçek değerler: **RV1 = −70, RV2 = +90 km/s, ışık oranı 0.40**. Üçüncü sütunda ara ara `-` yer tutucusu vardır — okuyucunun dayanıklılığını da örnekler. |
+| `examples/example_synthetic.prf` | Sentetik şablon tayf, synth3/SynthV `.prf` biçiminde (başlık satırı + dalgaboyu/akı sütunları). |
+
+Deneme:
+
+```bash
+python rv_analysis.py bf --spectrum examples/example_observed.obs \
+    --template examples/example_synthetic.prf \
+    --vel-range 300 --components 2 --smooth 10 --svd-rcond 5e-4
+# Component 1: RV = -70.01 km/s, Component 2: RV = +90.02 km/s, ışık oranı 0.398
+```
 
 Her analiz sonunda otomatik üretilen çıktılar (CLI modunda da geçerli):
 
