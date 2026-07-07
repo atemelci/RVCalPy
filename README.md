@@ -290,6 +290,57 @@ kendi başlığından okunur.
   tamamen harmanlanır; bu noktaların hatası büyük çıkar — yörünge çözümüne
   sokmadan önce ayıklamak en sağlıklısıdır.
 
+### Çözünürlük (R) ve vsini — şablon hazırlama
+
+Sentetik tayflar pratikte "sonsuz" çözünürlüklü ve dönmesizdir; gözlemsel
+tayfla anlamlı karşılaştırma için, ölçümden **önce** iki etki kullanıcı
+seçimiyle şablona uygulanır (her teleskop/tayfçekerde farklıdır):
+
+- `--resolution R` — tayfçekerin ayırma gücü R = λ/Δλ. Şablon, FWHM = c/R
+  [km/s] Gauss'u ile konvolve edilir (FEROS R≈48000 → 6.2 km/s,
+  ESPRESSO R≈140000 → 2.1 km/s).
+- `--vsini` [km/s] — izdüşümsel dönme hızı; Gray (1992) dönme profili ile
+  (kenar kararma katsayısı `--epsilon`, varsayılan 0.6).
+
+Widget'ta bu ikisi "Resolution R" ve "vsini [km/s]" kutularıdır; boş
+bırakılırsa uygulanmaz. **BF/CCF işlemi bu hazırlıktan sonra yapılır.**
+
+> Not: Şablonu genişletmek (R ya da vsini) SVD dizayn matrisini daha kötü
+> koşullu yapar; bu yüzden BF'de küçük bir SVD kesme eşiği gerekir. Varsayılan
+> `--svd-rcond 1e-3` bütün durumlarda (keskin/genişletilmiş şablon, dar/geniş
+> bölge) temiz sonuç verir. Referans dokümandaki `0` değeri yalnızca keskin
+> şablon + dar, çizgi-zengini bölgede kararlıdır; `0` verildiğinde BF patlarsa
+> kod eşiği otomatik yükseltip uyarır.
+
+### Model güvenilirlik kontrolü (line check)
+
+Her CCF/BF çalışmasının sonunda, ölçülen RV ile kaydırılmış sentetik tayfın
+gözlemsel tayfa uyumu **güçlü tanı çizgilerinde** ayrı bir görselle
+gösterilir: `result_BF_linecheck.png` / `result_CCF_linecheck.png`.
+
+- Denetlenen çizgiler (kapsamdaysa): **Hα 6563, Hβ 4861, Mg üçlüsü
+  5167/5173/5184 Å**. Bunların hiçbiri aralıkta değilse en derin üç soğurma
+  penceresi otomatik seçilir.
+- Her çizgi için istatistiksel ölçütler hem grafiğe hem sonuç dosyasına
+  yazılır: artık **RMS**'i, **Pearson korelasyonu** (r) ve **çizgi derinliği
+  oranı** (gözlem/model). Korelasyon 1'e, derinlik oranı 1'e yakınsa model
+  güvenilirdir; oran 1'den uzaksa şablon parametreleri (T_eff, [Fe/H]),
+  çözünürlük veya vsini seçimi gözden geçirilmelidir. SB2'de çizgiler
+  seyreltildiği için oran doğal olarak 1'in altına düşer.
+
+### FITS başlığını okuma (bağımsız özellik)
+
+Tayf dosyasının (genellikle .fits) başlığını doğrudan görüntülemek için:
+
+```bash
+python rv_analysis.py header --spectrum gozlem.fits --output baslik.txt
+```
+
+Özet (OBJECT, DATE-OBS, RA/Dec, EXPTIME ve koordinat+zaman varsa poz ortası
+BJD_TDB) ile birlikte tüm birincil başlık kartları yazdırılır. Widget'ta aynı
+işi "Header" düğmesi yapar ve OBJECT/RA/Dec/DATE-OBS alanlarını Target
+bölümüne otomatik doldurur.
+
 ## Önemli parametreler (BF)
 
 | Parametre | Anlamı | Öneri |

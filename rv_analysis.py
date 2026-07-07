@@ -507,14 +507,20 @@ def run_ccf(spectrum_orders, tpl_wl, tpl_flux, rv_min, rv_max, rv_step):
     rv_grid = np.arange(rv_min, rv_max + rv_step, rv_step)
     tpl_norm = tpl_flux / np.nanmax(tpl_flux)
 
+    # margin so that the Doppler-shifted template still covers the order
+    max_shift = max(abs(rv_min), abs(rv_max)) / C_KMS
+    lo = tpl_wl.min() * (1.0 + max_shift)
+    hi = tpl_wl.max() * (1.0 - max_shift)
+
     ccf_orders = []
     for k, (wl, fx) in enumerate(spectrum_orders):
         good = np.isfinite(wl) & np.isfinite(fx)
         wl, fx = wl[good], fx[good]
+        # clip to the template coverage (a tiny edge mismatch after
+        # resampling must not discard the whole order)
+        sel = (wl >= lo) & (wl <= hi)
+        wl, fx = wl[sel], fx[sel]
         if wl.size < 10:
-            continue
-        # skip orders not covered by the template
-        if wl.min() < tpl_wl.min() or wl.max() > tpl_wl.max():
             continue
         peak = np.nanmax(fx)
         if peak <= 0:
@@ -556,8 +562,65 @@ def log_wave_grid(wl_min, wl_max, dv_kms):
     return wl_min * np.exp(step * np.arange(n))
 
 
+def prepare_template(tpl_wl, tpl_flux, resolution=None, vsini=None,
+                     epsilon=0.6):
+    """Degrade the synthetic template BEFORE the BF/CCF measurement.
+
+    Sentetik tayflar pratikte 'sonsuz' çözünürlüklü ve dönmesizdir; gözlenen
+    tayfla karşılaştırılmadan önce iki etki uygulanmalıdır (kullanıcı
+    seçimi — her teleskop/tayfçekerde farklıdır):
+
+    resolution : spectrograph resolving power R = lambda/dlambda.
+        The template is convolved with a Gaussian of FWHM = c/R [km/s]
+        (e.g. FEROS R=48000 -> 6.2 km/s, ESPRESSO R=140000 -> 2.1 km/s).
+        Note: broadening the template makes the SVD design matrix more
+        ill-conditioned, so a small svd_rcond (default 1e-3) is used
+        afterwards for a clean BF (see compute_bf).
+    vsini : projected rotational velocity [km/s].
+        Rotational broadening with the Gray (1992) profile using the
+        linear limb-darkening coefficient `epsilon` (default 0.6).
+
+    Both convolutions are carried out on a constant-velocity (log-lambda)
+    grid, so a single kernel is exact across the whole wavelength range.
+    Returns the (possibly resampled) template (wavelength, flux).
+    """
+    if not resolution and not vsini:
+        return tpl_wl, tpl_flux
+
+    good = np.isfinite(tpl_wl) & np.isfinite(tpl_flux)
+    tpl_wl, tpl_flux = tpl_wl[good], tpl_flux[good]
+    # constant-velocity grid at the template's own median pixel size
+    pix = np.median(np.diff(tpl_wl)) / np.median(tpl_wl) * C_KMS
+    dv = max(min(pix, 2.0), 0.2)
+    grid = log_wave_grid(tpl_wl.min(), tpl_wl.max(), dv)
+    flux = np.interp(grid, tpl_wl, tpl_flux)
+
+    if vsini and vsini > 0:
+        nk = max(int(np.ceil(vsini / dv)), 1)
+        v = np.arange(-nk, nk + 1) * dv
+        x = v / float(vsini)
+        kern = np.zeros_like(x)
+        inside = np.abs(x) < 1.0
+        # Gray (1992) rotational profile with linear limb darkening
+        kern[inside] = (2.0 * (1.0 - epsilon) * np.sqrt(1.0 - x[inside] ** 2)
+                        + 0.5 * np.pi * epsilon * (1.0 - x[inside] ** 2))
+        kern /= kern.sum()
+        flux = np.convolve(flux, kern, mode="same")
+        print(f"Template: rotational broadening vsini = {vsini:g} km/s "
+              f"(epsilon = {epsilon:g}) applied")
+
+    if resolution and resolution > 0:
+        fwhm_kms = C_KMS / float(resolution)
+        sigma_pix = fwhm_kms / 2.35482 / dv
+        flux = gaussian_filter1d(flux, sigma_pix)
+        print(f"Template: degraded to R = {resolution:g} "
+              f"(instrumental FWHM = {fwhm_kms:.2f} km/s)")
+
+    return grid, flux
+
+
 def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
-               vel_range=400.0, dv=None, svd_rcond=0.0, smooth_kms=None):
+               vel_range=400.0, dv=None, svd_rcond=1e-3, smooth_kms=None):
     """Broadening Function following the reference implementation
     (BF_main.txt; Rucinski 1999 via PyAstronomy's pyasl.SVD).
 
@@ -580,7 +643,12 @@ def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
     ----------
     vel_range : half-width of the BF window [km/s]
     dv        : velocity step stepV [km/s]; None -> from the median data pixel
-    svd_rcond : relative singular-value cutoff (0 = none, as the reference)
+    svd_rcond : relative singular-value cutoff. The reference uses 0 (no
+        truncation), which is stable only for a sharp template over a
+        line-rich, narrow region. Broadened templates and continuum-
+        dominated ranges need a small cutoff; the default 1e-3 works
+        across all cases. When 0 is requested and the BF still blows up
+        (DC null space), the cutoff is auto-escalated with a printed note.
     smooth_kms: smoothing FWHM [km/s]; None -> sigma = 2 bins (reference)
 
     Returns: dict(velocity, bf, bf_smooth, dv, n_kept_sv, n_sv)
@@ -614,13 +682,15 @@ def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
         raise ValueError("Spectrum segment too short for the BF window; "
                          "widen the wavelength range or reduce vel-range.")
 
+    # decompose once; the SVD (u, w, v) is reused for any cutoff
     try:
         from PyAstronomy import pyasl
         svd = pyasl.SVD()
         svd.decompose(tpl, m)
         w = np.ravel(np.asarray(svd.getSingularValues()))
-        wlimit = svd_rcond * w.max() if svd_rcond > 0 else 0.0
-        bf = svd.getBroadeningFunction(obs, wlimit=wlimit, asarray=True)
+        rhs_valid = obs                       # pyasl selects the valid window
+        solve = lambda lim: svd.getBroadeningFunction(obs, wlimit=lim,
+                                                      asarray=True)
         velocity = svd.getRVAxis(r, 1)
     except ImportError:
         # exact NumPy replication of pyasl.SVD
@@ -629,10 +699,31 @@ def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
         for i in range(m):
             des[:, i] = tpl[i:i + nn]
         U, w, Vt = np.linalg.svd(des, full_matrices=False)
-        wlimit = svd_rcond * w.max() if svd_rcond > 0 else 0.0
-        winv = np.where(w > wlimit, 1.0 / w, 0.0)
-        bf = Vt.T @ (winv * (U.T @ obs[m // 2: len(obs) - (m // 2)]))
+        rhs = obs[m // 2: len(obs) - (m // 2)]
+
+        def solve(lim):
+            winv = np.where(w > lim, 1.0 / w, 0.0)
+            return Vt.T @ (winv * (U.T @ rhs))
         velocity = (-np.arange(m) + m // 2) * r * C_KMS
+
+    # Reference default is no truncation (svd_rcond=0). On continuum-
+    # dominated / sparsely-lined regions the smallest singular values make
+    # the solution blow up (DC null space). Guard against it: if the BF
+    # amplitude is unphysical (a normalized-flux BF is O(1)), escalate the
+    # relative cutoff until the solution is stable, and report it.
+    wlimit = svd_rcond * w.max() if svd_rcond > 0 else 0.0
+    bf = solve(wlimit)
+    if svd_rcond <= 0 and np.max(np.abs(bf)) > 10.0:
+        for rc in (1e-4, 3e-4, 1e-3, 3e-3, 1e-2):
+            wlimit = rc * w.max()
+            bf = solve(wlimit)
+            if np.max(np.abs(bf)) <= 10.0:
+                print(f"Note: BF was unstable at svd_rcond=0 (continuum-"
+                      f"dominated region); auto-regularized to "
+                      f"svd_rcond={rc:g}. Pass --svd-rcond to set it "
+                      "explicitly.")
+                break
+    bf = np.ravel(np.asarray(bf))
     n_sv = m
     n_kept = int((w > wlimit).sum())
 
@@ -755,6 +846,96 @@ def save_figure(fig, outfile):
     print(f"Figure saved: {outfile}")
 
 
+# strong diagnostic lines for the model-reliability check
+DIAGNOSTIC_LINES = [
+    ("Halpha 6563", 6562.79),
+    ("Hbeta 4861", 4861.35),
+    ("Mg b 5184", 5183.60),
+    ("Mg b 5173", 5172.68),
+    ("Mg b 5167", 5167.32),
+]
+
+
+def build_rv_model(spec_wl, tpl_wl, tpl_flux, comps):
+    """Model spectrum on the data grid from the measured (observed-frame)
+    RVs: the template shifted per component and, for SB2, combined with
+    the light ratio estimated from the BF areas (amp*sigma)."""
+    if len(comps) == 1:
+        return np.interp(spec_wl, doppler_shift(tpl_wl, comps[0]["rv"]),
+                         tpl_flux)
+    a1 = abs(comps[0].get("amp", 1.0) * comps[0].get("sigma", 1.0))
+    a2 = abs(comps[1].get("amp", 1.0) * comps[1].get("sigma", 1.0))
+    lr = a2 / a1 if a1 > 0 else 1.0
+    f1 = np.interp(spec_wl, doppler_shift(tpl_wl, comps[0]["rv"]), tpl_flux)
+    f2 = np.interp(spec_wl, doppler_shift(tpl_wl, comps[1]["rv"]), tpl_flux)
+    return (f1 + lr * f2) / (1.0 + lr)
+
+
+def line_check(spec_wl, spec_flux, tpl_wl, tpl_flux, comps,
+               window=12.0, method="BF"):
+    """Reliability check of the RV solution: the observed normalized
+    spectrum is compared with the model (template shifted by the measured
+    RVs) in windows around strong diagnostic lines (Halpha 6563, Hbeta
+    4861, Mg triplet 5167/5173/5184 A). For every line the residual RMS,
+    the Pearson correlation and the line-depth ratio (observed/model) are
+    computed — depth ratios near 1 and high correlations mean the model
+    is trustworthy.
+
+    Returns (figure, stats) where stats is a list of dicts per line.
+    """
+    from matplotlib.figure import Figure
+
+    model = build_rv_model(spec_wl, tpl_wl, tpl_flux, comps)
+
+    # diagnostic lines covered by the data; fall back to the deepest
+    # absorption windows when none of the classic lines is in range
+    targets = [(name, w0) for name, w0 in DIAGNOSTIC_LINES
+               if spec_wl.min() + window < w0 < spec_wl.max() - window]
+    if not targets:
+        order = np.argsort(spec_flux)
+        picked = []
+        for idx in order:
+            w0 = spec_wl[idx]
+            if all(abs(w0 - p) > 4 * window for p in picked):
+                picked.append(w0)
+            if len(picked) == 3:
+                break
+        targets = [(f"line {w0:.0f}", w0) for w0 in sorted(picked)]
+
+    stats = []
+    fig = Figure(figsize=(9, 2.6 * len(targets)))
+    axes = fig.subplots(len(targets), 1)
+    if len(targets) == 1:
+        axes = [axes]
+    for ax, (name, w0) in zip(axes, targets):
+        sel = (spec_wl >= w0 - window) & (spec_wl <= w0 + window)
+        ws, os_, ms = spec_wl[sel], spec_flux[sel], model[sel]
+        resid = os_ - ms
+        rms = float(np.std(resid))
+        corr = float(np.corrcoef(os_, ms)[0, 1]) if os_.size > 3 else np.nan
+        d_obs = float(1.0 - np.nanmin(os_))
+        d_mod = float(1.0 - np.nanmin(ms))
+        ratio = d_obs / d_mod if d_mod > 0 else np.nan
+        stats.append(dict(name=name, wavelength=w0, rms=rms, corr=corr,
+                          depth_obs=d_obs, depth_model=d_mod,
+                          depth_ratio=ratio))
+
+        ax.plot(ws, os_, "k-", lw=1.0, label="Observed (normalized)")
+        ax.plot(ws, ms, "r-", lw=1.2, alpha=0.8, label="Model (shifted template)")
+        ax.plot(ws, resid + 1.0 + 1.2 * max(d_obs, d_mod), "-", color="0.6",
+                lw=0.8, label="Residual (offset)")
+        ax.axvline(w0, color="0.8", ls=":", lw=1)
+        ax.set_ylabel("Flux")
+        ax.set_title(f"{name}  |  RMS = {rms:.4f}  r = {corr:.3f}  "
+                     f"depth O/M = {ratio:.3f}", fontsize=10)
+        if ax is axes[0]:
+            ax.legend(fontsize=8, loc="lower right")
+    axes[-1].set_xlabel("Wavelength [Å]")
+    fig.suptitle(f"{method} model reliability check", y=0.995)
+    fig.tight_layout()
+    return fig, stats
+
+
 # ----------------------------------------------------------------------
 # Analysis commands — used by both the CLI and the interactive modes.
 # Results are always written to result_CCF/result_BF (txt + png).
@@ -769,6 +950,12 @@ def cmd_ccf(args):
         orders = [(w[(w >= lo) & (w <= hi)], f[(w >= lo) & (w <= hi)])
                   for w, f in orders]
         orders = [(w, f) for w, f in orders if w.size > 10]
+
+    # user-selected template preparation (R, vsini) BEFORE the measurement
+    tpl_wl, tpl_flux = prepare_template(tpl_wl, tpl_flux,
+                                        resolution=args.resolution,
+                                        vsini=args.vsini,
+                                        epsilon=args.epsilon)
 
     print(f"Computing the CCF over {len(orders)} order(s)/segment(s)...")
     result = run_ccf(orders, tpl_wl, tpl_flux, args.rv_min, args.rv_max, args.rv_step)
@@ -804,6 +991,22 @@ def cmd_ccf(args):
     fig = make_ccf_figure(result)
     save_figure(fig, plotfile)
 
+    # model reliability check at the diagnostic lines
+    mwl = np.concatenate([w for w, _ in orders])
+    mfx = np.concatenate([f for _, f in orders])
+    srt = np.argsort(mwl)
+    check_fig, stats = line_check(mwl[srt], mfx[srt], tpl_wl, tpl_flux,
+                                  [dict(rv=result["rv"])], method="CCF")
+    save_figure(check_fig, "result_CCF_linecheck.png")
+    print("Line check (observed vs model):")
+    with open(outfile, "a") as f:
+        f.write("# line_check: line  RMS  corr  depth_obs/model\n")
+        for s in stats:
+            print(f"  {s['name']:<12} RMS = {s['rms']:.4f}  "
+                  f"r = {s['corr']:.3f}  depth O/M = {s['depth_ratio']:.3f}")
+            f.write(f"# {s['name']}  {s['rms']:.5f}  {s['corr']:.4f}  "
+                    f"{s['depth_ratio']:.4f}\n")
+
     return dict(method="CCF", fig=fig, text=summary,
                 output=outfile, plot=plotfile)
 
@@ -826,6 +1029,11 @@ def cmd_bf(args):
         spec_wl, spec_flux = spec_wl[sel], spec_flux[sel]
 
     tpl_wl, tpl_flux = load_template(args)
+    # user-selected template preparation (R, vsini) BEFORE the BF is solved
+    tpl_wl, tpl_flux = prepare_template(tpl_wl, tpl_flux,
+                                        resolution=args.resolution,
+                                        vsini=args.vsini,
+                                        epsilon=args.epsilon)
 
     print("Solving the BF via SVD...")
     bf_result = compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
@@ -880,6 +1088,19 @@ def cmd_bf(args):
                          bjd=bjd, phase=phase)
     save_figure(fig, plotfile)
 
+    # model reliability check at the diagnostic lines
+    check_fig, stats = line_check(spec_wl, spec_flux, tpl_wl, tpl_flux,
+                                  comps, method="BF")
+    save_figure(check_fig, "result_BF_linecheck.png")
+    print("Line check (observed vs model):")
+    with open(outfile, "a") as f:
+        f.write("# line_check: line  RMS  corr  depth_obs/model\n")
+        for s in stats:
+            print(f"  {s['name']:<12} RMS = {s['rms']:.4f}  "
+                  f"r = {s['corr']:.3f}  depth O/M = {s['depth_ratio']:.3f}")
+            f.write(f"# {s['name']}  {s['rms']:.5f}  {s['corr']:.4f}  "
+                    f"{s['depth_ratio']:.4f}\n")
+
     return dict(method="BF", fig=fig, text=summary,
                 output=outfile, plot=plotfile)
 
@@ -926,7 +1147,9 @@ def cmd_normalize(args):
 
     tpl = None
     if args.template or args.teff is not None:
-        tpl = load_template(args)
+        tpl = prepare_template(*load_template(args),
+                               resolution=args.resolution,
+                               vsini=args.vsini, epsilon=args.epsilon)
 
     outfile = args.output or \
         os.path.splitext(os.path.basename(args.spectrum))[0] + "_norm.txt"
@@ -1070,6 +1293,11 @@ def cmd_batch(args):
     print(f"{len(files)} spectra to process.\n")
 
     tpl_wl, tpl_flux = load_template(args)
+    # user-selected template preparation (R, vsini) BEFORE the measurements
+    tpl_wl, tpl_flux = prepare_template(tpl_wl, tpl_flux,
+                                        resolution=args.resolution,
+                                        vsini=args.vsini,
+                                        epsilon=args.epsilon)
 
     # coordinates once (SIMBAD / explicit); per-file obstime from headers
     ra, dec = args.ra, args.dec
@@ -1191,6 +1419,52 @@ def cmd_batch(args):
                 text=f"{len(rows)} spectra -> {outfile}")
 
 
+def cmd_header(args):
+    """Standalone feature: inspect the FITS header of a spectrum.
+
+    Prints a parsed summary (OBJECT, DATE-OBS, RA/Dec, EXPTIME and the
+    mid-exposure BJD_TDB when coordinates and time are present) followed
+    by the primary-header cards. Use --output to save everything to a
+    text file.
+    """
+    from astropy.io import fits
+
+    info = fits_header_info(args.spectrum)
+    lines = ["================ FITS HEADER ================",
+             f"File     : {args.spectrum}",
+             f"OBJECT   : {info['object']}",
+             f"DATE-OBS : {info['obstime']}",
+             f"RA [deg] : "
+             + (f"{info['ra']:.5f}" if info['ra'] is not None else "-"),
+             f"Dec [deg]: "
+             + (f"{info['dec']:.5f}" if info['dec'] is not None else "-"),
+             f"EXPTIME  : {info['exptime']}"]
+    if info["ra"] is not None and info["obstime"]:
+        try:
+            bjd = compute_bjd(info["obstime"], info["ra"], info["dec"],
+                              args.site, exptime=info["exptime"])
+            lines.append(f"BJD_TDB  : {bjd:.6f}  (mid-exposure)")
+        except Exception as exc:
+            lines.append(f"BJD_TDB  : could not be computed ({exc})")
+    lines.append("=============================================")
+
+    try:
+        with fits.open(args.spectrum) as hdul:
+            lines.append(f"HDUs: {[type(h).__name__ for h in hdul]}")
+            lines.append("--- primary header cards ---")
+            lines.extend(repr(hdul[0].header).splitlines())
+    except Exception as exc:
+        lines.append(f"(primary header could not be read: {exc})")
+
+    text = "\n".join(lines)
+    print(text)
+    if args.output:
+        with open(args.output, "w") as f:
+            f.write(text + "\n")
+        print(f"Header written: {args.output}")
+    return dict(method="header", text=text, info=info)
+
+
 def cmd_demo(args):
     """Generate a synthetic SB2 spectrum and solve it with both CCF and BF.
 
@@ -1309,8 +1583,9 @@ def make_args(**overrides):
                 t0=None, period=None,
                 plot=None, output=None,
                 rv_min=-200.0, rv_max=200.0, rv_step=0.5,
-                vel_range=400.0, dv=None, svd_rcond=0.0, smooth=None,
+                vel_range=400.0, dv=None, svd_rcond=1e-3, smooth=None,
                 components=1, min_sep=30.0,
+                resolution=None, vsini=None, epsilon=0.6,
                 poly_order=5, iterations=8, low_clip=1.0, high_clip=4.0)
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -1410,6 +1685,10 @@ def _ask_common_inputs(kw):
                          allow_empty=True, cast=float)
     kw["wave_max"] = ask("Maximum wavelength [A] (empty: all)",
                          allow_empty=True, cast=float)
+    kw["resolution"] = ask("Spectrograph resolution R, e.g. 48000 "
+                           "(empty: skip)", allow_empty=True, cast=float)
+    kw["vsini"] = ask("Template vsini [km/s] (empty: skip)",
+                      allow_empty=True, cast=float)
     return kw
 
 
@@ -1441,8 +1720,8 @@ def run_terminal_wizard():
                                cast=int, validate=lambda n: n in (1, 2))
         kw["smooth"] = ask("BF smoothing FWHM [km/s] (empty: auto)",
                            allow_empty=True, cast=float)
-        kw["svd_rcond"] = ask("SVD cutoff (0 = none, as the reference)",
-                              default=0.0, cast=float)
+        kw["svd_rcond"] = ask("SVD cutoff (default 1e-3, robust)",
+                              default=1e-3, cast=float)
         print()
         cmd_bf(make_args(**kw))
 
@@ -1563,8 +1842,9 @@ def run_gui():
                command=lambda: browse(tpl_var, "Select synthetic spectrum")
                ).grid(row=2, column=2, sticky="w")
 
-    # --- wavelength range ---
+    # --- wavelength range + template preparation (R, vsini) ---
     wmin_var, wmax_var = tk.StringVar(), tk.StringVar()
+    res_var, vsini_var = tk.StringVar(), tk.StringVar()
     wrow = ttk.Frame(main)
     wrow.grid(row=3, column=0, columnspan=3, sticky="w", pady=(6, 0))
     ttk.Label(wrow, text="Wavelength range [Å]:").pack(side="left")
@@ -1573,10 +1853,19 @@ def run_gui():
     ttk.Entry(wrow, textvariable=wmax_var, width=8).pack(side="left", padx=2)
     ttk.Label(wrow, text="(empty: full range)").pack(side="left", padx=4)
 
+    prow = ttk.Frame(main)
+    prow.grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 0))
+    ttk.Label(prow, text="Resolution R:").pack(side="left")
+    ttk.Entry(prow, textvariable=res_var, width=9).pack(side="left", padx=(4, 10))
+    ttk.Label(prow, text="vsini [km/s]:").pack(side="left")
+    ttk.Entry(prow, textvariable=vsini_var, width=7).pack(side="left", padx=4)
+    ttk.Label(prow, text="(applied to the template before the "
+                         "measurement; empty: skip)").pack(side="left", padx=4)
+
     # --- method ---
     method_var = tk.StringVar(value="BF")
     mrow = ttk.Frame(main)
-    mrow.grid(row=4, column=0, columnspan=3, sticky="w", pady=(6, 0))
+    mrow.grid(row=5, column=0, columnspan=3, sticky="w", pady=(6, 0))
     ttk.Label(mrow, text="Method:").pack(side="left")
 
     ccf_frame = ttk.Frame(main)
@@ -1585,10 +1874,10 @@ def run_gui():
     def on_method_change():
         if method_var.get() == "CCF":
             bf_frame.grid_remove()
-            ccf_frame.grid(row=5, column=0, columnspan=3, sticky="w", pady=(4, 0))
+            ccf_frame.grid(row=6, column=0, columnspan=3, sticky="w", pady=(4, 0))
         else:
             ccf_frame.grid_remove()
-            bf_frame.grid(row=5, column=0, columnspan=3, sticky="w", pady=(4, 0))
+            bf_frame.grid(row=6, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
     ttk.Radiobutton(mrow, text="CCF (single star)", variable=method_var,
                     value="CCF", command=on_method_change
@@ -1622,12 +1911,42 @@ def run_gui():
     # --- results + plot ---
     result_text = tk.Text(main, height=8, width=90, state="disabled",
                           font=("Courier", 10))
-    result_text.grid(row=7, column=0, columnspan=3, sticky="ew", pady=6)
+    result_text.grid(row=8, column=0, columnspan=3, sticky="ew", pady=6)
 
     plot_frame = ttk.Frame(main)
-    plot_frame.grid(row=8, column=0, columnspan=3, sticky="nsew")
-    main.rowconfigure(8, weight=1)
+    plot_frame.grid(row=9, column=0, columnspan=3, sticky="nsew")
+    main.rowconfigure(9, weight=1)
     canvas_holder = {"canvas": None}
+
+    def show_text(txt):
+        result_text.configure(state="normal")
+        result_text.delete("1.0", "end")
+        result_text.insert("1.0", txt)
+        result_text.configure(state="disabled")
+
+    def show_header():
+        """Standalone header inspector: dump the FITS header into the
+        result box and auto-fill the Target fields from it."""
+        path = spec_var.get().strip()
+        if not path:
+            messagebox.showinfo("Header", "Select a spectrum file first.")
+            return
+        try:
+            payload = cmd_header(make_args(spectrum=path,
+                                           site=site_var.get().strip()
+                                           or "paranal"))
+        except Exception as exc:
+            messagebox.showerror("Error", str(exc))
+            return
+        show_text(payload["text"])
+        info = payload["info"]
+        if info["object"] and not target_var.get().strip():
+            target_var.set(str(info["object"]))
+        if info["ra"] is not None and not ra_var.get().strip():
+            ra_var.set(f"{info['ra']:.5f}")
+            dec_var.set(f"{info['dec']:.5f}")
+        if info["obstime"] and not time_var.get().strip():
+            time_var.set(str(info["obstime"]))
 
     def _f(var, default=None):
         s = var.get().strip()
@@ -1688,7 +2007,8 @@ def run_gui():
                 kw = dict(spectrum=raw_var.get().strip(),
                           template=tpl_var.get().strip() or None,
                           poly_order=int(ord_var.get()),
-                          iterations=int(it_var.get()))
+                          iterations=int(it_var.get()),
+                          resolution=_f(res_var), vsini=_f(vsini_var))
                 state["payload"] = cmd_normalize(make_args(**kw))
             except Exception as exc:
                 messagebox.showerror("Error", str(exc), parent=dlg)
@@ -1719,6 +2039,8 @@ def run_gui():
 
     ttk.Button(fbtns, text="Normalize raw...", command=normalize_dialog
                ).pack(side="left", padx=(4, 0))
+    ttk.Button(fbtns, text="Header", command=show_header
+               ).pack(side="left", padx=(4, 0))
 
     def run_analysis():
         try:
@@ -1735,7 +2057,8 @@ def run_gui():
                       ra=_f(ra_var), dec=_f(dec_var),
                       obstime=time_var.get().strip() or None,
                       site=site_var.get().strip() or "paranal",
-                      t0=_f(t0_var), period=_f(per_var))
+                      t0=_f(t0_var), period=_f(per_var),
+                      resolution=_f(res_var), vsini=_f(vsini_var))
             if method_var.get() == "CCF":
                 kw.update(rv_min=_f(rvmin_var, -200.0),
                           rv_max=_f(rvmax_var, 200.0),
@@ -1751,7 +2074,7 @@ def run_gui():
         show_payload(payload)
 
     ttk.Button(main, text="Run", command=run_analysis
-               ).grid(row=6, column=0, columnspan=3, pady=6)
+               ).grid(row=7, column=0, columnspan=3, pady=6)
 
     root.mainloop()
 
@@ -1783,6 +2106,16 @@ def add_common_args(p):
     p.add_argument("--feh", type=float, default=0.0, help="Template [Fe/H]")
     p.add_argument("--wave-min", type=float, help="Minimum wavelength to use [A]")
     p.add_argument("--wave-max", type=float, help="Maximum wavelength to use [A]")
+    p.add_argument("--resolution", type=float,
+                   help="Spectrograph resolving power R = lambda/dlambda "
+                        "(e.g. FEROS 48000); the template is degraded to "
+                        "this resolution before the measurement")
+    p.add_argument("--vsini", type=float,
+                   help="Rotational broadening vsini [km/s] applied to the "
+                        "template before the measurement")
+    p.add_argument("--epsilon", type=float, default=0.6,
+                   help="Linear limb-darkening coefficient for the "
+                        "rotational profile (default 0.6)")
     p.add_argument("--object", help="Star name; coordinates are resolved via "
                                     "SIMBAD for the barycentric correction")
     p.add_argument("--ra", type=float, help="RA [deg] for barycentric correction")
@@ -1833,9 +2166,10 @@ def main():
                       help="BF window half-width [km/s]")
     p_bf.add_argument("--dv", type=float,
                       help="Velocity step [km/s] (default: data pixel)")
-    p_bf.add_argument("--svd-rcond", type=float, default=0.0,
-                      help="Relative SVD cutoff (default 0 = none, as the "
-                           "reference implementation)")
+    p_bf.add_argument("--svd-rcond", type=float, default=1e-3,
+                      help="Relative SVD cutoff (default 1e-3, robust; the "
+                           "reference uses 0 but that is unstable for "
+                           "broadened templates)")
     p_bf.add_argument("--smooth", type=float,
                       help="BF smoothing FWHM [km/s] "
                            "(default: sigma = 2 bins, as the reference)")
@@ -1864,6 +2198,12 @@ def main():
                          help="Minimum wavelength to use [A]")
     p_batch.add_argument("--wave-max", type=float,
                          help="Maximum wavelength to use [A]")
+    p_batch.add_argument("--resolution", type=float,
+                         help="Spectrograph resolving power R")
+    p_batch.add_argument("--vsini", type=float,
+                         help="Template rotational broadening vsini [km/s]")
+    p_batch.add_argument("--epsilon", type=float, default=0.6,
+                         help="Limb-darkening coefficient (default 0.6)")
     p_batch.add_argument("--normalize", action="store_true",
                          help="Continuum-normalize each raw spectrum first")
     p_batch.add_argument("--poly-order", type=int, default=5,
@@ -1885,8 +2225,8 @@ def main():
     p_batch.add_argument("--vel-range", type=float, default=400.0,
                          help="BF window half-width [km/s]")
     p_batch.add_argument("--dv", type=float, help="BF velocity step [km/s]")
-    p_batch.add_argument("--svd-rcond", type=float, default=0.0,
-                         help="BF relative SVD cutoff (default 0 = none)")
+    p_batch.add_argument("--svd-rcond", type=float, default=1e-3,
+                         help="BF relative SVD cutoff (default 1e-3)")
     p_batch.add_argument("--smooth", type=float,
                          help="BF smoothing FWHM [km/s]")
     p_batch.add_argument("--components", type=int, default=2, choices=[1, 2],
@@ -1909,6 +2249,15 @@ def main():
                                         "(default: result_RV_curve.png)")
     p_batch.set_defaults(func=cmd_batch)
 
+    p_head = sub.add_parser("header",
+                            help="Show the FITS header of a spectrum "
+                                 "(summary + all primary cards)")
+    p_head.add_argument("--spectrum", required=True, help="FITS spectrum file")
+    p_head.add_argument("--site", default="paranal",
+                        help="Observatory for the BJD computation")
+    p_head.add_argument("--output", help="Save the header to a text file")
+    p_head.set_defaults(func=cmd_header)
+
     p_norm = sub.add_parser("normalize",
                             help="Continuum-normalize a raw spectrum "
                                  "(iterative polynomial fitting)")
@@ -1925,6 +2274,12 @@ def main():
                         help="Rejection threshold above the fit [sigma]")
     p_norm.add_argument("--template",
                         help="Synthetic spectrum to overlay for comparison")
+    p_norm.add_argument("--resolution", type=float,
+                        help="Spectrograph resolving power R (template prep)")
+    p_norm.add_argument("--vsini", type=float,
+                        help="Template rotational broadening vsini [km/s]")
+    p_norm.add_argument("--epsilon", type=float, default=0.6,
+                        help="Limb-darkening coefficient (default 0.6)")
     p_norm.add_argument("--teff", type=float, help="Template T_eff [K] (expecto)")
     p_norm.add_argument("--logg", type=float, default=4.5, help="Template log g")
     p_norm.add_argument("--feh", type=float, default=0.0, help="Template [Fe/H]")
