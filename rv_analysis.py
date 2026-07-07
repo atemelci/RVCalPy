@@ -814,27 +814,36 @@ def make_ccf_figure(result):
     return fig
 
 
-def make_bf_figure(bf_result, comps, popt, components, bjd=None, phase=None):
+def make_bf_figure(bf_result, comps, popt, components, bjd=None, phase=None,
+                   vbary=0.0):
+    """BF figure. The velocity axis and the annotated RVs are shifted by
+    the barycentric correction (vbary), so the numbers on the figure are
+    IDENTICAL to the reported/tabulated results."""
     from matplotlib.figure import Figure
-    v = bf_result["velocity"]
+    v_raw = bf_result["velocity"]
+    v = v_raw + vbary
     fig = Figure(figsize=(9, 5))
     ax = fig.subplots()
     ax.plot(v, bf_result["bf"], color="0.7", lw=0.8, label="BF (raw)")
     ax.plot(v, bf_result["bf_smooth"], "b-", lw=1.5, label="BF (smoothed)")
-    model = eval_gauss_model(v, popt)
+    model = eval_gauss_model(v_raw, popt)   # fit was done in the raw frame
     ax.plot(v, model, "r--", lw=2, alpha=0.8, label="Gaussian fit")
     title = []
     if bjd is not None:
         title.append(f"BJD {bjd:.6f}")
     if phase is not None:
         title.append(f"phase {phase:.4f}")
+    if vbary:
+        title.append(f"v_bary = {vbary:+.3f} km/s applied")
     if title:
-        ax.set_title("  |  ".join(title))
+        ax.set_title("  |  ".join(title), fontsize=10)
     for i, c in enumerate(comps, 1):
-        ax.axvline(c["rv"], color="r", ls=":", lw=1)
-        ax.annotate(f"C{i}: {c['rv']:.2f} km/s", (c["rv"], c["amp"]),
+        rv_c = c["rv"] + vbary
+        ax.axvline(rv_c, color="r", ls=":", lw=1)
+        ax.annotate(f"C{i}: {rv_c:.2f} km/s", (rv_c, c["amp"]),
                     textcoords="offset points", xytext=(6, 6), color="r")
-    ax.set_xlabel("Radial velocity [km/s]")
+    ax.set_xlabel("Radial velocity [km/s]"
+                  + ("  (barycentric corrected)" if vbary else ""))
     ax.set_ylabel("Broadening Function")
     ax.legend()
     fig.tight_layout()
@@ -1044,6 +1053,10 @@ def cmd_bf(args):
 
     comps, popt = fit_bf_peaks(bf_result["velocity"], bf_result["bf_smooth"],
                                components=args.components, min_sep=args.min_sep)
+    if args.components == 2:
+        # same labelling convention as batch mode: component 1 = the peak
+        # with the larger BF area (larger light contribution / primary)
+        comps.sort(key=lambda c: abs(c["amp"] * c["sigma"]), reverse=True)
 
     ctx = get_target_context(args)
     vbary, bjd, phase = ctx["vbary"], ctx["bjd"], ctx["phase"]
@@ -1085,7 +1098,7 @@ def cmd_bf(args):
 
     plotfile = args.plot or "result_BF.png"
     fig = make_bf_figure(bf_result, comps, popt, args.components,
-                         bjd=bjd, phase=phase)
+                         bjd=bjd, phase=phase, vbary=vbary)
     save_figure(fig, plotfile)
 
     # model reliability check at the diagnostic lines
@@ -1376,9 +1389,11 @@ def cmd_batch(args):
                              rv=[c["rv"] + vbary for c in comps],
                              rv_err=[c["rv_err"] for c in comps]))
             if args.method == "bf":
+                # velocities shifted by vbary so the stacked profiles line
+                # up with the barycentric-corrected RVs of the curve file
                 profiles.append(dict(
                     name=os.path.basename(path),
-                    velocity=bf_result["velocity"],
+                    velocity=bf_result["velocity"] + vbary,
                     bf=bf_result["bf_smooth"],
                     fit=eval_gauss_model(bf_result["velocity"], popt),
                     bjd=bjd, phase=phase))
