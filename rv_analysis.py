@@ -100,6 +100,31 @@ def two_gauss(x, a1, x1, s1, a2, x2, s2, offset):
             + offset)
 
 
+def gauss_no(x, amp, mu, sig):
+    """Single Gaussian without offset (reference BF_main 'gaussian')."""
+    return amp * np.exp(-np.power(x - mu, 2.) / (2 * np.power(sig, 2.)))
+
+
+def two_gauss_no(x, amp1, mu1, sig1, amp2, mu2, sig2):
+    """Double Gaussian without offset — the exact fit model of the
+    reference document (BF_main.txt)."""
+    gauss1 = amp1 * np.exp(-np.power(x - mu1, 2.) / (2 * np.power(sig1, 2.)))
+    gauss2 = amp2 * np.exp(-np.power(x - mu2, 2.) / (2 * np.power(sig2, 2.)))
+    return gauss1 + gauss2
+
+
+def eval_gauss_model(x, popt):
+    """Evaluate the fitted Gaussian model from the popt length
+    (3/6: reference no-offset models, 4/7: models with offset)."""
+    if len(popt) == 3:
+        return gauss_no(x, *popt)
+    if len(popt) == 4:
+        return gauss(x, *popt)
+    if len(popt) == 6:
+        return two_gauss_no(x, *popt)
+    return two_gauss(x, *popt)
+
+
 def read_ascii_spectrum(path):
     """Tolerant ASCII spectrum reader (.txt/.dat/.ascii/.obs/.prf/...).
 
@@ -344,28 +369,55 @@ def load_template(args):
                      "or T_eff/log g/[Fe/H].")
 
 
-def barycentric_correction(ra_deg, dec_deg, obstime_isot, site):
-    """Barycentric velocity correction [km/s]; ADD it to the measured RV."""
-    from astropy.coordinates import SkyCoord, EarthLocation
+def parse_time_input(value):
+    """Observation time as an astropy Time: accepts an ISOT string
+    ('2024-12-03T02:30:00') or a JD/BJD number ('2453254.847090365').
+
+    A numeric value is treated as a JD, matching the reference document:
+    Time(bjd, scale='utc', format='jd').
+    """
     from astropy.time import Time
+    s = str(value).strip()
+    try:
+        jd = float(s)
+    except ValueError:
+        return Time(s, format="isot", scale="utc"), False
+    return Time(jd, format="jd", scale="utc"), True
+
+
+def orbital_phase(bjd, t0, period):
+    """Orbital phase from the ephemeris BJD_MinI = t0 + period * E.
+    Primary eclipse is at phase 0.0, secondary near 0.5."""
+    return float(((bjd - t0) / period) % 1.0)
+
+
+def barycentric_correction(ra_deg, dec_deg, obstime, site):
+    """Barycentric velocity correction [km/s]; ADD it to the measured RV.
+    `obstime` may be an ISOT string or a JD/BJD number."""
+    from astropy.coordinates import SkyCoord, EarthLocation
     import astropy.units as u
 
     loc = EarthLocation.of_site(site)
     coord = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg)
-    t = Time(obstime_isot, format="isot", scale="utc")
+    t, _ = parse_time_input(obstime)
     return coord.radial_velocity_correction(obstime=t, location=loc).to(u.km / u.s).value
 
 
-def get_bary_correction(args):
-    """Resolve target info and return the barycentric correction [km/s].
+def get_target_context(args):
+    """Resolve target info; return dict(vbary, bjd, phase).
 
     Coordinate priority: explicit --ra/--dec, then SIMBAD lookup of
     --object, then the FITS header of the spectrum. The observation time
-    comes from --obstime or the FITS header (DATE-OBS). Returns 0.0 when
-    the correction cannot be computed (with a note on what was missing).
+    comes from --obstime or the FITS header (DATE-OBS) and may be given
+    directly as a BJD number — all analysis times are reported in BJD, not
+    local/UTC calendar time. A numeric time is taken to be the BJD itself
+    (as in the reference document); an ISOT stamp is converted to
+    mid-exposure BJD_TDB. The orbital phase is computed when an ephemeris
+    (--t0, --period) is available.
     """
     ra, dec = args.ra, args.dec
     obstime = args.obstime
+    exptime = None
 
     if ra is None and getattr(args, "object", None):
         try:
@@ -379,6 +431,7 @@ def get_bary_correction(args):
     if (ra is None or obstime is None) and \
             str(args.spectrum).lower().endswith((".fits", ".fit", ".fits.gz")):
         hdr = fits_header_info(args.spectrum)
+        exptime = hdr["exptime"]
         if ra is None and hdr["ra"] is not None:
             ra, dec = hdr["ra"], hdr["dec"]
             print(f"FITS header: RA = {ra:.5f} deg, Dec = {dec:.5f} deg")
@@ -386,15 +439,38 @@ def get_bary_correction(args):
             obstime = hdr["obstime"]
             print(f"FITS header: DATE-OBS = {obstime}")
 
-    if ra is None or dec is None or not obstime:
-        if getattr(args, "object", None) or args.ra is not None or obstime:
-            print("Note: barycentric correction skipped "
-                  "(needs coordinates AND observation time).")
-        return 0.0
+    # BJD of the observation
+    bjd = None
+    if obstime is not None:
+        _, is_jd = parse_time_input(obstime)
+        if is_jd:
+            bjd = float(str(obstime).strip())      # already BJD (reference)
+        elif ra is not None and dec is not None:
+            bjd = compute_bjd(obstime, ra, dec, args.site, exptime=exptime)
+        if bjd is not None:
+            print(f"BJD = {bjd:.6f}")
 
-    v = barycentric_correction(ra, dec, obstime, args.site)
-    print(f"Barycentric correction: {v:+.4f} km/s (added to the RV)")
-    return v
+    # barycentric velocity correction
+    vbary = 0.0
+    if ra is not None and dec is not None and obstime is not None:
+        vbary = barycentric_correction(ra, dec, obstime, args.site)
+        print(f"Barycentric correction: {vbary:+.4f} km/s (added to the RV)")
+    elif getattr(args, "object", None) or args.ra is not None or obstime:
+        print("Note: barycentric correction skipped "
+              "(needs coordinates AND observation time).")
+
+    # orbital phase from the ephemeris
+    phase = None
+    t0 = getattr(args, "t0", None)
+    period = getattr(args, "period", None)
+    if bjd is not None and t0 is not None and period:
+        phase = orbital_phase(bjd, t0, period)
+        which = ("primary eclipse" if phase < 0.05 or phase > 0.95 else
+                 "secondary eclipse" if abs(phase - 0.5) < 0.05 else
+                 "out of eclipse")
+        print(f"Orbital phase = {phase:.4f} ({which})")
+
+    return dict(vbary=vbary, bjd=bjd, phase=phase)
 
 
 # ----------------------------------------------------------------------
@@ -481,26 +557,34 @@ def log_wave_grid(wl_min, wl_max, dv_kms):
 
 
 def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
-               vel_range=400.0, dv=None, svd_rcond=1e-3, smooth_kms=None):
-    """Solve for the Broadening Function via SVD.
+               vel_range=400.0, dv=None, svd_rcond=0.0, smooth_kms=None):
+    """Broadening Function following the reference implementation
+    (BF_main.txt; Rucinski 1999 via PyAstronomy's pyasl.SVD).
 
-    Model:  s = A . b  where the columns of A are pixel-shifted copies of
-    the template in velocity space (design/Toeplitz matrix). Small singular
-    values are truncated (svd_rcond) to suppress noise — the 'Singular
-    Value Decomposition' step described in the thesis.
+    Reference steps, reproduced exactly:
+      1. log-wavelength grid  w1 = w00 * (1+r)^k  with  r = stepV/c
+         (w00/stepV in the reference: 4800 A / 5 km/s; here w00 comes from
+         the data overlap and stepV from `dv`)
+      2. template and observed spectra are interpolated onto w1 and fed
+         to the SVD AS-IS (continuum-normalized flux, no inversion)
+      3. svd.decompose(template, m);  bf = svd.getBroadeningFunction(obs)
+         (m odd, reference m=501; here m = 2*ceil(vel_range/dv)+1)
+      4. velocity axis = svd.getRVAxis(r, 1)
+      5. Gaussian smoothing of the BF, sigma = 2 bins in the reference
+         (used when smooth_kms is not given)
+
+    pyasl.SVD is used when PyAstronomy is installed; otherwise an exact
+    NumPy replication of the same algorithm runs (verified identical).
 
     Parameters
     ----------
-    vel_range : half-width of the BF window [km/s] (scan is +-vel_range)
-    dv        : velocity step [km/s]; None -> from the median data pixel
-    svd_rcond : singular values with s_i < rcond*s_max are discarded
-    smooth_kms: FWHM of the Gaussian smoothing applied to the BF [km/s]
-                (None -> 3*dv, the mild smoothing suggested by Rucinski)
+    vel_range : half-width of the BF window [km/s]
+    dv        : velocity step stepV [km/s]; None -> from the median data pixel
+    svd_rcond : relative singular-value cutoff (0 = none, as the reference)
+    smooth_kms: smoothing FWHM [km/s]; None -> sigma = 2 bins (reference)
 
     Returns: dict(velocity, bf, bf_smooth, dv, n_kept_sv, n_sv)
     """
-    # Convert normalized spectra to line-depth space (1 - flux): continuum
-    # ~0 and lines positive, so the BF peaks come out positive.
     good_s = np.isfinite(spec_wl) & np.isfinite(spec_flux)
     good_t = np.isfinite(tpl_wl) & np.isfinite(tpl_flux)
     spec_wl, spec_flux = spec_wl[good_s], spec_flux[good_s]
@@ -516,58 +600,74 @@ def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
         pix = np.median(np.diff(spec_wl)) / np.median(spec_wl) * C_KMS
         dv = max(pix, 0.5)
 
-    # Leave a margin of one BF window so shifted templates stay in range
-    margin = 1.5 * vel_range / C_KMS
-    grid = log_wave_grid(wl_min * (1 + margin), wl_max * (1 - margin), dv)
+    # reference grid: w1 = w00 * (1+r)^arange(n)
+    r = dv / C_KMS
+    n = int(np.floor(np.log(wl_max / wl_min) / np.log(1.0 + r))) + 1
+    w1 = wl_min * np.power(1.0 + r, np.arange(float(n)))
 
-    s = 1.0 - np.interp(grid, spec_wl, spec_flux)   # observed (line depth)
-    t = 1.0 - np.interp(grid, tpl_wl, tpl_flux)      # template
+    tpl = np.interp(w1, tpl_wl, tpl_flux)
+    obs = np.interp(w1, spec_wl, spec_flux)
 
-    m = grid.size
     half = int(np.ceil(vel_range / dv))
-    nbf = 2 * half + 1
-    if m <= 2 * nbf:
+    m = 2 * half + 1                      # odd, as pyasl requires
+    if n <= 2 * m:
         raise ValueError("Spectrum segment too short for the BF window; "
                          "widen the wavelength range or reduce vel-range.")
 
-    # Design matrix: row k -> s[k+half] = sum_j b[j] * t[k+half-(j-half)]
-    # (positive RV = redshift = shift towards larger pixel index)
-    nrow = m - nbf + 1
-    idx = (np.arange(nrow)[:, None] + (nbf - 1) - np.arange(nbf)[None, :])
-    A = t[idx]
-    rhs = s[half:m - half]
+    try:
+        from PyAstronomy import pyasl
+        svd = pyasl.SVD()
+        svd.decompose(tpl, m)
+        w = np.ravel(np.asarray(svd.getSingularValues()))
+        wlimit = svd_rcond * w.max() if svd_rcond > 0 else 0.0
+        bf = svd.getBroadeningFunction(obs, wlimit=wlimit, asarray=True)
+        velocity = svd.getRVAxis(r, 1)
+    except ImportError:
+        # exact NumPy replication of pyasl.SVD
+        nn = n - m + 1
+        des = np.empty((nn, m))
+        for i in range(m):
+            des[:, i] = tpl[i:i + nn]
+        U, w, Vt = np.linalg.svd(des, full_matrices=False)
+        wlimit = svd_rcond * w.max() if svd_rcond > 0 else 0.0
+        winv = np.where(w > wlimit, 1.0 / w, 0.0)
+        bf = Vt.T @ (winv * (U.T @ obs[m // 2: len(obs) - (m // 2)]))
+        velocity = (-np.arange(m) + m // 2) * r * C_KMS
+    n_sv = m
+    n_kept = int((w > wlimit).sum())
 
-    # SVD solution with truncation (regularization)
-    U, sv, Vt = np.linalg.svd(A, full_matrices=False)
-    keep = sv > svd_rcond * sv[0]
-    inv_sv = np.where(keep, 1.0 / np.where(keep, sv, 1.0), 0.0)
-    b = Vt.T @ (inv_sv * (U.T @ rhs))
+    # ascending velocity axis for the downstream fitting/plotting
+    srt = np.argsort(velocity)
+    velocity, bf = velocity[srt], bf[srt]
 
-    velocity = (np.arange(nbf) - half) * dv
+    # reference: bfsmooth = gaussian_filter1d(bfarray, sigma=2)
+    sigma_pix = (smooth_kms / (2.35482 * dv)) if smooth_kms else 2.0
+    bf_smooth = gaussian_filter1d(bf, sigma_pix)
 
-    if smooth_kms is None:
-        smooth_kms = 3.0 * dv
-    sigma_pix = smooth_kms / (2.35482 * dv)
-    bf_smooth = gaussian_filter1d(b, sigma_pix)
-
-    return dict(velocity=velocity, bf=b, bf_smooth=bf_smooth, dv=dv,
-                n_kept_sv=int(keep.sum()), n_sv=sv.size)
+    return dict(velocity=velocity, bf=bf, bf_smooth=bf_smooth, dv=dv,
+                n_kept_sv=n_kept, n_sv=n_sv)
 
 
-def fit_bf_peaks(velocity, bf, components=1, min_sep=30.0):
-    """Fit single/double Gaussians to the BF profile
-    (thesis: 'Gaussian fits to the BFs').
+def fit_bf_peaks(velocity, bf, components=1, min_sep=30.0, with_offset=False):
+    """Fit single/double Gaussians to the BF profile.
 
-    For components=2 the initial guesses are the two highest peaks
-    separated by at least min_sep [km/s].
+    The default fit model is the no-offset (single/double) Gaussian of the
+    reference document (BF_main.txt); with_offset=True adds a constant
+    baseline term (useful for CCF profiles, whose baseline is not zero).
+    Initial guesses come from the two highest peaks separated by at least
+    min_sep [km/s].
 
     Returns: list of dict(rv, rv_err, amp, sigma) per component, and popt.
     """
-    offset0 = np.median(bf)
+    offset0 = np.median(bf) if with_offset else 0.0
     if components == 1:
         i0 = np.argmax(bf)
-        p0 = [bf[i0] - offset0, velocity[i0], 20.0, offset0]
-        popt, pcov = curve_fit(gauss, velocity, bf, p0=p0, maxfev=20000)
+        if with_offset:
+            p0 = [bf[i0] - offset0, velocity[i0], 20.0, offset0]
+            popt, pcov = curve_fit(gauss, velocity, bf, p0=p0, maxfev=20000)
+        else:
+            p0 = [bf[i0], velocity[i0], 20.0]
+            popt, pcov = curve_fit(gauss_no, velocity, bf, p0=p0, maxfev=20000)
         err = np.sqrt(np.diag(pcov))
         return [dict(rv=popt[1], rv_err=float(err[1]),
                      amp=popt[0], sigma=abs(popt[2]))], popt
@@ -580,9 +680,14 @@ def fit_bf_peaks(velocity, bf, components=1, min_sep=30.0):
                            "reduce --min-sep.")
     i2 = int(np.flatnonzero(mask)[np.argmax(bf[mask])])
 
-    p0 = [bf[i1] - offset0, velocity[i1], 20.0,
-          bf[i2] - offset0, velocity[i2], 20.0, offset0]
-    popt, pcov = curve_fit(two_gauss, velocity, bf, p0=p0, maxfev=40000)
+    if with_offset:
+        p0 = [bf[i1] - offset0, velocity[i1], 20.0,
+              bf[i2] - offset0, velocity[i2], 20.0, offset0]
+        popt, pcov = curve_fit(two_gauss, velocity, bf, p0=p0, maxfev=40000)
+    else:
+        # reference: curve_fit(gaussian, bf_ind, bfsmooth, p0=initial_guess)
+        p0 = [bf[i1], velocity[i1], 20.0, bf[i2], velocity[i2], 20.0]
+        popt, pcov = curve_fit(two_gauss_no, velocity, bf, p0=p0, maxfev=40000)
     err = np.sqrt(np.diag(pcov))
     comps = [dict(rv=popt[1], rv_err=float(err[1]), amp=popt[0], sigma=abs(popt[2])),
              dict(rv=popt[4], rv_err=float(err[4]), amp=popt[3], sigma=abs(popt[5]))]
@@ -618,15 +723,22 @@ def make_ccf_figure(result):
     return fig
 
 
-def make_bf_figure(bf_result, comps, popt, components):
+def make_bf_figure(bf_result, comps, popt, components, bjd=None, phase=None):
     from matplotlib.figure import Figure
     v = bf_result["velocity"]
     fig = Figure(figsize=(9, 5))
     ax = fig.subplots()
     ax.plot(v, bf_result["bf"], color="0.7", lw=0.8, label="BF (raw)")
     ax.plot(v, bf_result["bf_smooth"], "b-", lw=1.5, label="BF (smoothed)")
-    model = gauss(v, *popt) if components == 1 else two_gauss(v, *popt)
+    model = eval_gauss_model(v, popt)
     ax.plot(v, model, "r--", lw=2, alpha=0.8, label="Gaussian fit")
+    title = []
+    if bjd is not None:
+        title.append(f"BJD {bjd:.6f}")
+    if phase is not None:
+        title.append(f"phase {phase:.4f}")
+    if title:
+        ax.set_title("  |  ".join(title))
     for i, c in enumerate(comps, 1):
         ax.axvline(c["rv"], color="r", ls=":", lw=1)
         ax.annotate(f"C{i}: {c['rv']:.2f} km/s", (c["rv"], c["amp"]),
@@ -661,24 +773,31 @@ def cmd_ccf(args):
     print(f"Computing the CCF over {len(orders)} order(s)/segment(s)...")
     result = run_ccf(orders, tpl_wl, tpl_flux, args.rv_min, args.rv_max, args.rv_step)
 
-    vbary = get_bary_correction(args)
+    ctx = get_target_context(args)
+    vbary, bjd, phase = ctx["vbary"], ctx["bjd"], ctx["phase"]
 
     rv = result["rv"] + vbary
     tpl_name = args.template or f"PHOENIX T={args.teff}K"
-    summary = ("================ CCF RESULT ================\n"
-               f"Normalized spectrum : {args.spectrum}\n"
-               f"Synthetic template  : {tpl_name}\n"
-               f"RV = {rv:.4f} ± {result['rv_err']:.4f} km/s"
-               + ("  (barycentric corrected)\n" if vbary else "\n")
-               + "============================================")
+    lines = ["================ CCF RESULT ================",
+             f"Normalized spectrum : {args.spectrum}",
+             f"Synthetic template  : {tpl_name}"]
+    if bjd is not None:
+        lines.append(f"BJD = {bjd:.6f}"
+                     + (f"   phase = {phase:.4f}" if phase is not None else ""))
+    lines.append(f"RV = {rv:.4f} ± {result['rv_err']:.4f} km/s"
+                 + ("  (barycentric corrected)" if vbary else ""))
+    lines.append("============================================")
+    summary = "\n".join(lines)
     print("\n" + summary)
 
     outfile = args.output or "result_CCF.txt"
     with open(outfile, "w") as f:
         f.write(f"# Normalized spectrum : {args.spectrum}\n")
         f.write(f"# Synthetic template  : {tpl_name}\n")
-        f.write("# method  RV[km/s]  RV_err[km/s]  bary_corr[km/s]\n")
-        f.write(f"CCF  {rv:.5f}  {result['rv_err']:.5f}  {vbary:.5f}\n")
+        f.write("# method  BJD  phase  RV[km/s]  RV_err[km/s]  bary_corr[km/s]\n")
+        f.write(f"CCF  {bjd if bjd is not None else 'nan'}  "
+                f"{f'{phase:.5f}' if phase is not None else 'nan'}  "
+                f"{rv:.5f}  {result['rv_err']:.5f}  {vbary:.5f}\n")
     print(f"Results written: {outfile}")
 
     plotfile = args.plot or "result_CCF.png"
@@ -718,12 +837,16 @@ def cmd_bf(args):
     comps, popt = fit_bf_peaks(bf_result["velocity"], bf_result["bf_smooth"],
                                components=args.components, min_sep=args.min_sep)
 
-    vbary = get_bary_correction(args)
+    ctx = get_target_context(args)
+    vbary, bjd, phase = ctx["vbary"], ctx["bjd"], ctx["phase"]
 
     tpl_name = args.template or f"PHOENIX T={args.teff}K"
     lines = ["================ BF RESULT =================",
              f"Normalized spectrum : {args.spectrum}",
              f"Synthetic template  : {tpl_name}"]
+    if bjd is not None:
+        lines.append(f"BJD = {bjd:.6f}"
+                     + (f"   phase = {phase:.4f}" if phase is not None else ""))
     for i, c in enumerate(comps, 1):
         lines.append(f"Component {i}: RV = {c['rv'] + vbary:.4f} "
                      f"± {c['rv_err']:.4f} km/s"
@@ -741,6 +864,10 @@ def cmd_bf(args):
     with open(outfile, "w") as f:
         f.write(f"# Normalized spectrum : {args.spectrum}\n")
         f.write(f"# Synthetic template  : {tpl_name}\n")
+        if bjd is not None:
+            f.write(f"# BJD = {bjd:.6f}"
+                    + (f"   phase = {phase:.5f}" if phase is not None else "")
+                    + "\n")
         f.write("# component  RV[km/s]  RV_err[km/s]  amp  sigma[km/s]  "
                 "bary_corr[km/s]\n")
         for i, c in enumerate(comps, 1):
@@ -749,7 +876,8 @@ def cmd_bf(args):
     print(f"Results written: {outfile}")
 
     plotfile = args.plot or "result_BF.png"
-    fig = make_bf_figure(bf_result, comps, popt, args.components)
+    fig = make_bf_figure(bf_result, comps, popt, args.components,
+                         bjd=bjd, phase=phase)
     save_figure(fig, plotfile)
 
     return dict(method="BF", fig=fig, text=summary,
@@ -825,14 +953,21 @@ def cmd_normalize(args):
                 output=outfile, plot=plotfile, wl=wl, flux=nf)
 
 
-def compute_bjd(obstime_isot, ra_deg, dec_deg, site, exptime=None):
-    """Mid-exposure BJD_TDB from a UTC time stamp (thesis: light curves and
-    RVs are phased in Barycentric Julian Date)."""
+def compute_bjd(obstime, ra_deg, dec_deg, site, exptime=None):
+    """Mid-exposure BJD_TDB (thesis: light curves and RVs are phased in
+    Barycentric Julian Date, never local/UTC calendar time).
+
+    `obstime` may be an ISOT stamp (converted: +exptime/2, light travel
+    time to the barycenter, TDB scale) or a JD/BJD number, which is
+    returned unchanged — the data are then assumed to be in BJD already,
+    as in the reference document.
+    """
     from astropy.coordinates import SkyCoord, EarthLocation
-    from astropy.time import Time
     import astropy.units as u
 
-    t = Time(obstime_isot, format="isot", scale="utc")
+    t, is_jd = parse_time_input(obstime)
+    if is_jd:
+        return float(str(obstime).strip())
     if exptime:
         t = t + (float(exptime) / 2.0) * u.s
     loc = EarthLocation.of_site(site)
@@ -867,23 +1002,71 @@ def make_rv_curve_figure(rows, ncomp, t0=None, period=None):
     return fig
 
 
+def make_bf_stack_figure(profiles, t0=None, period=None):
+    """BF profiles of all epochs stacked and sorted by orbital phase (the
+    classic figure of the thesis, Sekil 4.3): each profile is offset
+    vertically, its double-Gaussian fit overplotted, and labelled with its
+    phase so the geometry near the primary (phase 0) and secondary
+    (phase 0.5) eclipses is visible at a glance."""
+    from matplotlib.figure import Figure
+
+    have_phase = all(p.get("phase") is not None for p in profiles)
+    key = "phase" if have_phase else "bjd"
+    profiles = sorted(profiles, key=lambda p: (p.get(key) is None,
+                                               p.get(key, 0.0)))
+    amp = max(float(np.nanmax(p["bf"])) for p in profiles)
+    step = 1.3 * amp
+
+    fig = Figure(figsize=(9, max(5, 1.2 * len(profiles))))
+    ax = fig.subplots()
+    for k, p in enumerate(profiles):
+        off = k * step
+        ax.plot(p["velocity"], p["bf"] + off, "b-", lw=1.2)
+        if p.get("fit") is not None:
+            ax.plot(p["velocity"], p["fit"] + off, "r--", lw=1.0, alpha=0.8)
+        if have_phase:
+            label = f"φ = {p['phase']:.3f}"
+        elif p.get("bjd") is not None and np.isfinite(p["bjd"]):
+            label = f"BJD {p['bjd']:.4f}"
+        else:
+            label = p.get("name", "")
+        ax.annotate(label, (p["velocity"][-1], off),
+                    textcoords="offset points", xytext=(6, 0),
+                    fontsize=8, va="center")
+    ax.set_xlabel("Radial velocity [km/s]")
+    ax.set_ylabel("Broadening function + offset")
+    title = "Broadening functions"
+    if have_phase:
+        title += " sorted by orbital phase"
+    ax.set_title(title)
+    ax.margins(x=0.12)
+    fig.tight_layout()
+    return fig
+
+
 def cmd_batch(args):
     """Process a spectral time series into an RV curve file.
 
     For every input spectrum: optional continuum normalization (raw FITS
     series), BF or CCF measurement, barycentric correction and BJD_TDB
-    computation from the FITS header (DATE-OBS/EXPTIME) or --obstime.
-    In SB2 mode the component with the larger BF area (larger light
-    contribution) is always reported as component 1, so the labels do not
-    swap between epochs.
+    computation. Times are always handled in BJD: they come from --bjd
+    (one value per file, as in the reference document), a numeric
+    --obstime, or the FITS header DATE-OBS (converted to mid-exposure
+    BJD_TDB). In SB2 mode the component with the larger BF area (larger
+    light contribution) is always reported as component 1, so the labels
+    do not swap between epochs.
 
-    Output: result_RV_curve.txt (file, BJD_TDB, RV per component) and
-    result_RV_curve.png — ready to be phased and fed to PyWD2015.
+    Outputs: result_RV_curve.txt (file, BJD, phase, RV per component),
+    result_RV_curve.png and, in BF mode, result_BF_profiles.png with all
+    BF profiles stacked by orbital phase.
     """
     import glob
     files = sorted(set(sum((glob.glob(p) for p in args.spectra), [])))
     if not files:
         sys.exit("No files match the given pattern(s).")
+    if args.bjd and len(args.bjd) != len(files):
+        sys.exit(f"--bjd expects one value per file "
+                 f"({len(files)} files, {len(args.bjd)} values given).")
     print(f"{len(files)} spectra to process.\n")
 
     tpl_wl, tpl_flux = load_template(args)
@@ -899,8 +1082,8 @@ def cmd_batch(args):
             print(f"Warning: {exc}\n")
 
     ncomp = args.components
-    rows = []
-    for path in files:
+    rows, profiles = [], []
+    for i_file, path in enumerate(files):
         print(f"--- {os.path.basename(path)} ---")
         try:
             if args.normalize:
@@ -920,19 +1103,21 @@ def cmd_batch(args):
                 wl, fx = wl[sel], fx[sel]
 
             hdr = fits_header_info(path)
-            obstime = args.obstime or hdr["obstime"]
+            obstime = (args.bjd[i_file] if args.bjd
+                       else args.obstime or hdr["obstime"])
             ra_i = ra if ra is not None else hdr["ra"]
             dec_i = dec if dec is not None else hdr["dec"]
 
+            popt = None
             if args.method == "bf":
                 bf_result = compute_bf(wl, fx, tpl_wl, tpl_flux,
                                        vel_range=args.vel_range, dv=args.dv,
                                        svd_rcond=args.svd_rcond,
                                        smooth_kms=args.smooth)
-                comps, _ = fit_bf_peaks(bf_result["velocity"],
-                                        bf_result["bf_smooth"],
-                                        components=ncomp,
-                                        min_sep=args.min_sep)
+                comps, popt = fit_bf_peaks(bf_result["velocity"],
+                                           bf_result["bf_smooth"],
+                                           components=ncomp,
+                                           min_sep=args.min_sep)
                 if ncomp == 2:
                     # stable labelling: primary = larger BF area
                     comps.sort(key=lambda c: c["amp"] * c["sigma"],
@@ -942,18 +1127,38 @@ def cmd_batch(args):
                                  args.rv_min, args.rv_max, args.rv_step)
                 comps = [dict(rv=result["rv"], rv_err=result["rv_err"])]
 
+            # BJD: numeric input is already BJD; ISOT converted (needs coords)
             vbary, bjd = 0.0, np.nan
-            if ra_i is not None and obstime:
-                vbary = barycentric_correction(ra_i, dec_i, obstime, args.site)
-                bjd = compute_bjd(obstime, ra_i, dec_i, args.site,
-                                  exptime=hdr.get("exptime"))
+            if obstime is not None:
+                _, is_jd = parse_time_input(obstime)
+                if is_jd:
+                    bjd = float(str(obstime).strip())
+                elif ra_i is not None:
+                    bjd = compute_bjd(obstime, ra_i, dec_i, args.site,
+                                      exptime=hdr.get("exptime"))
+                if ra_i is not None:
+                    vbary = barycentric_correction(ra_i, dec_i, obstime,
+                                                   args.site)
+            phase = (orbital_phase(bjd, args.t0, args.period)
+                     if np.isfinite(bjd) and args.t0 is not None
+                     and args.period else None)
+
             rows.append(dict(file=os.path.basename(path), bjd=bjd,
+                             phase=phase,
                              rv=[c["rv"] + vbary for c in comps],
                              rv_err=[c["rv_err"] for c in comps]))
+            if args.method == "bf":
+                profiles.append(dict(
+                    name=os.path.basename(path),
+                    velocity=bf_result["velocity"],
+                    bf=bf_result["bf_smooth"],
+                    fit=eval_gauss_model(bf_result["velocity"], popt),
+                    bjd=bjd, phase=phase))
             msg = ", ".join(f"RV{j + 1} = {c['rv'] + vbary:8.3f} "
                             f"± {c['rv_err']:.3f}"
                             for j, c in enumerate(comps))
-            print(f"  BJD = {bjd:.6f}  {msg} km/s")
+            ph_txt = f"  phase = {phase:.4f}" if phase is not None else ""
+            print(f"  BJD = {bjd:.6f}{ph_txt}  {msg} km/s")
         except Exception as exc:
             print(f"  SKIPPED ({exc.__class__.__name__}: {exc})")
     if not rows:
@@ -964,16 +1169,24 @@ def cmd_batch(args):
         f.write(f"# RV curve, method = {args.method.upper()}, "
                 f"template = {args.template or f'PHOENIX T={args.teff}K'}\n")
         cols = "  ".join(f"RV{j + 1}[km/s]  RV{j + 1}_err" for j in range(ncomp))
-        f.write(f"# file  BJD_TDB  {cols}\n")
+        f.write(f"# file  BJD  phase  {cols}\n")
         for r in rows:
             vals = "  ".join(f"{r['rv'][j]:.5f}  {r['rv_err'][j]:.5f}"
                              for j in range(len(r["rv"])))
-            f.write(f"{r['file']}  {r['bjd']:.6f}  {vals}\n")
+            ph = f"{r['phase']:.5f}" if r["phase"] is not None else "nan"
+            f.write(f"{r['file']}  {r['bjd']:.6f}  {ph}  {vals}\n")
     print(f"\nRV curve written: {outfile}")
 
     plotfile = args.plot or "result_RV_curve.png"
     fig = make_rv_curve_figure(rows, ncomp, t0=args.t0, period=args.period)
     save_figure(fig, plotfile)
+
+    if profiles:
+        stackfile = "result_BF_profiles.png"
+        stack_fig = make_bf_stack_figure(profiles, t0=args.t0,
+                                         period=args.period)
+        save_figure(stack_fig, stackfile)
+
     return dict(method="batch", fig=fig, output=outfile, plot=plotfile,
                 text=f"{len(rows)} spectra -> {outfile}")
 
@@ -1030,7 +1243,8 @@ def cmd_demo(args):
     rv_grid = np.arange(-200, 251, 2.0)
     ccf = calculate_ccf(wl, 1.0 - obs, wl, 1.0 - tpl, rv_grid)
     ccf /= ccf.max()
-    ccomp, cpopt = fit_bf_peaks(rv_grid, ccf, components=2, min_sep=50.0)
+    ccomp, cpopt = fit_bf_peaks(rv_grid, ccf, components=2, min_sep=50.0,
+                                with_offset=True)
     for i, c in enumerate(ccomp, 1):
         print(f"  Component {i}: RV = {c['rv']:8.3f} ± {c['rv_err']:.3f} km/s")
 
@@ -1057,7 +1271,7 @@ def cmd_demo(args):
 
         v = bf_result["velocity"]
         axes[1].plot(v, bf_result["bf_smooth"], "b-", lw=1.5, label="BF")
-        axes[1].plot(v, two_gauss(v, *popt), "r--", lw=1.5,
+        axes[1].plot(v, eval_gauss_model(v, popt), "r--", lw=1.5,
                      label="Double Gaussian fit")
         for rvt in (rv1_true, rv2_true):
             axes[1].axvline(rvt, color="0.5", ls=":", lw=1)
@@ -1066,7 +1280,7 @@ def cmd_demo(args):
         axes[1].legend()
 
         axes[2].plot(rv_grid, ccf, "k-", lw=1.5, label="CCF")
-        axes[2].plot(rv_grid, two_gauss(rv_grid, *cpopt), "r--", lw=1.5,
+        axes[2].plot(rv_grid, eval_gauss_model(rv_grid, cpopt), "r--", lw=1.5,
                      label="Double Gaussian fit")
         for rvt in (rv1_true, rv2_true):
             axes[2].axvline(rvt, color="0.5", ls=":", lw=1)
@@ -1092,9 +1306,10 @@ def make_args(**overrides):
                 teff=None, logg=4.5, feh=0.0,
                 wave_min=None, wave_max=None,
                 object=None, ra=None, dec=None, obstime=None, site="paranal",
+                t0=None, period=None,
                 plot=None, output=None,
                 rv_min=-200.0, rv_max=200.0, rv_step=0.5,
-                vel_range=400.0, dv=None, svd_rcond=1e-3, smooth=None,
+                vel_range=400.0, dv=None, svd_rcond=0.0, smooth=None,
                 components=1, min_sep=30.0,
                 poly_order=5, iterations=8, low_clip=1.0, high_clip=4.0)
     base.update(overrides)
@@ -1143,10 +1358,14 @@ def _ask_target(kw):
             kw["ra"] = ask("  RA [deg]", cast=float)
             kw["dec"] = ask("  Dec [deg]", cast=float)
     if kw.get("ra") is not None:
-        kw["obstime"] = ask("Observation time (ISOT, e.g. 2024-12-03T02:30:00;"
-                            " empty: read from FITS header)", allow_empty=True)
+        kw["obstime"] = ask("Observation time (ISOT or BJD number; "
+                            "empty: read from FITS header)", allow_empty=True)
         kw["site"] = ask("Observatory (astropy site name: tug, paranal, ...)",
                          default="tug")
+    kw["t0"] = ask("Ephemeris T0 [BJD] for the orbital phase (empty: skip)",
+                   allow_empty=True, cast=float)
+    if kw.get("t0") is not None:
+        kw["period"] = ask("Orbital period [days]", cast=float)
     return kw
 
 
@@ -1222,7 +1441,8 @@ def run_terminal_wizard():
                                cast=int, validate=lambda n: n in (1, 2))
         kw["smooth"] = ask("BF smoothing FWHM [km/s] (empty: auto)",
                            allow_empty=True, cast=float)
-        kw["svd_rcond"] = ask("SVD cutoff", default=1e-3, cast=float)
+        kw["svd_rcond"] = ask("SVD cutoff (0 = none, as the reference)",
+                              default=0.0, cast=float)
         print()
         cmd_bf(make_args(**kw))
 
@@ -1297,8 +1517,9 @@ def run_gui():
     ttk.Label(trow, text="Dec [deg]:").grid(row=0, column=5)
     ttk.Entry(trow, textvariable=dec_var, width=10).grid(row=0, column=6, padx=2)
 
-    ttk.Label(trow, text="Obs time (ISOT):").grid(row=1, column=0, columnspan=2,
-                                                  sticky="w", pady=(4, 0))
+    ttk.Label(trow, text="Obs time (ISOT or BJD):").grid(row=1, column=0,
+                                                         columnspan=2,
+                                                         sticky="w", pady=(4, 0))
     ttk.Entry(trow, textvariable=time_var, width=20).grid(row=1, column=2,
                                                           columnspan=2,
                                                           sticky="w",
@@ -1308,6 +1529,19 @@ def run_gui():
                                                           columnspan=2,
                                                           sticky="w",
                                                           pady=(4, 0))
+
+    # ephemeris -> orbital phase (primary eclipse at 0.0, secondary at 0.5)
+    t0_var, per_var = tk.StringVar(), tk.StringVar()
+    ttk.Label(trow, text="Ephemeris T0 [BJD]:").grid(row=2, column=0,
+                                                     columnspan=2, sticky="w",
+                                                     pady=(4, 0))
+    ttk.Entry(trow, textvariable=t0_var, width=14).grid(row=2, column=2,
+                                                        sticky="w", pady=(4, 0))
+    ttk.Label(trow, text="Period [d]:").grid(row=2, column=3, sticky="e",
+                                             pady=(4, 0))
+    ttk.Entry(trow, textvariable=per_var, width=10).grid(row=2, column=4,
+                                                         sticky="w",
+                                                         pady=(4, 0))
 
     # --- input files ---
     spec_var = tk.StringVar()
@@ -1500,7 +1734,8 @@ def run_gui():
                       object=target_var.get().strip() or None,
                       ra=_f(ra_var), dec=_f(dec_var),
                       obstime=time_var.get().strip() or None,
-                      site=site_var.get().strip() or "paranal")
+                      site=site_var.get().strip() or "paranal",
+                      t0=_f(t0_var), period=_f(per_var))
             if method_var.get() == "CCF":
                 kw.update(rv_min=_f(rvmin_var, -200.0),
                           rv_max=_f(rvmax_var, 200.0),
@@ -1552,9 +1787,16 @@ def add_common_args(p):
                                     "SIMBAD for the barycentric correction")
     p.add_argument("--ra", type=float, help="RA [deg] for barycentric correction")
     p.add_argument("--dec", type=float, help="Dec [deg] for barycentric correction")
-    p.add_argument("--obstime", help="Observation time (ISOT, e.g. 2024-12-03T02:30:00)")
+    p.add_argument("--obstime", help="Observation time: ISOT "
+                                     "(2024-12-03T02:30:00) or BJD number "
+                                     "(2453254.847090365)")
     p.add_argument("--site", default="paranal",
                    help="Observatory (astropy site name, e.g. paranal, tug)")
+    p.add_argument("--t0", type=float,
+                   help="Ephemeris T0 [BJD] (primary minimum) for the "
+                        "orbital phase")
+    p.add_argument("--period", type=float,
+                   help="Orbital period [days] for the orbital phase")
     p.add_argument("--plot", help="Figure PNG file name "
                                   "(default: result_CCF.png / result_BF.png)")
     p.add_argument("--output", help="Result text file name "
@@ -1591,10 +1833,12 @@ def main():
                       help="BF window half-width [km/s]")
     p_bf.add_argument("--dv", type=float,
                       help="Velocity step [km/s] (default: data pixel)")
-    p_bf.add_argument("--svd-rcond", type=float, default=1e-3,
-                      help="SVD cutoff (small singular value threshold)")
+    p_bf.add_argument("--svd-rcond", type=float, default=0.0,
+                      help="Relative SVD cutoff (default 0 = none, as the "
+                           "reference implementation)")
     p_bf.add_argument("--smooth", type=float,
-                      help="BF smoothing FWHM [km/s] (default: 3*dv)")
+                      help="BF smoothing FWHM [km/s] "
+                           "(default: sigma = 2 bins, as the reference)")
     p_bf.add_argument("--components", type=int, default=1, choices=[1, 2],
                       help="Number of Gaussians to fit: SB1=1, SB2=2")
     p_bf.add_argument("--min-sep", type=float, default=30.0,
@@ -1630,15 +1874,19 @@ def main():
     p_batch.add_argument("--ra", type=float, help="RA [deg]")
     p_batch.add_argument("--dec", type=float, help="Dec [deg]")
     p_batch.add_argument("--obstime",
-                         help="Observation time override (default: per-file "
-                              "FITS header DATE-OBS)")
+                         help="Observation time override, ISOT or BJD "
+                              "(default: per-file FITS header DATE-OBS)")
+    p_batch.add_argument("--bjd", type=float, nargs="+",
+                         help="BJD of each spectrum, one value per file in "
+                              "sorted order (as the bjd list of the "
+                              "reference document)")
     p_batch.add_argument("--site", default="paranal",
                          help="Observatory (astropy site name)")
     p_batch.add_argument("--vel-range", type=float, default=400.0,
                          help="BF window half-width [km/s]")
     p_batch.add_argument("--dv", type=float, help="BF velocity step [km/s]")
-    p_batch.add_argument("--svd-rcond", type=float, default=1e-3,
-                         help="BF SVD cutoff")
+    p_batch.add_argument("--svd-rcond", type=float, default=0.0,
+                         help="BF relative SVD cutoff (default 0 = none)")
     p_batch.add_argument("--smooth", type=float,
                          help="BF smoothing FWHM [km/s]")
     p_batch.add_argument("--components", type=int, default=2, choices=[1, 2],

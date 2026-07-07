@@ -10,6 +10,33 @@ uygular ve şu kaynaklardan derlenmiştir:
   Rucinski'nin SVD tabanlı Çizgi Genişleme Fonksiyonu yöntemi; örten çift
   sistemlerin (SB2) iki bileşeninin RV'lerinin ayrı ayrı ölçümü.
 
+> **BF referans gerçeklemesi:** BF hesabı, `BF_main.txt` dokümanındaki akışı
+> birebir izler (Rucinski 1999, PyAstronomy `pyasl.SVD` üzerinden):
+> `w1 = w00·(1+r)^k` log-dalgaboyu ızgarası (r = stepV/c), tayfların ızgaraya
+> `np.interp` ile örneklenip SVD'ye **olduğu gibi** (normalize akı, ters
+> çevirmeden) verilmesi, `svd.decompose(şablon, m)` →
+> `svd.getBroadeningFunction(gözlem)` → `svd.getRVAxis(r, 1)` hız ekseni,
+> sigma = 2 piksel Gauss yumuşatması ve **ofsetsiz** tek/çift Gauss uyumu.
+> PyAstronomy kuruluysa doğrudan `pyasl.SVD` kullanılır; değilse aynı
+> algoritmanın bire bir NumPy kopyası çalışır (bit düzeyinde özdeş olduğu
+> doğrulanmıştır).
+
+> **Zaman politikası:** Bütün analiz zamanları **BJD** cinsindendir — yerel/
+> UTC takvim zamanı yalnızca girdi olarak kabul edilip çevrilir. `--obstime`
+> alanına (CLI, widget veya sihirbaz) doğrudan bir **BJD sayısı**
+> (örn. `2453254.847090365`) yazılabilir; bu durumda değer olduğu gibi
+> kullanılır (referans dokümandaki `bjd` listesi gibi). ISOT damgası
+> verilirse poz ortası **BJD_TDB**'ye çevrilir. `batch` modunda ayrıca
+> `--bjd` ile dosya başına BJD listesi verilebilir.
+
+> **Evre desteği:** Işık elemanları `--t0` (BJD, birinci minimum) ve
+> `--period` [gün] verildiğinde her ölçüm için yörünge evresi hesaplanır ve
+> raporlanır (evre ≈ 0.0 → birinci tutulma, ≈ 0.5 → ikinci tutulma).
+> Sonuç dosyalarına evre sütunu eklenir; `batch` BF modunda tüm epokların
+> genişleme fonksiyonları evreye göre sıralanmış olarak
+> `result_BF_profiles.png` içinde üst üste çizilir (tezdeki Şekil 4.3 tarzı),
+> böylece farklı evrelerdeki görünümler tek bakışta izlenebilir.
+
 ---
 
 ## CCF ile BF arasındaki fark nedir?
