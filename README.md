@@ -62,6 +62,34 @@ pip install expecto
 
 ## Kullanım
 
+### 0) Etkileşimli mod / widget arayüzü (önerilen)
+
+Argümansız çalıştırın:
+
+```bash
+python rv_analysis.py
+```
+
+- Sisteminizde **tkinter** varsa bir widget penceresi açılır:
+  1. **Veri dosyaları** — gözlemsel tayf ve sentetik/şablon tayf dosyalarını
+     "Gözat..." ile seçin (şablon boş bırakılırsa T_eff/log g/[Fe/H] alanlarıyla
+     PHOENIX modeli indirilir), istenirse dalgaboyu aralığı girin.
+  2. **Yöntem seçimi** — "Hangi yöntemle devam etmek istiyorsun?": CCF veya BF
+     işaretlenir; seçime göre ilgili parametre alanları görünür.
+  3. **Hesapla** — sonuç metni pencerede, uyum grafiği pencereye gömülü olarak
+     gösterilir; aynı anda `result_CCF.txt`/`result_BF.txt` ve
+     `result_CCF.png`/`result_BF.png` diske kaydedilir.
+- tkinter/ekran yoksa aynı akış **terminal soru-cevap sihirbazı** olarak
+  çalışır (dosya yolları, yöntem seçimi `[1] CCF / [2] BF`, parametreler,
+  isteğe bağlı barycentric düzeltme) ve aynı çıktı dosyaları üretilir.
+
+Her analiz sonunda otomatik üretilen çıktılar (CLI modunda da geçerli):
+
+| Dosya | İçerik |
+|---|---|
+| `result_CCF.txt` / `result_BF.txt` | Girdi dosyaları + RV ± hata (BF'de bileşen başına, genlik/sigma ve ışık oranıyla) |
+| `result_CCF.png` / `result_BF.png` | Uyum (fit) grafiği: veri + Gauss modeli |
+
 ### 1) Kendi kendini test (veri gerekmez)
 
 ```bash

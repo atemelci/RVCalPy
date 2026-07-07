@@ -23,33 +23,42 @@ Bu script iki bağımsız yöntemi bir arada sunar:
    ışık katkılarını verir. BF profillerine tek ya da çift Gauss
    uyumlanarak her bileşenin RV'si ölçülür.
 
+Çalıştırma biçimleri
+--------------------
+# 1) ETKİLEŞİMLİ MOD (önerilen): argümansız çalıştırın.
+#    Grafik arayüz (tkinter widget) açılır: gözlemsel tayf ve sentetik/şablon
+#    tayf dosyaları seçilir, CCF/BF yöntemi işaretlenir, "Hesapla" ile sonuç
+#    ve uyum grafiği pencerede görünür. Ekran/tkinter yoksa otomatik olarak
+#    terminal soru-cevap sihirbazına düşer.
+python rv_analysis.py
+
+# 2) Komut satırı modu (betikleme/tayf serileri için):
+python rv_analysis.py ccf --spectrum tayf.fits --format s2d \
+    --teff 6628 --logg 4.251 --feh 0.17 --rv-min -20 --rv-max 100
+python rv_analysis.py bf --spectrum tayf.txt --template sablon.txt \
+    --vel-range 500 --components 2 --wave-min 5000 --wave-max 5500
+
+# 3) Sentetik veriyle kendi kendini test (veri gerekmez):
+python rv_analysis.py demo --plot demo.png
+
+Çıktılar
+--------
+Her analiz sonunda otomatik olarak (isim verilmezse):
+  result_CCF.txt / result_BF.txt  — sayısal sonuçlar
+  result_CCF.png / result_BF.png  — uyum (fit) grafiği
+
 Desteklenen girdiler
 --------------------
 - ESPRESSO S2D FITS (çok basamaklı echelle: akı ext=1, dalgaboyu ext=4)
 - İki/üç sütunlu metin dosyası: dalgaboyu[Å]  akı  [akı_hatası]
   (IRAF ile indirgenmiş, normalize edilmiş, birleştirilmiş tayf — tezdeki
    5000–5500 Å bölgesi gibi)
-- Şablon: metin dosyası (dalgaboyu, akı) veya `expecto` kuruluysa
-  PHOENIX modelinden otomatik indirme (--teff/--logg/--feh).
-
-Kullanım örnekleri
-------------------
-# Sentetik veriyle kendi kendini test (veri gerekmez):
-python rv_analysis.py demo
-
-# Çalıştaydaki gibi ESPRESSO S2D tayfından CCF ile RV:
-python rv_analysis.py ccf --spectrum ESPRESSO_S2D_BLAZE_A.fits --format s2d \
-    --teff 6628 --logg 4.251 --feh 0.17 --rv-min -20 --rv-max 100 --rv-step 0.5
-
-# Tezdeki gibi normalize tayftan BF ile SB2 çift sistemin iki bileşeninin RV'si:
-python rv_analysis.py bf --spectrum tayf_5000_5500.txt --template sablon.txt \
-    --vel-range 500 --components 2 --wave-min 5000 --wave-max 5500
-
-Çıktılar: terminale RV ± hata, istenirse PNG grafik (--plot) ve
-sonuç metin dosyası (--output).
+- Şablon/sentetik tayf: metin dosyası (dalgaboyu, akı) veya `expecto`
+  kuruluysa PHOENIX modelinden otomatik indirme (--teff/--logg/--feh).
 """
 
 import argparse
+import os
 import sys
 
 import numpy as np
@@ -109,7 +118,7 @@ def read_spectrum(path, fmt="auto"):
 
 
 def load_template(args):
-    """Şablon tayfı yükle: dosyadan ya da expecto/PHOENIX'ten."""
+    """Şablon/sentetik tayfı yükle: dosyadan ya da expecto/PHOENIX'ten."""
     if args.template:
         data = np.loadtxt(args.template)
         return data[:, 0], data[:, 1]
@@ -121,7 +130,7 @@ def load_template(args):
                      "Kurulum: pip install expecto  (veya --template dosya.txt kullanın)")
         tpl = get_spectrum(T_eff=args.teff, log_g=args.logg, Z=args.feh, cache=True)
         return tpl.wavelength.value, tpl.flux.value
-    sys.exit("Şablon gerekli: --template DOSYA veya --teff/--logg/--feh verin.")
+    raise ValueError("Şablon gerekli: şablon dosyası veya T_eff/log g/[Fe/H] verin.")
 
 
 def barycentric_correction(ra_deg, dec_deg, obstime_isot, site):
@@ -332,41 +341,38 @@ def fit_bf_peaks(velocity, bf, components=1, min_sep=30.0):
 
 
 # ----------------------------------------------------------------------
-# Grafikler
+# Grafikler (pyplot yerine OO Figure: hem dosyaya kayıt hem GUI'ye gömme
+# aynı fonksiyonla, backend çakışması olmadan yapılabilsin diye)
 # ----------------------------------------------------------------------
 
-def plot_ccf(result, outfile):
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+def make_ccf_figure(result):
+    from matplotlib.figure import Figure
+    fig = Figure(figsize=(10, 8))
+    ax0, ax1 = fig.subplots(2, 1, sharex=True)
 
-    fig, axes = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
     for ccf in result["ccf_orders"]:
-        axes[0].plot(result["rv_grid"], ccf, lw=0.6, alpha=0.5)
-    axes[0].set_ylabel("CCF (basamak başına)")
-    axes[0].set_title("Basamak CCF'leri ve toplam CCF + Gauss uyumu")
+        ax0.plot(result["rv_grid"], ccf, lw=0.6, alpha=0.5)
+    ax0.set_ylabel("CCF (basamak başına)")
+    ax0.set_title("Basamak CCF'leri ve toplam CCF + Gauss uyumu")
 
-    axes[1].plot(result["rv_grid"], result["ccf_total"], "k-", lw=1.2,
-                 label="Toplam CCF (normalize)")
-    axes[1].plot(result["rv_grid"], gauss(result["rv_grid"], *result["popt"]),
-                 "r-", lw=2, alpha=0.7,
-                 label=f"Gauss: RV = {result['rv']:.3f} ± {result['rv_err']:.3f} km/s")
-    axes[1].axvline(result["rv"], color="r", ls=":", lw=1)
-    axes[1].set_xlabel("RV [km/s]")
-    axes[1].set_ylabel("Normalize CCF")
-    axes[1].legend()
+    ax1.plot(result["rv_grid"], result["ccf_total"], "k-", lw=1.2,
+             label="Toplam CCF (normalize)")
+    ax1.plot(result["rv_grid"], gauss(result["rv_grid"], *result["popt"]),
+             "r-", lw=2, alpha=0.7,
+             label=f"Gauss: RV = {result['rv']:.3f} ± {result['rv_err']:.3f} km/s")
+    ax1.axvline(result["rv"], color="r", ls=":", lw=1)
+    ax1.set_xlabel("RV [km/s]")
+    ax1.set_ylabel("Normalize CCF")
+    ax1.legend()
     fig.tight_layout()
-    fig.savefig(outfile, dpi=150)
-    print(f"Grafik kaydedildi: {outfile}")
+    return fig
 
 
-def plot_bf(bf_result, comps, popt, components, outfile):
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
+def make_bf_figure(bf_result, comps, popt, components):
+    from matplotlib.figure import Figure
     v = bf_result["velocity"]
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig = Figure(figsize=(10, 6))
+    ax = fig.subplots()
     ax.plot(v, bf_result["bf"], color="0.7", lw=0.8, label="BF (ham)")
     ax.plot(v, bf_result["bf_smooth"], "b-", lw=1.5, label="BF (yumuşatılmış)")
     model = gauss(v, *popt) if components == 1 else two_gauss(v, *popt)
@@ -380,12 +386,17 @@ def plot_bf(bf_result, comps, popt, components, outfile):
     ax.set_title("Broadening Function ve Gauss uyumlaması")
     ax.legend()
     fig.tight_layout()
+    return fig
+
+
+def save_figure(fig, outfile):
     fig.savefig(outfile, dpi=150)
     print(f"Grafik kaydedildi: {outfile}")
 
 
 # ----------------------------------------------------------------------
-# Alt komutlar
+# Analiz komutları — hem CLI hem etkileşimli mod bunları çağırır.
+# Sonuçlar her zaman result_CCF/result_BF dosyalarına (txt + png) yazılır.
 # ----------------------------------------------------------------------
 
 def cmd_ccf(args):
@@ -407,18 +418,28 @@ def cmd_ccf(args):
         print(f"Barycentric düzeltme: {vbary:+.4f} km/s")
 
     rv = result["rv"] + vbary
-    print("\n================ CCF SONUCU ================")
-    print(f"RV = {rv:.4f} ± {result['rv_err']:.4f} km/s"
-          + ("  (barycentric düzeltilmiş)" if vbary else ""))
-    print("============================================")
+    summary = ("================ CCF SONUCU ================\n"
+               f"Gözlemsel tayf : {args.spectrum}\n"
+               f"Şablon         : {args.template or f'PHOENIX T={args.teff}K'}\n"
+               f"RV = {rv:.4f} ± {result['rv_err']:.4f} km/s"
+               + ("  (barycentric düzeltilmiş)\n" if vbary else "\n")
+               + "============================================")
+    print("\n" + summary)
 
-    if args.output:
-        with open(args.output, "w") as f:
-            f.write("# yontem  RV[km/s]  RV_hata[km/s]  bary_duzeltme[km/s]\n")
-            f.write(f"CCF  {rv:.5f}  {result['rv_err']:.5f}  {vbary:.5f}\n")
-        print(f"Sonuç yazıldı: {args.output}")
-    if args.plot:
-        plot_ccf(result, args.plot)
+    outfile = args.output or "result_CCF.txt"
+    with open(outfile, "w") as f:
+        f.write(f"# Gozlemsel tayf : {args.spectrum}\n")
+        f.write(f"# Sablon         : {args.template or f'PHOENIX T={args.teff}K'}\n")
+        f.write("# yontem  RV[km/s]  RV_hata[km/s]  bary_duzeltme[km/s]\n")
+        f.write(f"CCF  {rv:.5f}  {result['rv_err']:.5f}  {vbary:.5f}\n")
+    print(f"Sonuç yazıldı: {outfile}")
+
+    plotfile = args.plot or "result_CCF.png"
+    fig = make_ccf_figure(result)
+    save_figure(fig, plotfile)
+
+    return dict(method="CCF", fig=fig, text=summary,
+                output=outfile, plot=plotfile)
 
 
 def cmd_bf(args):
@@ -455,27 +476,38 @@ def cmd_bf(args):
         vbary = barycentric_correction(args.ra, args.dec, args.obstime, args.site)
         print(f"Barycentric düzeltme: {vbary:+.4f} km/s")
 
-    print("\n================ BF SONUCU =================")
+    lines = ["================ BF SONUCU =================",
+             f"Gözlemsel tayf : {args.spectrum}",
+             f"Şablon         : {args.template or f'PHOENIX T={args.teff}K'}"]
     for i, c in enumerate(comps, 1):
-        print(f"Bileşen {i}: RV = {c['rv'] + vbary:.4f} ± {c['rv_err']:.4f} km/s   "
-              f"(genlik={c['amp']:.4f}, sigma={c['sigma']:.2f} km/s)")
+        lines.append(f"Bileşen {i}: RV = {c['rv'] + vbary:.4f} ± {c['rv_err']:.4f} km/s"
+                     f"   (genlik={c['amp']:.4f}, sigma={c['sigma']:.2f} km/s)")
     if len(comps) == 2 and (comps[0]["amp"] > 0) and (comps[1]["amp"] > 0):
         # BF alan oranı ~ ışık katkısı oranı; genlik·sigma ile yaklaşıklanır
         l2_l1 = (comps[1]["amp"] * comps[1]["sigma"]) / \
                 (comps[0]["amp"] * comps[0]["sigma"])
-        print(f"Işık katkısı oranı (B2/B1, BF alanlarından) ≈ {l2_l1:.3f}")
-    print("============================================")
+        lines.append(f"Işık katkısı oranı (B2/B1, BF alanlarından) ≈ {l2_l1:.3f}")
+    lines.append("============================================")
+    summary = "\n".join(lines)
+    print("\n" + summary)
 
-    if args.output:
-        with open(args.output, "w") as f:
-            f.write("# bilesen  RV[km/s]  RV_hata[km/s]  genlik  sigma[km/s]  "
-                    "bary_duzeltme[km/s]\n")
-            for i, c in enumerate(comps, 1):
-                f.write(f"{i}  {c['rv'] + vbary:.5f}  {c['rv_err']:.5f}  "
-                        f"{c['amp']:.5f}  {c['sigma']:.5f}  {vbary:.5f}\n")
-        print(f"Sonuç yazıldı: {args.output}")
-    if args.plot:
-        plot_bf(bf_result, comps, popt, args.components, args.plot)
+    outfile = args.output or "result_BF.txt"
+    with open(outfile, "w") as f:
+        f.write(f"# Gozlemsel tayf : {args.spectrum}\n")
+        f.write(f"# Sablon         : {args.template or f'PHOENIX T={args.teff}K'}\n")
+        f.write("# bilesen  RV[km/s]  RV_hata[km/s]  genlik  sigma[km/s]  "
+                "bary_duzeltme[km/s]\n")
+        for i, c in enumerate(comps, 1):
+            f.write(f"{i}  {c['rv'] + vbary:.5f}  {c['rv_err']:.5f}  "
+                    f"{c['amp']:.5f}  {c['sigma']:.5f}  {vbary:.5f}\n")
+    print(f"Sonuç yazıldı: {outfile}")
+
+    plotfile = args.plot or "result_BF.png"
+    fig = make_bf_figure(bf_result, comps, popt, args.components)
+    save_figure(fig, plotfile)
+
+    return dict(method="BF", fig=fig, text=summary,
+                output=outfile, plot=plotfile)
 
 
 def cmd_demo(args):
@@ -541,11 +573,10 @@ def cmd_demo(args):
           f"ΔRV2 = {ccomp[1]['rv'] - rv2_true:+.3f}")
 
     if args.plot:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
+        from matplotlib.figure import Figure
 
-        fig, axes = plt.subplots(3, 1, figsize=(11, 11))
+        fig = Figure(figsize=(11, 11))
+        axes = fig.subplots(3, 1)
         sel = (wl > 5195) & (wl < 5235)
         axes[0].plot(wl[sel], obs[sel], "k-", lw=0.8, label="Gözlenen (SB2, sentetik)")
         axes[0].plot(wl[sel], tpl[sel], "C0-", lw=0.8, alpha=0.6, label="Şablon")
@@ -574,8 +605,311 @@ def cmd_demo(args):
         axes[2].legend()
 
         fig.tight_layout()
-        fig.savefig(args.plot, dpi=150)
-        print(f"\nKarşılaştırma grafiği kaydedildi: {args.plot}")
+        save_figure(fig, args.plot)
+
+
+# ----------------------------------------------------------------------
+# Etkileşimli mod — argümansız çalıştırınca devreye girer.
+# Önce tkinter widget arayüzü denenir; ekran/tkinter yoksa terminal
+# soru-cevap sihirbazına düşülür. İkisi de aynı cmd_ccf/cmd_bf çekirdeğini
+# çağırır, dolayısıyla çıktılar (result_*.txt + result_*.png) özdeştir.
+# ----------------------------------------------------------------------
+
+def make_args(**overrides):
+    """cmd_ccf/cmd_bf'nin beklediği tüm alanları içeren Namespace üretir."""
+    base = dict(spectrum=None, format="auto", template=None,
+                teff=None, logg=4.5, feh=0.0,
+                wave_min=None, wave_max=None,
+                ra=None, dec=None, obstime=None, site="paranal",
+                plot=None, output=None,
+                rv_min=-200.0, rv_max=200.0, rv_step=0.5,
+                vel_range=400.0, dv=None, svd_rcond=1e-3, smooth=None,
+                components=1, min_sep=30.0)
+    base.update(overrides)
+    return argparse.Namespace(**base)
+
+
+def ask(prompt, default=None, cast=str, validate=None, allow_empty=False):
+    """Terminal sihirbazı için tek soru: varsayılanlı, doğrulamalı input."""
+    while True:
+        suffix = f" [{default}]" if default not in (None, "") else ""
+        raw = input(f"{prompt}{suffix}: ").strip()
+        if not raw:
+            if default is not None:
+                return default
+            if allow_empty:
+                return None
+            print("  Bu alan boş bırakılamaz.")
+            continue
+        try:
+            val = cast(raw)
+        except (TypeError, ValueError):
+            print("  Geçersiz değer, tekrar deneyin.")
+            continue
+        if validate is not None and not validate(val):
+            print("  Geçersiz seçim, tekrar deneyin.")
+            continue
+        return val
+
+
+def _ask_common_inputs():
+    """Her iki yöntem için ortak girdileri sor: dosyalar, dalgaboyu aralığı."""
+    spectrum = ask("Gözlemsel tayf dosyası (FITS S2D veya metin)",
+                   cast=str, validate=os.path.isfile)
+    template = ask("Sentetik/şablon tayf dosyası (boş: PHOENIX modeli indirilecek)",
+                   allow_empty=True,
+                   validate=lambda p: p is None or os.path.isfile(p))
+    kw = dict(spectrum=spectrum, template=template)
+    if template is None:
+        kw["teff"] = ask("  Şablon T_eff [K]", cast=float)
+        kw["logg"] = ask("  Şablon log g", default=4.5, cast=float)
+        kw["feh"] = ask("  Şablon [Fe/H]", default=0.0, cast=float)
+    kw["wave_min"] = ask("Kullanılacak min dalgaboyu [Å] (boş: tümü)",
+                         allow_empty=True, cast=float)
+    kw["wave_max"] = ask("Kullanılacak max dalgaboyu [Å] (boş: tümü)",
+                         allow_empty=True, cast=float)
+    return kw
+
+
+def _ask_barycentric(kw):
+    yanit = ask("Barycentric düzeltme uygulansın mı? (e/h)", default="h",
+                cast=str, validate=lambda s: s.lower() in ("e", "h"))
+    if yanit.lower() == "e":
+        kw["ra"] = ask("  RA [derece]", cast=float)
+        kw["dec"] = ask("  Dec [derece]", cast=float)
+        kw["obstime"] = ask("  Gözlem zamanı (ISOT, ör. 2024-12-03T02:30:00)")
+        kw["site"] = ask("  Gözlemevi (astropy adı: tug, paranal, ...)",
+                         default="tug")
+    return kw
+
+
+def run_terminal_wizard():
+    """Terminal üzerinden adım adım RV analizi (GUI açılamadığında)."""
+    print("=" * 60)
+    print(" RV ANALİZİ — Etkileşimli Terminal Modu")
+    print("=" * 60)
+
+    kw = _ask_common_inputs()
+
+    print("\nHangi yöntemle devam etmek istiyorsun?")
+    print("  [1] CCF — Çapraz Korelasyon (tek yıldız / SB1 için pratik)")
+    print("  [2] BF  — Broadening Function (çift sistem / SB2 için önerilen)")
+    secim = ask("Seçim", default="2", cast=str,
+                validate=lambda s: s in ("1", "2"))
+
+    if secim == "1":
+        kw["rv_min"] = ask("RV tarama alt sınırı [km/s]", default=-200.0, cast=float)
+        kw["rv_max"] = ask("RV tarama üst sınırı [km/s]", default=200.0, cast=float)
+        kw["rv_step"] = ask("RV adımı [km/s]", default=0.5, cast=float)
+        kw = _ask_barycentric(kw)
+        print()
+        cmd_ccf(make_args(**kw))
+    else:
+        kw["vel_range"] = ask("BF penceresi yarı genişliği [km/s]",
+                              default=400.0, cast=float)
+        kw["components"] = ask("Bileşen sayısı (SB1=1, SB2=2)", default=2,
+                               cast=int, validate=lambda n: n in (1, 2))
+        kw["smooth"] = ask("BF yumuşatma FWHM [km/s] (boş: otomatik)",
+                           allow_empty=True, cast=float)
+        kw["svd_rcond"] = ask("SVD kesme eşiği", default=1e-3, cast=float)
+        kw = _ask_barycentric(kw)
+        print()
+        cmd_bf(make_args(**kw))
+
+    print("\nBitti. Sonuç dosyaları ve uyum grafiği çalışma dizinine kaydedildi.")
+
+
+def run_gui():
+    """tkinter widget arayüzü: dosya seçimi, yöntem seçimi, gömülü uyum grafiği.
+
+    Analiz çekirdeği CLI ile aynı (cmd_ccf/cmd_bf); sonuç metni pencerede
+    gösterilir, dosyalar (result_*.txt, result_*.png) yine diske yazılır.
+    """
+    import tkinter as tk
+    from tkinter import ttk, filedialog, messagebox
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+    root = tk.Tk()
+    root.title("RV Analizi — CCF / BF")
+
+    main = ttk.Frame(root, padding=10)
+    main.grid(row=0, column=0, sticky="nsew")
+    root.columnconfigure(0, weight=1)
+    root.rowconfigure(0, weight=1)
+
+    # --- 1) Veri dosyaları ------------------------------------------------
+    files = ttk.LabelFrame(main, text="1) Veri dosyaları", padding=8)
+    files.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+    files.columnconfigure(1, weight=1)
+
+    spec_var = tk.StringVar()
+    tpl_var = tk.StringVar()
+
+    def browse(var, title):
+        p = filedialog.askopenfilename(
+            title=title,
+            filetypes=[("Tayf dosyaları", "*.fits *.fit *.txt *.dat *.ascii"),
+                       ("Tümü", "*.*")])
+        if p:
+            var.set(p)
+
+    ttk.Label(files, text="Gözlemsel tayf:").grid(row=0, column=0, sticky="w")
+    ttk.Entry(files, textvariable=spec_var, width=52).grid(row=0, column=1,
+                                                           sticky="ew", padx=4)
+    ttk.Button(files, text="Gözat...",
+               command=lambda: browse(spec_var, "Gözlemsel tayf seç")
+               ).grid(row=0, column=2)
+
+    ttk.Label(files, text="Sentetik/şablon tayf:").grid(row=1, column=0, sticky="w")
+    ttk.Entry(files, textvariable=tpl_var, width=52).grid(row=1, column=1,
+                                                          sticky="ew", padx=4)
+    ttk.Button(files, text="Gözat...",
+               command=lambda: browse(tpl_var, "Şablon tayf seç")
+               ).grid(row=1, column=2)
+
+    teff_var, logg_var, feh_var = tk.StringVar(), tk.StringVar(value="4.5"), \
+        tk.StringVar(value="0.0")
+    phx = ttk.Frame(files)
+    phx.grid(row=2, column=0, columnspan=3, sticky="w", pady=(4, 0))
+    ttk.Label(phx, text="Şablon dosyası boşsa PHOENIX (expecto):  T_eff[K]"
+              ).pack(side="left")
+    ttk.Entry(phx, textvariable=teff_var, width=7).pack(side="left", padx=2)
+    ttk.Label(phx, text="log g").pack(side="left")
+    ttk.Entry(phx, textvariable=logg_var, width=5).pack(side="left", padx=2)
+    ttk.Label(phx, text="[Fe/H]").pack(side="left")
+    ttk.Entry(phx, textvariable=feh_var, width=5).pack(side="left", padx=2)
+
+    wmin_var, wmax_var = tk.StringVar(), tk.StringVar()
+    wrng = ttk.Frame(files)
+    wrng.grid(row=3, column=0, columnspan=3, sticky="w", pady=(4, 0))
+    ttk.Label(wrng, text="Dalgaboyu aralığı [Å] (boş: tümü):  min").pack(side="left")
+    ttk.Entry(wrng, textvariable=wmin_var, width=8).pack(side="left", padx=2)
+    ttk.Label(wrng, text="max").pack(side="left")
+    ttk.Entry(wrng, textvariable=wmax_var, width=8).pack(side="left", padx=2)
+
+    # --- 2) Yöntem seçimi -------------------------------------------------
+    method_var = tk.StringVar(value="BF")
+    method_box = ttk.LabelFrame(main, text="2) Hangi yöntemle devam etmek "
+                                           "istiyorsun?", padding=8)
+    method_box.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+
+    ccf_frame = ttk.Frame(method_box)
+    bf_frame = ttk.Frame(method_box)
+
+    def on_method_change():
+        if method_var.get() == "CCF":
+            bf_frame.grid_remove()
+            ccf_frame.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        else:
+            ccf_frame.grid_remove()
+            bf_frame.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+    ttk.Radiobutton(method_box, text="CCF — Çapraz Korelasyon (SB1 / tek yıldız)",
+                    variable=method_var, value="CCF",
+                    command=on_method_change).grid(row=0, column=0, sticky="w")
+    ttk.Radiobutton(method_box, text="BF — Broadening Function (SB2 / çift sistem)",
+                    variable=method_var, value="BF",
+                    command=on_method_change).grid(row=0, column=1, sticky="w",
+                                                   padx=12)
+
+    rvmin_var = tk.StringVar(value="-200")
+    rvmax_var = tk.StringVar(value="200")
+    rvstep_var = tk.StringVar(value="0.5")
+    for j, (lbl, var) in enumerate([("RV min [km/s]", rvmin_var),
+                                    ("RV max [km/s]", rvmax_var),
+                                    ("RV adımı [km/s]", rvstep_var)]):
+        ttk.Label(ccf_frame, text=lbl).grid(row=0, column=2 * j, sticky="w")
+        ttk.Entry(ccf_frame, textvariable=var, width=8).grid(row=0, column=2 * j + 1,
+                                                             padx=(2, 10))
+
+    vrange_var = tk.StringVar(value="400")
+    comp_var = tk.IntVar(value=2)
+    smooth_var = tk.StringVar()
+    rcond_var = tk.StringVar(value="1e-3")
+    ttk.Label(bf_frame, text="Pencere ±[km/s]").grid(row=0, column=0, sticky="w")
+    ttk.Entry(bf_frame, textvariable=vrange_var, width=8).grid(row=0, column=1,
+                                                               padx=(2, 10))
+    ttk.Label(bf_frame, text="Bileşen").grid(row=0, column=2, sticky="w")
+    ttk.Combobox(bf_frame, textvariable=comp_var, values=[1, 2], width=3,
+                 state="readonly").grid(row=0, column=3, padx=(2, 10))
+    ttk.Label(bf_frame, text="Yumuşatma FWHM [km/s]").grid(row=0, column=4,
+                                                           sticky="w")
+    ttk.Entry(bf_frame, textvariable=smooth_var, width=8).grid(row=0, column=5,
+                                                               padx=(2, 10))
+    ttk.Label(bf_frame, text="SVD eşiği").grid(row=0, column=6, sticky="w")
+    ttk.Entry(bf_frame, textvariable=rcond_var, width=8).grid(row=0, column=7,
+                                                              padx=2)
+    on_method_change()
+
+    # --- 3) Sonuç metni + gömülü grafik ------------------------------------
+    result_text = tk.Text(main, height=8, width=100, state="disabled",
+                          font=("Courier", 10))
+    result_text.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(6, 6))
+
+    plot_frame = ttk.LabelFrame(main, text="Uyum grafiği (result_*.png olarak da "
+                                           "kaydedilir)", padding=4)
+    plot_frame.grid(row=4, column=0, columnspan=2, sticky="nsew")
+    main.rowconfigure(4, weight=1)
+    main.columnconfigure(0, weight=1)
+    canvas_holder = {"canvas": None}
+
+    def _f(var, default=None):
+        """StringVar -> float (boşsa default)."""
+        s = var.get().strip()
+        return float(s) if s else default
+
+    def hesapla():
+        try:
+            if not spec_var.get().strip():
+                raise ValueError("Gözlemsel tayf dosyası seçilmedi.")
+            kw = dict(spectrum=spec_var.get().strip(),
+                      template=tpl_var.get().strip() or None,
+                      teff=_f(teff_var), logg=_f(logg_var, 4.5),
+                      feh=_f(feh_var, 0.0),
+                      wave_min=_f(wmin_var), wave_max=_f(wmax_var))
+            if method_var.get() == "CCF":
+                kw.update(rv_min=_f(rvmin_var, -200.0),
+                          rv_max=_f(rvmax_var, 200.0),
+                          rv_step=_f(rvstep_var, 0.5))
+                payload = cmd_ccf(make_args(**kw))
+            else:
+                kw.update(vel_range=_f(vrange_var, 400.0),
+                          components=int(comp_var.get()),
+                          smooth=_f(smooth_var),
+                          svd_rcond=_f(rcond_var, 1e-3))
+                payload = cmd_bf(make_args(**kw))
+        except Exception as exc:
+            messagebox.showerror("Hata", str(exc))
+            return
+
+        result_text.configure(state="normal")
+        result_text.delete("1.0", "end")
+        result_text.insert("1.0", payload["text"] + "\n"
+                           f"Dosyalar: {payload['output']}, {payload['plot']}")
+        result_text.configure(state="disabled")
+
+        if canvas_holder["canvas"] is not None:
+            canvas_holder["canvas"].get_tk_widget().destroy()
+        canvas = FigureCanvasTkAgg(payload["fig"], master=plot_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill="both", expand=True)
+        canvas_holder["canvas"] = canvas
+
+    ttk.Button(main, text="3) Hesapla", command=hesapla
+               ).grid(row=2, column=0, columnspan=2, pady=4)
+
+    root.mainloop()
+
+
+def run_interactive():
+    """Argümansız çalıştırma: önce widget (GUI), olmuyorsa terminal sihirbazı."""
+    try:
+        run_gui()
+        return
+    except Exception as exc:
+        print(f"Grafik arayüz açılamadı ({exc.__class__.__name__}: {exc})")
+        print("Terminal moduna geçiliyor...\n")
+    run_terminal_wizard()
 
 
 # ----------------------------------------------------------------------
@@ -583,10 +917,10 @@ def cmd_demo(args):
 # ----------------------------------------------------------------------
 
 def add_common_args(p):
-    p.add_argument("--spectrum", required=True, help="Gözlenen tayf dosyası")
+    p.add_argument("--spectrum", required=True, help="Gözlemsel tayf dosyası")
     p.add_argument("--format", default="auto", choices=["auto", "s2d", "text"],
                    help="Tayf formatı (auto: uzantıdan sez)")
-    p.add_argument("--template", help="Şablon tayf dosyası (dalgaboyu, akı)")
+    p.add_argument("--template", help="Sentetik/şablon tayf dosyası (dalgaboyu, akı)")
     p.add_argument("--teff", type=float, help="Şablon için T_eff [K] (expecto)")
     p.add_argument("--logg", type=float, default=4.5, help="Şablon log g")
     p.add_argument("--feh", type=float, default=0.0, help="Şablon [Fe/H]")
@@ -597,16 +931,26 @@ def add_common_args(p):
     p.add_argument("--obstime", help="Gözlem zamanı (ISOT, ör. 2024-12-03T02:30:00)")
     p.add_argument("--site", default="paranal",
                    help="Gözlemevi adı (astropy site adı, ör. paranal, tug)")
-    p.add_argument("--plot", help="Grafik PNG dosya adı")
-    p.add_argument("--output", help="Sonuçların yazılacağı metin dosyası")
+    p.add_argument("--plot", help="Grafik PNG dosya adı "
+                                  "(varsayılan: result_CCF.png / result_BF.png)")
+    p.add_argument("--output", help="Sonuç metin dosyası "
+                                    "(varsayılan: result_CCF.txt / result_BF.txt)")
 
 
 def main():
+    # Argümansız çalıştırma -> etkileşimli mod (widget veya terminal sihirbazı)
+    if len(sys.argv) == 1:
+        run_interactive()
+        return
+
     parser = argparse.ArgumentParser(
-        description="Tayftan dikine hız (RV) hesabı: CCF ve BF yöntemleri",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__.split("Kullanım örnekleri")[1] if "Kullanım örnekleri" in __doc__ else "")
+        description="Tayftan dikine hız (RV) hesabı: CCF ve BF yöntemleri. "
+                    "Argümansız çalıştırınca etkileşimli mod açılır.",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p_gui = sub.add_parser("gui", help="Widget arayüzünü aç (argümansızla aynı)")
+    p_gui.set_defaults(func=lambda a: run_interactive())
 
     p_ccf = sub.add_parser("ccf", help="Çapraz korelasyon (çalıştay yöntemi)")
     add_common_args(p_ccf)

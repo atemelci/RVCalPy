@@ -7,3 +7,4 @@ __pycache__/
 # Analiz çıktıları
 *.png
 *_sonuc.txt
+result_*.txt
