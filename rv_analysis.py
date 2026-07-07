@@ -218,7 +218,8 @@ def fits_header_info(path):
     interpreted as hourangle/deg.
     """
     from astropy.io import fits
-    info = {"object": None, "obstime": None, "ra": None, "dec": None}
+    info = {"object": None, "obstime": None, "ra": None, "dec": None,
+            "exptime": None}
     try:
         with fits.open(path) as hdul:
             h = hdul[0].header
@@ -226,6 +227,7 @@ def fits_header_info(path):
         return info
     info["object"] = h.get("OBJECT")
     info["obstime"] = h.get("DATE-OBS") or h.get("DATE_OBS")
+    info["exptime"] = h.get("EXPTIME")
     ra, dec = h.get("RA"), h.get("DEC")
     try:
         if isinstance(ra, (int, float)) and isinstance(dec, (int, float)):
@@ -821,6 +823,159 @@ def cmd_normalize(args):
     print("\n" + summary)
     return dict(method="normalize", fig=fig, text=summary,
                 output=outfile, plot=plotfile, wl=wl, flux=nf)
+
+
+def compute_bjd(obstime_isot, ra_deg, dec_deg, site, exptime=None):
+    """Mid-exposure BJD_TDB from a UTC time stamp (thesis: light curves and
+    RVs are phased in Barycentric Julian Date)."""
+    from astropy.coordinates import SkyCoord, EarthLocation
+    from astropy.time import Time
+    import astropy.units as u
+
+    t = Time(obstime_isot, format="isot", scale="utc")
+    if exptime:
+        t = t + (float(exptime) / 2.0) * u.s
+    loc = EarthLocation.of_site(site)
+    coord = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg)
+    ltt = t.light_travel_time(coord, kind="barycentric", location=loc)
+    return float((t.tdb + ltt).jd)
+
+
+def make_rv_curve_figure(rows, ncomp, t0=None, period=None):
+    """RV curve figure: RV vs BJD, or vs orbital phase when an ephemeris
+    (t0, period) is given."""
+    from matplotlib.figure import Figure
+    fig = Figure(figsize=(9, 5))
+    ax = fig.subplots()
+
+    bjd = np.array([r["bjd"] for r in rows], dtype=float)
+    folded = t0 is not None and period is not None and np.isfinite(bjd).all()
+    x = ((bjd - t0) / period) % 1.0 if folded else bjd
+
+    colors = ["C0", "C3"]
+    labels = ["Component 1", "Component 2"]
+    for j in range(ncomp):
+        rv = [r["rv"][j] for r in rows]
+        err = [r["rv_err"][j] for r in rows]
+        ax.errorbar(x, rv, yerr=err, fmt="o", ms=5, capsize=2,
+                    color=colors[j], label=labels[j])
+    ax.set_xlabel("Orbital phase" if folded else "BJD_TDB")
+    ax.set_ylabel("RV [km/s]")
+    ax.set_title("Radial velocity curve")
+    ax.legend()
+    fig.tight_layout()
+    return fig
+
+
+def cmd_batch(args):
+    """Process a spectral time series into an RV curve file.
+
+    For every input spectrum: optional continuum normalization (raw FITS
+    series), BF or CCF measurement, barycentric correction and BJD_TDB
+    computation from the FITS header (DATE-OBS/EXPTIME) or --obstime.
+    In SB2 mode the component with the larger BF area (larger light
+    contribution) is always reported as component 1, so the labels do not
+    swap between epochs.
+
+    Output: result_RV_curve.txt (file, BJD_TDB, RV per component) and
+    result_RV_curve.png — ready to be phased and fed to PyWD2015.
+    """
+    import glob
+    files = sorted(set(sum((glob.glob(p) for p in args.spectra), [])))
+    if not files:
+        sys.exit("No files match the given pattern(s).")
+    print(f"{len(files)} spectra to process.\n")
+
+    tpl_wl, tpl_flux = load_template(args)
+
+    # coordinates once (SIMBAD / explicit); per-file obstime from headers
+    ra, dec = args.ra, args.dec
+    if ra is None and args.object:
+        try:
+            ra, dec = resolve_target(args.object)
+            print(f"SIMBAD: '{args.object}' -> RA = {ra:.5f} deg, "
+                  f"Dec = {dec:.5f} deg\n")
+        except ValueError as exc:
+            print(f"Warning: {exc}\n")
+
+    ncomp = args.components
+    rows = []
+    for path in files:
+        print(f"--- {os.path.basename(path)} ---")
+        try:
+            if args.normalize:
+                wl, fx, _ = normalize_spectrum_file(
+                    path, args.format, poly_order=args.poly_order,
+                    iterations=args.iterations)
+            else:
+                orders = read_spectrum(path, args.format)
+                wl = np.concatenate([w for w, _ in orders])
+                fx = np.concatenate([f for _, f in orders])
+                srt = np.argsort(wl)
+                wl, fx = wl[srt], fx[srt]
+            if args.wave_min or args.wave_max:
+                lo = args.wave_min or -np.inf
+                hi = args.wave_max or np.inf
+                sel = (wl >= lo) & (wl <= hi)
+                wl, fx = wl[sel], fx[sel]
+
+            hdr = fits_header_info(path)
+            obstime = args.obstime or hdr["obstime"]
+            ra_i = ra if ra is not None else hdr["ra"]
+            dec_i = dec if dec is not None else hdr["dec"]
+
+            if args.method == "bf":
+                bf_result = compute_bf(wl, fx, tpl_wl, tpl_flux,
+                                       vel_range=args.vel_range, dv=args.dv,
+                                       svd_rcond=args.svd_rcond,
+                                       smooth_kms=args.smooth)
+                comps, _ = fit_bf_peaks(bf_result["velocity"],
+                                        bf_result["bf_smooth"],
+                                        components=ncomp,
+                                        min_sep=args.min_sep)
+                if ncomp == 2:
+                    # stable labelling: primary = larger BF area
+                    comps.sort(key=lambda c: c["amp"] * c["sigma"],
+                               reverse=True)
+            else:
+                result = run_ccf([(wl, fx)], tpl_wl, tpl_flux,
+                                 args.rv_min, args.rv_max, args.rv_step)
+                comps = [dict(rv=result["rv"], rv_err=result["rv_err"])]
+
+            vbary, bjd = 0.0, np.nan
+            if ra_i is not None and obstime:
+                vbary = barycentric_correction(ra_i, dec_i, obstime, args.site)
+                bjd = compute_bjd(obstime, ra_i, dec_i, args.site,
+                                  exptime=hdr.get("exptime"))
+            rows.append(dict(file=os.path.basename(path), bjd=bjd,
+                             rv=[c["rv"] + vbary for c in comps],
+                             rv_err=[c["rv_err"] for c in comps]))
+            msg = ", ".join(f"RV{j + 1} = {c['rv'] + vbary:8.3f} "
+                            f"± {c['rv_err']:.3f}"
+                            for j, c in enumerate(comps))
+            print(f"  BJD = {bjd:.6f}  {msg} km/s")
+        except Exception as exc:
+            print(f"  SKIPPED ({exc.__class__.__name__}: {exc})")
+    if not rows:
+        sys.exit("No spectrum could be processed.")
+
+    outfile = args.output or "result_RV_curve.txt"
+    with open(outfile, "w") as f:
+        f.write(f"# RV curve, method = {args.method.upper()}, "
+                f"template = {args.template or f'PHOENIX T={args.teff}K'}\n")
+        cols = "  ".join(f"RV{j + 1}[km/s]  RV{j + 1}_err" for j in range(ncomp))
+        f.write(f"# file  BJD_TDB  {cols}\n")
+        for r in rows:
+            vals = "  ".join(f"{r['rv'][j]:.5f}  {r['rv_err'][j]:.5f}"
+                             for j in range(len(r["rv"])))
+            f.write(f"{r['file']}  {r['bjd']:.6f}  {vals}\n")
+    print(f"\nRV curve written: {outfile}")
+
+    plotfile = args.plot or "result_RV_curve.png"
+    fig = make_rv_curve_figure(rows, ncomp, t0=args.t0, period=args.period)
+    save_figure(fig, plotfile)
+    return dict(method="batch", fig=fig, output=outfile, plot=plotfile,
+                text=f"{len(rows)} spectra -> {outfile}")
 
 
 def cmd_demo(args):
@@ -1445,6 +1600,66 @@ def main():
     p_bf.add_argument("--min-sep", type=float, default=30.0,
                       help="Minimum separation of the two peaks [km/s]")
     p_bf.set_defaults(func=cmd_bf)
+
+    p_batch = sub.add_parser("batch",
+                             help="Process a spectral time series into an "
+                                  "RV curve (for PyWD2015 etc.)")
+    p_batch.add_argument("--spectra", nargs="+", required=True,
+                         help="Spectrum files or glob patterns "
+                              "(e.g. 'data/*.fits')")
+    p_batch.add_argument("--method", default="bf", choices=["bf", "ccf"],
+                         help="RV measurement method (default: bf)")
+    p_batch.add_argument("--format", default="auto",
+                         choices=["auto", "s2d", "text"])
+    p_batch.add_argument("--template",
+                         help="Synthetic template file (.prf/.obs/ASCII)")
+    p_batch.add_argument("--teff", type=float, help="Template T_eff [K] (expecto)")
+    p_batch.add_argument("--logg", type=float, default=4.5, help="Template log g")
+    p_batch.add_argument("--feh", type=float, default=0.0, help="Template [Fe/H]")
+    p_batch.add_argument("--wave-min", type=float,
+                         help="Minimum wavelength to use [A]")
+    p_batch.add_argument("--wave-max", type=float,
+                         help="Maximum wavelength to use [A]")
+    p_batch.add_argument("--normalize", action="store_true",
+                         help="Continuum-normalize each raw spectrum first")
+    p_batch.add_argument("--poly-order", type=int, default=5,
+                         help="Continuum polynomial order (with --normalize)")
+    p_batch.add_argument("--iterations", type=int, default=8,
+                         help="Clipping iterations (with --normalize)")
+    p_batch.add_argument("--object", help="Star name for SIMBAD coordinates")
+    p_batch.add_argument("--ra", type=float, help="RA [deg]")
+    p_batch.add_argument("--dec", type=float, help="Dec [deg]")
+    p_batch.add_argument("--obstime",
+                         help="Observation time override (default: per-file "
+                              "FITS header DATE-OBS)")
+    p_batch.add_argument("--site", default="paranal",
+                         help="Observatory (astropy site name)")
+    p_batch.add_argument("--vel-range", type=float, default=400.0,
+                         help="BF window half-width [km/s]")
+    p_batch.add_argument("--dv", type=float, help="BF velocity step [km/s]")
+    p_batch.add_argument("--svd-rcond", type=float, default=1e-3,
+                         help="BF SVD cutoff")
+    p_batch.add_argument("--smooth", type=float,
+                         help="BF smoothing FWHM [km/s]")
+    p_batch.add_argument("--components", type=int, default=2, choices=[1, 2],
+                         help="Components to fit (default: 2)")
+    p_batch.add_argument("--min-sep", type=float, default=30.0,
+                         help="Minimum peak separation [km/s]")
+    p_batch.add_argument("--rv-min", type=float, default=-200.0,
+                         help="CCF scan lower limit [km/s]")
+    p_batch.add_argument("--rv-max", type=float, default=200.0,
+                         help="CCF scan upper limit [km/s]")
+    p_batch.add_argument("--rv-step", type=float, default=0.5,
+                         help="CCF step [km/s]")
+    p_batch.add_argument("--t0", type=float,
+                         help="Ephemeris T0 [BJD] for phase-folding the plot")
+    p_batch.add_argument("--period", type=float,
+                         help="Orbital period [days] for phase-folding")
+    p_batch.add_argument("--output", help="RV curve file "
+                                          "(default: result_RV_curve.txt)")
+    p_batch.add_argument("--plot", help="RV curve figure "
+                                        "(default: result_RV_curve.png)")
+    p_batch.set_defaults(func=cmd_batch)
 
     p_norm = sub.add_parser("normalize",
                             help="Continuum-normalize a raw spectrum "
