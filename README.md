@@ -296,14 +296,38 @@ Sentetik tayflar pratikte "sonsuz" çözünürlüklü ve dönmesizdir; gözlemse
 tayfla anlamlı karşılaştırma için, ölçümden **önce** iki etki kullanıcı
 seçimiyle şablona uygulanır (her teleskop/tayfçekerde farklıdır):
 
-- `--resolution R` — tayfçekerin ayırma gücü R = λ/Δλ. Şablon, FWHM = c/R
-  [km/s] Gauss'u ile konvolve edilir (FEROS R≈48000 → 6.2 km/s,
-  ESPRESSO R≈140000 → 2.1 km/s).
+- **Tayfçeker seçimi** — yerleşik listeden bir alet seçildiğinde R otomatik
+  gelir (`--spectrograph FEROS` veya widget'taki "Spectrograph" açılır
+  menüsü). Listede olmayan aletler için R elle girilir (`--resolution` /
+  menüdeki "Custom" seçeneği). Yerleşik tayfçekerler:
+
+  | Alet | R | Not |
+  |---|---|---|
+  | HARPS | 115 000 | ESO 3.6 m, La Silla |
+  | FEROS | 48 000 | MPG/ESO 2.2 m, La Silla |
+  | ESPRESSO | 140 000 | VLT (HR modu) |
+  | SOPHIE | 75 000 | OHP 1.93 m (HR modu) |
+  | UVES | 80 000 | VLT (dar yarık) |
+  | CRIRES+ | 100 000 | VLT (0.2" yarık) |
+  | PEPSI | 120 000 | LBT (standart mod) |
+  | NARVAL | 65 000 | TBL — Gaia benchmark kaynağı |
+  | ESPaDOnS | 68 000 | CFHT — Gaia benchmark kaynağı |
+  | GaiaFGK | 70 000 | Gaia FGK Benchmark Stars kütüphanesi (homojenleştirilmiş) |
+
+  Şablon, FWHM = c/R [km/s] Gauss'u ile konvolve edilir
+  (FEROS → 6.2 km/s, ESPRESSO → 2.1 km/s).
 - `--vsini` [km/s] — izdüşümsel dönme hızı; Gray (1992) dönme profili ile
   (kenar kararma katsayısı `--epsilon`, varsayılan 0.6).
 
-Widget'ta bu ikisi "Resolution R" ve "vsini [km/s]" kutularıdır; boş
-bırakılırsa uygulanmaz. **BF/CCF işlemi bu hazırlıktan sonra yapılır.**
+**vsini alt sınırı (Δv_inst ≈ c/R):** Aletin kendi profili c/R genişliğinde
+olduğundan bunun altındaki dönme çözülemez. Seçilen/girilen R'ye göre bu
+sınır hesaplanıp gösterilir (widget'ta vsini kutusunun yanında canlı ipucu;
+sihirbazda alt sınırın altındaki giriş reddedilir). CLI'da c/R'nin altında
+bir vsini verilirse uyarı basılır ve dönme genişletmesi atlanır — örn.
+FEROS'ta (c/R = 6.25 km/s) `--vsini 3` uygulanmaz.
+
+Boş bırakılan alanlar uygulanmaz. **BF/CCF işlemi bu hazırlıktan sonra
+yapılır.**
 
 > Not: Şablonu genişletmek (R ya da vsini) SVD dizayn matrisini daha kötü
 > koşullu yapar; bu yüzden BF'de küçük bir SVD kesme eşiği gerekir. Varsayılan

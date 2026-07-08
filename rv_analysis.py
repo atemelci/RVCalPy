@@ -562,6 +562,56 @@ def log_wave_grid(wl_min, wl_max, dv_kms):
     return wl_min * np.exp(step * np.arange(n))
 
 
+# Built-in spectrograph resolving powers (typical/most used modes).
+# The user picks an instrument and R is filled automatically; anything not
+# listed can always be entered manually as a number.
+SPECTROGRAPHS = [
+    # (name, R, note)
+    ("HARPS",     115000, "ESO 3.6 m, La Silla"),
+    ("FEROS",      48000, "MPG/ESO 2.2 m, La Silla"),
+    ("ESPRESSO",  140000, "VLT, Paranal (HR mode)"),
+    ("SOPHIE",     75000, "OHP 1.93 m (HR mode)"),
+    ("UVES",       80000, "VLT, Paranal (narrow-slit high-res)"),
+    ("CRIRES+",   100000, "VLT, Paranal (0.2\" slit)"),
+    ("PEPSI",     120000, "LBT (standard mode)"),
+    ("NARVAL",     65000, "TBL, Pic du Midi (Gaia benchmark source)"),
+    ("ESPaDOnS",   68000, "CFHT (Gaia benchmark source)"),
+    ("GaiaFGK",    70000, "Gaia FGK Benchmark Stars library (homogenized)"),
+]
+
+
+def spectrograph_resolution(name):
+    """R of a built-in spectrograph by (case-insensitive) name."""
+    key = "".join(ch for ch in name.lower() if ch.isalnum())
+    for n, r, _ in SPECTROGRAPHS:
+        if "".join(ch for ch in n.lower() if ch.isalnum()) == key:
+            return float(r)
+    known = ", ".join(n for n, _, _ in SPECTROGRAPHS)
+    raise ValueError(f"Unknown spectrograph '{name}'. Built-in: {known}. "
+                     "Use --resolution to enter R manually.")
+
+
+def get_resolution(args):
+    """Effective R: explicit --resolution wins, otherwise the built-in
+    value of --spectrograph; None when neither is given."""
+    if getattr(args, "resolution", None):
+        return args.resolution
+    sp = getattr(args, "spectrograph", None)
+    if sp:
+        r = spectrograph_resolution(sp)
+        print(f"Spectrograph {sp}: R = {r:g} "
+              f"(instrumental broadening c/R = {C_KMS / r:.2f} km/s)")
+        return r
+    return None
+
+
+def min_vsini(resolution):
+    """Smallest meaningful vsini at a given R: the instrumental profile
+    itself is Δv_inst ≈ c/R wide, so rotation below that cannot be
+    resolved."""
+    return C_KMS / float(resolution)
+
+
 def prepare_template(tpl_wl, tpl_flux, resolution=None, vsini=None,
                      epsilon=0.6):
     """Degrade the synthetic template BEFORE the BF/CCF measurement.
@@ -596,18 +646,27 @@ def prepare_template(tpl_wl, tpl_flux, resolution=None, vsini=None,
     flux = np.interp(grid, tpl_wl, tpl_flux)
 
     if vsini and vsini > 0:
-        nk = max(int(np.ceil(vsini / dv)), 1)
-        v = np.arange(-nk, nk + 1) * dv
-        x = v / float(vsini)
-        kern = np.zeros_like(x)
-        inside = np.abs(x) < 1.0
-        # Gray (1992) rotational profile with linear limb darkening
-        kern[inside] = (2.0 * (1.0 - epsilon) * np.sqrt(1.0 - x[inside] ** 2)
-                        + 0.5 * np.pi * epsilon * (1.0 - x[inside] ** 2))
-        kern /= kern.sum()
-        flux = np.convolve(flux, kern, mode="same")
-        print(f"Template: rotational broadening vsini = {vsini:g} km/s "
-              f"(epsilon = {epsilon:g}) applied")
+        # minimum meaningful vsini at this resolution: the instrumental
+        # profile is Δv_inst ≈ c/R wide, rotation below it is unresolvable
+        if resolution and resolution > 0 and vsini < min_vsini(resolution):
+            print(f"Warning: vsini = {vsini:g} km/s is below the "
+                  f"instrumental broadening c/R = "
+                  f"{min_vsini(resolution):.2f} km/s at R = {resolution:g} "
+                  "- unresolvable; rotational broadening skipped.")
+        else:
+            nk = max(int(np.ceil(vsini / dv)), 1)
+            v = np.arange(-nk, nk + 1) * dv
+            x = v / float(vsini)
+            kern = np.zeros_like(x)
+            inside = np.abs(x) < 1.0
+            # Gray (1992) rotational profile with linear limb darkening
+            kern[inside] = (2.0 * (1.0 - epsilon)
+                            * np.sqrt(1.0 - x[inside] ** 2)
+                            + 0.5 * np.pi * epsilon * (1.0 - x[inside] ** 2))
+            kern /= kern.sum()
+            flux = np.convolve(flux, kern, mode="same")
+            print(f"Template: rotational broadening vsini = {vsini:g} km/s "
+                  f"(epsilon = {epsilon:g}) applied")
 
     if resolution and resolution > 0:
         fwhm_kms = C_KMS / float(resolution)
@@ -962,7 +1021,7 @@ def cmd_ccf(args):
 
     # user-selected template preparation (R, vsini) BEFORE the measurement
     tpl_wl, tpl_flux = prepare_template(tpl_wl, tpl_flux,
-                                        resolution=args.resolution,
+                                        resolution=get_resolution(args),
                                         vsini=args.vsini,
                                         epsilon=args.epsilon)
 
@@ -1040,7 +1099,7 @@ def cmd_bf(args):
     tpl_wl, tpl_flux = load_template(args)
     # user-selected template preparation (R, vsini) BEFORE the BF is solved
     tpl_wl, tpl_flux = prepare_template(tpl_wl, tpl_flux,
-                                        resolution=args.resolution,
+                                        resolution=get_resolution(args),
                                         vsini=args.vsini,
                                         epsilon=args.epsilon)
 
@@ -1161,7 +1220,7 @@ def cmd_normalize(args):
     tpl = None
     if args.template or args.teff is not None:
         tpl = prepare_template(*load_template(args),
-                               resolution=args.resolution,
+                               resolution=get_resolution(args),
                                vsini=args.vsini, epsilon=args.epsilon)
 
     outfile = args.output or \
@@ -1308,7 +1367,7 @@ def cmd_batch(args):
     tpl_wl, tpl_flux = load_template(args)
     # user-selected template preparation (R, vsini) BEFORE the measurements
     tpl_wl, tpl_flux = prepare_template(tpl_wl, tpl_flux,
-                                        resolution=args.resolution,
+                                        resolution=get_resolution(args),
                                         vsini=args.vsini,
                                         epsilon=args.epsilon)
 
@@ -1600,7 +1659,7 @@ def make_args(**overrides):
                 rv_min=-200.0, rv_max=200.0, rv_step=0.5,
                 vel_range=400.0, dv=None, svd_rcond=1e-3, smooth=None,
                 components=1, min_sep=30.0,
-                resolution=None, vsini=None, epsilon=0.6,
+                spectrograph=None, resolution=None, vsini=None, epsilon=0.6,
                 poly_order=5, iterations=8, low_clip=1.0, high_clip=4.0)
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -1700,10 +1759,32 @@ def _ask_common_inputs(kw):
                          allow_empty=True, cast=float)
     kw["wave_max"] = ask("Maximum wavelength [A] (empty: all)",
                          allow_empty=True, cast=float)
-    kw["resolution"] = ask("Spectrograph resolution R, e.g. 48000 "
-                           "(empty: skip)", allow_empty=True, cast=float)
-    kw["vsini"] = ask("Template vsini [km/s] (empty: skip)",
-                      allow_empty=True, cast=float)
+    # spectrograph selection -> resolution R (manual entry as fallback)
+    print("\nBuilt-in spectrographs:")
+    for i, (n, r, note) in enumerate(SPECTROGRAPHS, 1):
+        print(f"  [{i}] {n:<10} R = {r:<7} ({note})")
+    sel = ask("Spectrograph number (empty: enter R manually / skip)",
+              allow_empty=True, cast=int,
+              validate=lambda i: 1 <= i <= len(SPECTROGRAPHS))
+    if sel is not None:
+        name, r, _ = SPECTROGRAPHS[sel - 1]
+        kw["resolution"] = float(r)
+        print(f"  {name}: R = {r}  (instrumental broadening "
+              f"c/R = {C_KMS / r:.2f} km/s)")
+    else:
+        kw["resolution"] = ask("Resolution R, e.g. 48000 (empty: skip)",
+                               allow_empty=True, cast=float)
+
+    r_val = kw.get("resolution")
+    if r_val:
+        floor = min_vsini(r_val)
+        print(f"  Minimum resolvable vsini at this R: c/R = {floor:.1f} km/s")
+        kw["vsini"] = ask(f"Template vsini [km/s], >= {floor:.1f} "
+                          "(empty: skip)", allow_empty=True, cast=float,
+                          validate=lambda v: v >= floor)
+    else:
+        kw["vsini"] = ask("Template vsini [km/s] (empty: skip)",
+                          allow_empty=True, cast=float)
     return kw
 
 
@@ -1870,12 +1951,48 @@ def run_gui():
 
     prow = ttk.Frame(main)
     prow.grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 0))
-    ttk.Label(prow, text="Resolution R:").pack(side="left")
-    ttk.Entry(prow, textvariable=res_var, width=9).pack(side="left", padx=(4, 10))
+
+    spectro_var = tk.StringVar()
+    min_vsini_var = tk.StringVar(value="")
+    spectro_choices = ([f"{n} (R={r})" for n, r, _ in SPECTROGRAPHS]
+                       + ["Custom (enter R manually)"])
+
+    def update_min_vsini_hint(*_):
+        """Δv_inst ≈ c/R: below this vsini cannot be resolved."""
+        s = res_var.get().strip()
+        try:
+            r = float(s)
+            min_vsini_var.set(f"min vsini ≈ c/R = {C_KMS / r:.1f} km/s")
+        except ValueError:
+            min_vsini_var.set("")
+
+    def on_spectrograph_selected(_event=None):
+        sel = spectro_var.get()
+        for n, r, _note in SPECTROGRAPHS:
+            if sel.startswith(n + " "):
+                res_var.set(str(r))
+                update_min_vsini_hint()
+                return
+        # "Custom": clear for manual entry
+        res_var.set("")
+        update_min_vsini_hint()
+
+    ttk.Label(prow, text="Spectrograph:").pack(side="left")
+    spectro_box = ttk.Combobox(prow, textvariable=spectro_var,
+                               values=spectro_choices, width=24,
+                               state="readonly")
+    spectro_box.pack(side="left", padx=(4, 10))
+    spectro_box.bind("<<ComboboxSelected>>", on_spectrograph_selected)
+
+    ttk.Label(prow, text="R:").pack(side="left")
+    res_entry = ttk.Entry(prow, textvariable=res_var, width=9)
+    res_entry.pack(side="left", padx=(2, 10))
+    res_entry.bind("<KeyRelease>", update_min_vsini_hint)
+
     ttk.Label(prow, text="vsini [km/s]:").pack(side="left")
-    ttk.Entry(prow, textvariable=vsini_var, width=7).pack(side="left", padx=4)
-    ttk.Label(prow, text="(applied to the template before the "
-                         "measurement; empty: skip)").pack(side="left", padx=4)
+    ttk.Entry(prow, textvariable=vsini_var, width=7).pack(side="left", padx=2)
+    ttk.Label(prow, textvariable=min_vsini_var, foreground="gray"
+              ).pack(side="left", padx=6)
 
     # --- method ---
     method_var = tk.StringVar(value="BF")
@@ -2065,6 +2182,16 @@ def run_gui():
                                  "a raw spectrum).")
             if not tpl_var.get().strip():
                 raise ValueError("No synthetic spectrum file selected.")
+            # vsini floor: rotation below c/R is unresolvable at this R
+            r_val, v_val = _f(res_var), _f(vsini_var)
+            if r_val and v_val and v_val < min_vsini(r_val):
+                messagebox.showwarning(
+                    "vsini below the instrumental limit",
+                    f"vsini = {v_val:g} km/s is below the instrumental "
+                    f"broadening c/R = {min_vsini(r_val):.1f} km/s at "
+                    f"R = {r_val:g}.\n\nRotation this small cannot be "
+                    "resolved; the rotational broadening will be skipped. "
+                    f"Use vsini ≥ {min_vsini(r_val):.1f} km/s to apply it.")
             kw = dict(spectrum=spec_var.get().strip(),
                       template=tpl_var.get().strip(),
                       wave_min=_f(wmin_var), wave_max=_f(wmax_var),
@@ -2121,10 +2248,13 @@ def add_common_args(p):
     p.add_argument("--feh", type=float, default=0.0, help="Template [Fe/H]")
     p.add_argument("--wave-min", type=float, help="Minimum wavelength to use [A]")
     p.add_argument("--wave-max", type=float, help="Maximum wavelength to use [A]")
+    p.add_argument("--spectrograph",
+                   help="Built-in instrument; sets R automatically. Known: "
+                        + ", ".join(n for n, _, _ in SPECTROGRAPHS))
     p.add_argument("--resolution", type=float,
-                   help="Spectrograph resolving power R = lambda/dlambda "
-                        "(e.g. FEROS 48000); the template is degraded to "
-                        "this resolution before the measurement")
+                   help="Resolving power R = lambda/dlambda entered manually "
+                        "(overrides --spectrograph); the template is "
+                        "degraded to this resolution before the measurement")
     p.add_argument("--vsini", type=float,
                    help="Rotational broadening vsini [km/s] applied to the "
                         "template before the measurement")
@@ -2213,8 +2343,11 @@ def main():
                          help="Minimum wavelength to use [A]")
     p_batch.add_argument("--wave-max", type=float,
                          help="Maximum wavelength to use [A]")
+    p_batch.add_argument("--spectrograph",
+                         help="Built-in instrument name (sets R)")
     p_batch.add_argument("--resolution", type=float,
-                         help="Spectrograph resolving power R")
+                         help="Resolving power R (manual, overrides "
+                              "--spectrograph)")
     p_batch.add_argument("--vsini", type=float,
                          help="Template rotational broadening vsini [km/s]")
     p_batch.add_argument("--epsilon", type=float, default=0.6,
@@ -2289,8 +2422,11 @@ def main():
                         help="Rejection threshold above the fit [sigma]")
     p_norm.add_argument("--template",
                         help="Synthetic spectrum to overlay for comparison")
+    p_norm.add_argument("--spectrograph",
+                        help="Built-in instrument name (sets R)")
     p_norm.add_argument("--resolution", type=float,
-                        help="Spectrograph resolving power R (template prep)")
+                        help="Resolving power R (manual, overrides "
+                             "--spectrograph)")
     p_norm.add_argument("--vsini", type=float,
                         help="Template rotational broadening vsini [km/s]")
     p_norm.add_argument("--epsilon", type=float, default=0.6,
