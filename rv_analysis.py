@@ -282,6 +282,97 @@ def resolve_target(name):
     return float(c.ra.deg), float(c.dec.deg)
 
 
+def query_simbad(name):
+    """Coordinates + spectral type + V magnitude from SIMBAD.
+
+    Uses the sim-script endpoint with the format
+    "%COO(d;A)|%COO(d;D)|%SP(S)|%FLUXLIST(V;F)"; when that fails, falls
+    back to Sesame for the coordinates only. Returns
+    dict(ra, dec, sptype, vmag) — sptype/vmag may be None.
+    Raises ValueError when the name cannot be resolved at all.
+    """
+    import urllib.parse
+    import urllib.request
+
+    info = dict(ra=None, dec=None, sptype=None, vmag=None)
+    script = ('output console=off script=off\n'
+              'format object "%COO(d;A)|%COO(d;D)|%SP(S)|%FLUXLIST(V;F)"\n'
+              f'query id {name}\n')
+    url = ("https://simbad.u-strasbg.fr/simbad/sim-script?script="
+           + urllib.parse.quote(script))
+    try:
+        with urllib.request.urlopen(url, timeout=30) as resp:
+            text = resp.read().decode(errors="ignore")
+        if "::error" not in text:
+            for line in reversed(text.strip().splitlines()):
+                parts = line.split("|")
+                if len(parts) == 4:
+                    info["ra"] = float(parts[0])
+                    info["dec"] = float(parts[1])
+                    sp = parts[2].strip()
+                    info["sptype"] = sp if sp and sp != "~" else None
+                    try:
+                        info["vmag"] = float(parts[3])
+                    except ValueError:
+                        pass
+                    break
+    except Exception:
+        pass
+    if info["ra"] is None:                     # Sesame fallback, coords only
+        info["ra"], info["dec"] = resolve_target(name)
+    return info
+
+
+def query_varastro(name):
+    """Ephemeris (T0, P) of an eclipsing binary from the VarAstro database
+    (https://var.astro.cz).
+
+    The public pages are used: the site search resolves the star id and
+    the star page carries the primary-minimum epoch (CustEpoch) and the
+    period (CustPeriod). Epochs given as truncated JD are converted to
+    full BJD (+2400000). Returns dict(t0, period, star, url); raises
+    ValueError when the star or its elements cannot be found — the caller
+    then falls back to manual entry.
+    """
+    import re
+    import urllib.parse
+    import urllib.request
+
+    base = "https://var.astro.cz"
+
+    def fetch(url):
+        req = urllib.request.Request(url, headers={"User-Agent":
+                                                   "rv_analysis/1.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.read().decode(errors="ignore")
+
+    try:
+        html = fetch(f"{base}/en/Home/Search?"
+                     f"term={urllib.parse.quote(name)}")
+    except Exception as exc:
+        raise ValueError(f"VarAstro search failed: {exc}") from exc
+    m = re.search(r'href="/en/Stars/(\d+)"', html)
+    if not m:
+        raise ValueError(f"VarAstro: no star found for '{name}'.")
+    star_url = f"{base}/en/Stars/{m.group(1)}"
+    try:
+        page = fetch(star_url)
+    except Exception as exc:
+        raise ValueError(f"VarAstro star page failed: {exc}") from exc
+
+    pm = re.search(r'id="CustPeriod"[^>]*value="([\d.]+)"', page)
+    em = re.search(r'id="CustEpoch"[^>]*value="([\d.]+)"', page)
+    if not (pm and em):
+        raise ValueError(f"VarAstro: no ephemeris elements on {star_url}.")
+    t0 = float(em.group(1))
+    if t0 < 1000000.0:                         # truncated JD -> full BJD
+        t0 += 2400000.0
+    tm = re.search(r"<title>\s*([^<|]+)", page)
+    star = tm.group(1).strip() if tm else name
+    star = re.sub(r"\s*-\s*VarAstro\s*$", "", star)
+    return dict(t0=t0, period=float(pm.group(1)), star=star, url=star_url)
+
+
 def normalize_continuum(wl, flux, poly_order=5, iterations=8,
                         low_clip=1.0, high_clip=4.0):
     """Iterative continuum normalization of a raw spectrum (FEROS-style).
@@ -421,9 +512,15 @@ def get_target_context(args):
 
     if ra is None and getattr(args, "object", None):
         try:
-            ra, dec = resolve_target(args.object)
+            sim = query_simbad(args.object)
+            ra, dec = sim["ra"], sim["dec"]
+            extra = ""
+            if sim["sptype"]:
+                extra += f", SpT = {sim['sptype']}"
+            if sim["vmag"] is not None:
+                extra += f", V = {sim['vmag']:.2f}"
             print(f"SIMBAD: '{args.object}' -> RA = {ra:.5f} deg, "
-                  f"Dec = {dec:.5f} deg")
+                  f"Dec = {dec:.5f} deg{extra}")
         except ValueError as exc:
             print(f"Warning: {exc}\n  -> give coordinates manually "
                   "with --ra/--dec.")
@@ -459,10 +556,20 @@ def get_target_context(args):
         print("Note: barycentric correction skipped "
               "(needs coordinates AND observation time).")
 
-    # orbital phase from the ephemeris
+    # orbital phase from the ephemeris; T0/P may come from VarAstro
     phase = None
     t0 = getattr(args, "t0", None)
     period = getattr(args, "period", None)
+    if t0 is None and getattr(args, "varastro", False) \
+            and getattr(args, "object", None):
+        try:
+            va = query_varastro(args.object)
+            t0, period = va["t0"], va["period"]
+            print(f"VarAstro: {va['star']} -> T0 = {t0:.5f}, "
+                  f"P = {period:.7f} d  ({va['url']})")
+        except ValueError as exc:
+            print(f"Warning: {exc}\n  -> give the ephemeris manually "
+                  "with --t0/--period.")
     if bjd is not None and t0 is not None and period:
         phase = orbital_phase(bjd, t0, period)
         which = ("primary eclipse" if phase < 0.05 or phase > 0.95 else
@@ -577,6 +684,7 @@ SPECTROGRAPHS = [
     ("NARVAL",     65000, "TBL, Pic du Midi (Gaia benchmark source)"),
     ("ESPaDOnS",   68000, "CFHT (Gaia benchmark source)"),
     ("GaiaFGK",    70000, "Gaia FGK Benchmark Stars library (homogenized)"),
+    ("JANO",       30000, "T80, AU Kreiken Observatory (verify R)"),
 ]
 
 
@@ -1375,9 +1483,25 @@ def cmd_batch(args):
     ra, dec = args.ra, args.dec
     if ra is None and args.object:
         try:
-            ra, dec = resolve_target(args.object)
+            sim = query_simbad(args.object)
+            ra, dec = sim["ra"], sim["dec"]
+            extra = ""
+            if sim["sptype"]:
+                extra += f", SpT = {sim['sptype']}"
+            if sim["vmag"] is not None:
+                extra += f", V = {sim['vmag']:.2f}"
             print(f"SIMBAD: '{args.object}' -> RA = {ra:.5f} deg, "
-                  f"Dec = {dec:.5f} deg\n")
+                  f"Dec = {dec:.5f} deg{extra}\n")
+        except ValueError as exc:
+            print(f"Warning: {exc}\n")
+
+    # ephemeris from VarAstro when requested and not given manually
+    if args.t0 is None and getattr(args, "varastro", False) and args.object:
+        try:
+            va = query_varastro(args.object)
+            args.t0, args.period = va["t0"], va["period"]
+            print(f"VarAstro: {va['star']} -> T0 = {va['t0']:.5f}, "
+                  f"P = {va['period']:.7f} d  ({va['url']})\n")
         except ValueError as exc:
             print(f"Warning: {exc}\n")
 
@@ -1654,7 +1778,7 @@ def make_args(**overrides):
                 teff=None, logg=4.5, feh=0.0,
                 wave_min=None, wave_max=None,
                 object=None, ra=None, dec=None, obstime=None, site="paranal",
-                t0=None, period=None,
+                t0=None, period=None, varastro=False,
                 plot=None, output=None,
                 rv_min=-200.0, rv_max=200.0, rv_step=0.5,
                 vel_range=400.0, dv=None, svd_rcond=1e-3, smooth=None,
@@ -1694,9 +1818,15 @@ def _ask_target(kw):
                allow_empty=True)
     if name:
         try:
-            ra, dec = resolve_target(name)
-            print(f"  SIMBAD: RA = {ra:.5f} deg, Dec = {dec:.5f} deg")
-            kw["object"], kw["ra"], kw["dec"] = name, ra, dec
+            sim = query_simbad(name)
+            extra = ""
+            if sim["sptype"]:
+                extra += f", SpT = {sim['sptype']}"
+            if sim["vmag"] is not None:
+                extra += f", V = {sim['vmag']:.2f}"
+            print(f"  SIMBAD: RA = {sim['ra']:.5f} deg, "
+                  f"Dec = {sim['dec']:.5f} deg{extra}")
+            kw["object"], kw["ra"], kw["dec"] = name, sim["ra"], sim["dec"]
         except ValueError as exc:
             print(f"  {exc}")
             name = None
@@ -1711,6 +1841,24 @@ def _ask_target(kw):
                             "empty: read from FITS header)", allow_empty=True)
         kw["site"] = ask("Observatory (astropy site name: tug, paranal, ...)",
                          default="tug")
+    # ephemeris: VarAstro lookup first (if we have a name), manual fallback
+    if kw.get("object"):
+        fetch = ask("Fetch ephemeris T0/P from VarAstro (var.astro.cz)? "
+                    "(y/n)", default="y", cast=str,
+                    validate=lambda s: s.lower() in ("y", "n"))
+        if fetch.lower() == "y":
+            try:
+                va = query_varastro(kw["object"])
+                print(f"  VarAstro: {va['star']} -> T0 = {va['t0']:.5f}, "
+                      f"P = {va['period']:.7f} d  ({va['url']})")
+                # editable: fetched values become the defaults
+                kw["t0"] = ask("Ephemeris T0 [BJD]", default=va["t0"],
+                               cast=float)
+                kw["period"] = ask("Orbital period [days]",
+                                   default=va["period"], cast=float)
+                return kw
+            except ValueError as exc:
+                print(f"  {exc}")
     kw["t0"] = ask("Ephemeris T0 [BJD] for the orbital phase (empty: skip)",
                    allow_empty=True, cast=float)
     if kw.get("t0") is not None:
@@ -1870,20 +2018,28 @@ def run_gui():
     ttk.Entry(trow, textvariable=target_var, width=18).grid(row=0, column=1,
                                                             padx=2)
 
+    siminfo_var = tk.StringVar(value="")
+
     def simbad_lookup():
         name = target_var.get().strip()
         if not name:
             messagebox.showinfo("SIMBAD", "Enter a star name first.")
             return
         try:
-            ra, dec = resolve_target(name)
+            sim = query_simbad(name)
         except ValueError as exc:
             messagebox.showwarning(
                 "SIMBAD", f"{exc}\n\nEnter the coordinates manually "
                           "in the RA/Dec fields.")
             return
-        ra_var.set(f"{ra:.5f}")
-        dec_var.set(f"{dec:.5f}")
+        ra_var.set(f"{sim['ra']:.5f}")
+        dec_var.set(f"{sim['dec']:.5f}")
+        parts = []
+        if sim["sptype"]:
+            parts.append(f"SpT: {sim['sptype']}")
+        if sim["vmag"] is not None:
+            parts.append(f"V: {sim['vmag']:.2f}")
+        siminfo_var.set("   ".join(parts) if parts else "SpT/V: not in SIMBAD")
 
     ttk.Button(trow, text="SIMBAD", command=simbad_lookup).grid(row=0, column=2,
                                                                 padx=(2, 12))
@@ -1891,6 +2047,8 @@ def run_gui():
     ttk.Entry(trow, textvariable=ra_var, width=10).grid(row=0, column=4, padx=2)
     ttk.Label(trow, text="Dec [deg]:").grid(row=0, column=5)
     ttk.Entry(trow, textvariable=dec_var, width=10).grid(row=0, column=6, padx=2)
+    ttk.Label(trow, textvariable=siminfo_var, foreground="gray"
+              ).grid(row=0, column=7, sticky="w", padx=(8, 0))
 
     ttk.Label(trow, text="Obs time (ISOT or BJD):").grid(row=1, column=0,
                                                          columnspan=2,
@@ -1917,6 +2075,29 @@ def run_gui():
     ttk.Entry(trow, textvariable=per_var, width=10).grid(row=2, column=4,
                                                          sticky="w",
                                                          pady=(4, 0))
+
+    def varastro_lookup():
+        """Fetch T0/P from var.astro.cz by the target name; the fields
+        stay editable for manual override."""
+        name = target_var.get().strip()
+        if not name:
+            messagebox.showinfo("VarAstro", "Enter a star name first.")
+            return
+        try:
+            va = query_varastro(name)
+        except ValueError as exc:
+            messagebox.showwarning(
+                "VarAstro", f"{exc}\n\nEnter T0 and Period manually.")
+            return
+        t0_var.set(f"{va['t0']:.5f}")
+        per_var.set(f"{va['period']:.7f}")
+        messagebox.showinfo(
+            "VarAstro", f"{va['star']}\nT0 = {va['t0']:.5f}\n"
+                        f"P = {va['period']:.7f} d\n\n{va['url']}\n"
+                        "(fields remain editable)")
+
+    ttk.Button(trow, text="VarAstro", command=varastro_lookup
+               ).grid(row=2, column=5, sticky="w", padx=(6, 0), pady=(4, 0))
 
     # --- input files ---
     spec_var = tk.StringVar()
@@ -2275,6 +2456,10 @@ def add_common_args(p):
                         "orbital phase")
     p.add_argument("--period", type=float,
                    help="Orbital period [days] for the orbital phase")
+    p.add_argument("--varastro", action="store_true",
+                   help="Fetch T0/P from the VarAstro database "
+                        "(var.astro.cz) using the --object name when "
+                        "--t0/--period are not given")
     p.add_argument("--plot", help="Figure PNG file name "
                                   "(default: result_CCF.png / result_BF.png)")
     p.add_argument("--output", help="Result text file name "
@@ -2391,6 +2576,8 @@ def main():
                          help="Ephemeris T0 [BJD] for phase-folding the plot")
     p_batch.add_argument("--period", type=float,
                          help="Orbital period [days] for phase-folding")
+    p_batch.add_argument("--varastro", action="store_true",
+                         help="Fetch T0/P from VarAstro using --object")
     p_batch.add_argument("--output", help="RV curve file "
                                           "(default: result_RV_curve.txt)")
     p_batch.add_argument("--plot", help="RV curve figure "

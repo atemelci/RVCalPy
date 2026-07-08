@@ -145,8 +145,27 @@ WAVE/FLUX binary tabloları ve CRVAL1/CDELT1'li klasik 1B IRAF görüntüleri.
 ### SIMBAD ve barycentric düzeltme
 
 - Widget'taki **SIMBAD** düğmesi veya CLI'daki `--object "51 Peg"` yıldız
-  adını (astropy/Sesame üzerinden) koordinata çevirir; bulunamazsa elle
-  `--ra/--dec` girilir.
+  adını koordinata çevirir; bulunamazsa elle `--ra/--dec` girilir.
+- Koordinatlarla birlikte **tayf türü (SpT)** ve **V parlaklığı** da çekilir
+  (SIMBAD sim-script arayüzü): widget'ta RA/Dec alanlarının yanında
+  "SpT: B9V  V: 7.22" gibi görünür, CLI/sihirbazda satır olarak basılır.
+
+### VarAstro'dan ışık elemanları (T0, P)
+
+Örten çiftlerin minimum elemanları [VarAstro](https://var.astro.cz/en)
+veritabanından otomatik çekilebilir:
+
+- **Widget:** Target bölümündeki **VarAstro** düğmesi, yıldız adıyla arama
+  yapıp T0 ve Period alanlarını doldurur — alanlar **düzenlenebilir kalır**,
+  istenirse elle değiştirilir.
+- **CLI:** `--object "TV Cas" --varastro` (elle `--t0/--period` verilirse
+  onlar önceliklidir).
+- **Sihirbaz:** SIMBAD sorgusundan sonra "Fetch ephemeris T0/P from
+  VarAstro?" sorusu; çekilen değerler varsayılan olarak sunulur, üzerine
+  yazılabilir.
+
+Kesirli (truncated) JD ile saklanan epoklar otomatik olarak tam BJD'ye
+çevrilir (+2 400 000). Yıldız bulunamazsa uyarı verilip elle girişe düşülür.
 - Gözlem zamanı `--obstime` ile verilmezse ham FITS başlığındaki
   `DATE-OBS`'tan okunur (widget'taki normalizasyon adımı RA/Dec, DATE-OBS ve
   OBJECT alanlarını başlıktan otomatik doldurur).
@@ -313,6 +332,7 @@ seçimiyle şablona uygulanır (her teleskop/tayfçekerde farklıdır):
   | NARVAL | 65 000 | TBL — Gaia benchmark kaynağı |
   | ESPaDOnS | 68 000 | CFHT — Gaia benchmark kaynağı |
   | GaiaFGK | 70 000 | Gaia FGK Benchmark Stars kütüphanesi (homojenleştirilmiş) |
+  | JANO | 30 000 | T80, AÜ Kreiken Rasathanesi (R değerini doğrulayın) |
 
   Şablon, FWHM = c/R [km/s] Gauss'u ile konvolve edilir
   (FEROS → 6.2 km/s, ESPRESSO → 2.1 km/s).
