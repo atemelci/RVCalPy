@@ -369,12 +369,18 @@ def query_varastro(name):
                 star=star, url=star_url)
 
 
-def hjd_to_bjd(hjd, ra_deg, dec_deg):
-    """Convert a heliocentric Julian date (HJD, UTC) to BJD_TDB.
+def hjd_to_bjd(hjd, ra_deg, dec_deg, scale="utc"):
+    """Convert a heliocentric Julian date (HJD) to BJD_TDB.
 
-    The heliocentric light-travel time is removed to recover the geocentric
-    time, then the barycentric light-travel time is added and the result is
-    expressed on the TDB scale. Target coordinates are required.
+    HJD in VarAstro-style minima databases is assumed to be UTC-based; if
+    your source uses TT/TDB, change it with the `scale` argument. A wrong
+    scale costs at most TDB-UTC (about 69 s today). The epoch is referred
+    to the geocenter — the standard convention for an HJD with no
+    observatory attached (Eastman, Siverd & Gaudi 2010); the site term is
+    below 21 ms. The heliocentric light-travel time is removed to recover
+    the geocentric time, then the barycentric light-travel time is added
+    and the result is expressed on the TDB scale. Target coordinates are
+    required.
     """
     from astropy.time import Time
     from astropy.coordinates import SkyCoord, EarthLocation
@@ -382,7 +388,7 @@ def hjd_to_bjd(hjd, ra_deg, dec_deg):
 
     coord = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg)
     loc = EarthLocation.from_geocentric(0.0 * u.m, 0.0 * u.m, 0.0 * u.m)
-    t = Time(float(hjd), format="jd", scale="utc", location=loc)
+    t = Time(float(hjd), format="jd", scale=scale, location=loc)
     ltt_helio = t.light_travel_time(coord, kind="heliocentric")
     t_geo = t - ltt_helio
     ltt_bary = t_geo.light_travel_time(coord, kind="barycentric")
@@ -2128,6 +2134,11 @@ def run_gui():
                ).grid(row=2, column=6, sticky="w", padx=(6, 0), pady=(4, 0))
     ttk.Button(trow, text="HJD -> BJD", command=convert_t0_to_bjd
                ).grid(row=2, column=7, sticky="w", padx=(4, 0), pady=(4, 0))
+    ttk.Label(trow, text="HJD in VarAstro-style minima databases is assumed "
+                         "to be UTC-based; if your source uses TT/TDB, "
+                         "change it with the scale argument.",
+              foreground="gray"
+              ).grid(row=3, column=0, columnspan=8, sticky="w", pady=(2, 0))
 
     spec_var = tk.StringVar()
     tpl_var = tk.StringVar()
