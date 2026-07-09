@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 rv_analysis.py — Radial Velocity (RV) measurement from stellar spectra
 ======================================================================
@@ -13,32 +12,34 @@ Two independent methods in one tool:
    single stars (SB1).
 
 2. BF   (Broadening Function, Rucinski 1992, 2002)
-   Method of MAK_Tez Sections 2.2 and 3.2: the observed spectrum is
-   modelled as the convolution of the template with a velocity-space
-   broadening function,  S(v) = B(v) * T(v),  solved linearly via
-   Singular Value Decomposition (SVD). Because the method is linear, the
-   components of binary/multiple systems (SB2) appear as independent sharp
-   peaks: peak centres give the RVs, widths the rotation (vsini), areas
-   the light contributions. Single or double Gaussians are fitted to the
-   BF profile.
+   The observed spectrum is modelled as the convolution of the template
+   with a velocity-space broadening function,  S(v) = B(v) * T(v),
+   solved linearly via Singular Value Decomposition (SVD). Because the
+   method is linear, the components of binary/multiple systems (SB2)
+   appear as independent sharp peaks: peak centres give the RVs, widths
+   the rotation (vsini), areas the light contributions. Single or double
+   Gaussians are fitted to the BF profile.
 
 Modes of operation
 ------------------
-# 1) INTERACTIVE (recommended): run without arguments.
-#    A minimal tkinter widget opens: pick the normalized observed spectrum
-#    and the synthetic template, choose CCF or BF, press Run. The fit plot
-#    is embedded in the window. Without tkinter/display, a terminal wizard
-#    with the same steps starts instead.
-python rv_analysis.py
+1) INTERACTIVE (recommended): run without arguments.
+   A minimal tkinter widget opens: pick the normalized observed spectrum
+   and the synthetic template, choose CCF or BF, press Run. The fit plot
+   is embedded in the window. Without tkinter/display, a terminal wizard
+   with the same steps starts instead.
 
-# 2) Command line (for scripting / time series):
-python rv_analysis.py ccf --spectrum spec.fits --format s2d \
-    --teff 6628 --logg 4.251 --feh 0.17 --rv-min -20 --rv-max 100
-python rv_analysis.py bf --spectrum spec.obs --template synth.prf \
-    --vel-range 500 --components 2 --wave-min 5000 --wave-max 5500
+   python rv_analysis.py
 
-# 3) Self-test on synthetic data (no input files needed):
-python rv_analysis.py demo --plot demo.png
+2) Command line (for scripting / time series):
+
+   python rv_analysis.py ccf --spectrum spec.fits --format s2d \
+       --teff 6628 --logg 4.251 --feh 0.17 --rv-min -20 --rv-max 100
+   python rv_analysis.py bf --spectrum spec.obs --template synth.prf \
+       --vel-range 500 --components 2 --wave-min 5000 --wave-max 5500
+
+3) Self-test on synthetic data (no input files needed):
+
+   python rv_analysis.py demo --plot demo.png
 
 Outputs
 -------
@@ -71,17 +72,12 @@ import numpy as np
 from scipy.optimize import curve_fit
 from scipy.ndimage import gaussian_filter1d
 
-# Speed of light [km/s]
 try:
     import astropy.constants as const
     C_KMS = const.c.value / 1000.0
 except ImportError:
     C_KMS = 299792.458
 
-
-# ----------------------------------------------------------------------
-# Common helpers
-# ----------------------------------------------------------------------
 
 def doppler_shift(wavelength, rv_kms):
     """Shift rest-frame wavelengths to the observed frame for RV [km/s]."""
@@ -128,16 +124,17 @@ def eval_gauss_model(x, popt):
 def read_ascii_spectrum(path):
     """Tolerant ASCII spectrum reader (.txt/.dat/.ascii/.obs/.prf/...).
 
-    Gerçek veri dosyaları çoğu zaman np.loadtxt'nin kaldıramadığı şeyler
-    içerir: başlık satırları, '-' gibi yer tutucular, D-üslü Fortran sayıları,
-    değişken sütun sayısı. Bu okuyucu:
-      - '#', ';', '!', '%' ile başlayan yorum satırlarını atlar,
-      - her satırı sayılara çevirir; çevrilemeyen belirteçler ('-' gibi)
-        NaN sayılır,
-      - en yaygın (modal) sütun sayısına uymayan satırları başlık kabul
-        edip eler (SynthV .prf başlık satırı gibi),
-      - ilk iki sayısal sütunu (dalgaboyu, akı) alır; NaN'li satırları atar,
-      - dalgaboyuna göre sıralar.
+    Real data files often contain things np.loadtxt cannot handle: header
+    lines, placeholders such as '-', Fortran D-exponent numbers, a varying
+    column count. This reader:
+      - skips comment lines starting with '#', ';', '!' or '%',
+      - converts every line to numbers; tokens that cannot be converted
+        (such as '-') count as NaN,
+      - drops lines whose column count differs from the most common
+        (modal) one, treating them as headers (SynthV .prf style),
+      - takes the first two numeric columns (wavelength, flux) and drops
+        rows containing NaN,
+      - sorts by wavelength.
     """
     rows = []
     with open(path, "r", errors="ignore") as fh:
@@ -150,7 +147,7 @@ def read_ascii_spectrum(path):
                 try:
                     vals.append(float(tok.replace("D", "E").replace("d", "e")))
                 except ValueError:
-                    vals.append(np.nan)  # '-' and other placeholders
+                    vals.append(np.nan)
             rows.append(vals)
     if not rows:
         raise ValueError(f"{path}: no data lines found.")
@@ -181,7 +178,6 @@ def read_fits_spectrum(path):
     """
     from astropy.io import fits
     with fits.open(path) as hdul:
-        # 1) ESPRESSO S2D layout
         try:
             flux = np.array(hdul[1].data, dtype=float)
             wvl = np.array(hdul[4].data, dtype=float)
@@ -189,7 +185,6 @@ def read_fits_spectrum(path):
                 return [(w, f) for w, f in zip(wvl, flux)]
         except (IndexError, TypeError, ValueError):
             pass
-        # 2) binary table with wave/flux columns (FEROS/HARPS phase-3)
         for hdu in hdul:
             if not isinstance(hdu, fits.BinTableHDU):
                 continue
@@ -205,7 +200,6 @@ def read_fits_spectrum(path):
                 fx = np.ravel(np.asarray(hdu.data[fname], dtype=float))
                 order = np.argsort(wl)
                 return [(wl[order], fx[order])]
-        # 3) 1D image with linear wavelength WCS
         for hdu in hdul:
             if hdu.data is None:
                 continue
@@ -318,7 +312,7 @@ def query_simbad(name):
                     break
     except Exception:
         pass
-    if info["ra"] is None:                     # Sesame fallback, coords only
+    if info["ra"] is None:
         info["ra"], info["dec"] = resolve_target(name)
     return info
 
@@ -329,10 +323,11 @@ def query_varastro(name):
 
     The public pages are used: the site search resolves the star id and
     the star page carries the primary-minimum epoch (CustEpoch) and the
-    period (CustPeriod). Epochs given as truncated JD are converted to
-    full BJD (+2400000). Returns dict(t0, period, star, url); raises
-    ValueError when the star or its elements cannot be found — the caller
-    then falls back to manual entry.
+    period (CustPeriod). The values are returned in VarAstro's native
+    units: T0 in HJD and the period in days. Truncated epochs are expanded
+    to full HJD (+2400000). Returns dict(t0, period, t0_unit, star, url);
+    raises ValueError when the star or its elements cannot be found — the
+    caller then falls back to manual entry.
     """
     import re
     import urllib.parse
@@ -365,12 +360,33 @@ def query_varastro(name):
     if not (pm and em):
         raise ValueError(f"VarAstro: no ephemeris elements on {star_url}.")
     t0 = float(em.group(1))
-    if t0 < 1000000.0:                         # truncated JD -> full BJD
+    if t0 < 1000000.0:
         t0 += 2400000.0
     tm = re.search(r"<title>\s*([^<|]+)", page)
     star = tm.group(1).strip() if tm else name
     star = re.sub(r"\s*-\s*VarAstro\s*$", "", star)
-    return dict(t0=t0, period=float(pm.group(1)), star=star, url=star_url)
+    return dict(t0=t0, period=float(pm.group(1)), t0_unit="HJD",
+                star=star, url=star_url)
+
+
+def hjd_to_bjd(hjd, ra_deg, dec_deg):
+    """Convert a heliocentric Julian date (HJD, UTC) to BJD_TDB.
+
+    The heliocentric light-travel time is removed to recover the geocentric
+    time, then the barycentric light-travel time is added and the result is
+    expressed on the TDB scale. Target coordinates are required.
+    """
+    from astropy.time import Time
+    from astropy.coordinates import SkyCoord, EarthLocation
+    import astropy.units as u
+
+    coord = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg)
+    loc = EarthLocation.from_geocentric(0.0 * u.m, 0.0 * u.m, 0.0 * u.m)
+    t = Time(float(hjd), format="jd", scale="utc", location=loc)
+    ltt_helio = t.light_travel_time(coord, kind="heliocentric")
+    t_geo = t - ltt_helio
+    ltt_bary = t_geo.light_travel_time(coord, kind="barycentric")
+    return float((t_geo.tdb + ltt_bary).jd)
 
 
 def normalize_continuum(wl, flux, poly_order=5, iterations=8,
@@ -394,7 +410,6 @@ def normalize_continuum(wl, flux, poly_order=5, iterations=8,
     good = np.isfinite(wl) & np.isfinite(flux) & (flux > 0)
     if good.sum() < poly_order + 2:
         raise ValueError("Too few valid pixels for continuum fitting.")
-    # scale x to [-1, 1] to keep the polynomial fit well conditioned
     x = 2.0 * (wl - wl[good].min()) / (wl[good].max() - wl[good].min()) - 1.0
 
     mask = good.copy()
@@ -536,18 +551,16 @@ def get_target_context(args):
             obstime = hdr["obstime"]
             print(f"FITS header: DATE-OBS = {obstime}")
 
-    # BJD of the observation
     bjd = None
     if obstime is not None:
         _, is_jd = parse_time_input(obstime)
         if is_jd:
-            bjd = float(str(obstime).strip())      # already BJD (reference)
+            bjd = float(str(obstime).strip())
         elif ra is not None and dec is not None:
             bjd = compute_bjd(obstime, ra, dec, args.site, exptime=exptime)
         if bjd is not None:
             print(f"BJD = {bjd:.6f}")
 
-    # barycentric velocity correction
     vbary = 0.0
     if ra is not None and dec is not None and obstime is not None:
         vbary = barycentric_correction(ra, dec, obstime, args.site)
@@ -556,20 +569,33 @@ def get_target_context(args):
         print("Note: barycentric correction skipped "
               "(needs coordinates AND observation time).")
 
-    # orbital phase from the ephemeris; T0/P may come from VarAstro
     phase = None
     t0 = getattr(args, "t0", None)
     period = getattr(args, "period", None)
+    t0_is_hjd = False
     if t0 is None and getattr(args, "varastro", False) \
             and getattr(args, "object", None):
         try:
             va = query_varastro(args.object)
             t0, period = va["t0"], va["period"]
-            print(f"VarAstro: {va['star']} -> T0 = {t0:.5f}, "
+            t0_is_hjd = True
+            print(f"VarAstro: {va['star']} -> T0 = {t0:.5f} HJD, "
                   f"P = {period:.7f} d  ({va['url']})")
         except ValueError as exc:
             print(f"Warning: {exc}\n  -> give the ephemeris manually "
                   "with --t0/--period.")
+    if t0 is not None and getattr(args, "t0_to_bjd", False):
+        if ra is not None and dec is not None:
+            t0_bjd = hjd_to_bjd(t0, ra, dec)
+            print(f"Ephemeris T0 converted: HJD {t0:.6f} -> "
+                  f"BJD {t0_bjd:.6f} (used for the analysis)")
+            t0 = t0_bjd
+        else:
+            print("Note: HJD -> BJD conversion of T0 skipped "
+                  "(needs target coordinates).")
+    elif t0_is_hjd:
+        print("Note: T0 is kept in HJD (VarAstro native unit); "
+              "use --t0-to-bjd to convert it to BJD.")
     if bjd is not None and t0 is not None and period:
         phase = orbital_phase(bjd, t0, period)
         which = ("primary eclipse" if phase < 0.05 or phase > 0.95 else
@@ -579,10 +605,6 @@ def get_target_context(args):
 
     return dict(vbary=vbary, bjd=bjd, phase=phase)
 
-
-# ----------------------------------------------------------------------
-# 1) CCF method (compiled from the workshop notebook)
-# ----------------------------------------------------------------------
 
 def calculate_ccf(spec_wl, spec_flux, tpl_wl, tpl_flux, rv_grid):
     """CCF for a single spectrum (or echelle order).
@@ -614,7 +636,6 @@ def run_ccf(spectrum_orders, tpl_wl, tpl_flux, rv_min, rv_max, rv_step):
     rv_grid = np.arange(rv_min, rv_max + rv_step, rv_step)
     tpl_norm = tpl_flux / np.nanmax(tpl_flux)
 
-    # margin so that the Doppler-shifted template still covers the order
     max_shift = max(abs(rv_min), abs(rv_max)) / C_KMS
     lo = tpl_wl.min() * (1.0 + max_shift)
     hi = tpl_wl.max() * (1.0 - max_shift)
@@ -623,8 +644,6 @@ def run_ccf(spectrum_orders, tpl_wl, tpl_flux, rv_min, rv_max, rv_step):
     for k, (wl, fx) in enumerate(spectrum_orders):
         good = np.isfinite(wl) & np.isfinite(fx)
         wl, fx = wl[good], fx[good]
-        # clip to the template coverage (a tiny edge mismatch after
-        # resampling must not discard the whole order)
         sel = (wl >= lo) & (wl <= hi)
         wl, fx = wl[sel], fx[sel]
         if wl.size < 10:
@@ -642,7 +661,6 @@ def run_ccf(spectrum_orders, tpl_wl, tpl_flux, rv_min, rv_max, rv_step):
     ccf_total = np.sum(ccf_orders, axis=0)
     ccf_total = ccf_total / np.nanmax(ccf_total)
 
-    # Gaussian fit, initial guess from the peak position
     x0 = rv_grid[np.argmax(ccf_total)]
     amp0 = ccf_total.max() - np.median(ccf_total)
     p0 = [amp0, x0, 5.0, np.median(ccf_total)]
@@ -652,10 +670,6 @@ def run_ccf(spectrum_orders, tpl_wl, tpl_flux, rv_min, rv_max, rv_step):
     return dict(rv=rv, rv_err=rv_err, rv_grid=rv_grid,
                 ccf_total=ccf_total, ccf_orders=np.array(ccf_orders), popt=popt)
 
-
-# ----------------------------------------------------------------------
-# 2) BF method (thesis Sections 2.2/3.2: Rucinski's SVD approach)
-# ----------------------------------------------------------------------
 
 def log_wave_grid(wl_min, wl_max, dv_kms):
     """Wavelength grid with constant velocity step (log-lambda spacing).
@@ -669,11 +683,7 @@ def log_wave_grid(wl_min, wl_max, dv_kms):
     return wl_min * np.exp(step * np.arange(n))
 
 
-# Built-in spectrograph resolving powers (typical/most used modes).
-# The user picks an instrument and R is filled automatically; anything not
-# listed can always be entered manually as a number.
 SPECTROGRAPHS = [
-    # (name, R, note)
     ("HARPS",     115000, "ESO 3.6 m, La Silla"),
     ("FEROS",      48000, "MPG/ESO 2.2 m, La Silla"),
     ("ESPRESSO",  140000, "VLT, Paranal (HR mode)"),
@@ -684,7 +694,10 @@ SPECTROGRAPHS = [
     ("NARVAL",     65000, "TBL, Pic du Midi (Gaia benchmark source)"),
     ("ESPaDOnS",   68000, "CFHT (Gaia benchmark source)"),
     ("GaiaFGK",    70000, "Gaia FGK Benchmark Stars library (homogenized)"),
-    ("JANO",       30000, "T80, AU Kreiken Observatory (verify R)"),
+    ("Whoppshel-50",  30000, "Whoppshel echelle (Shelyak Instruments), "
+                             "50 micron fiber + FIGU unit"),
+    ("Whoppshel-105", 15000, "Whoppshel echelle (Shelyak Instruments), "
+                             "105 micron fiber + FIGU unit"),
 ]
 
 
@@ -724,9 +737,10 @@ def prepare_template(tpl_wl, tpl_flux, resolution=None, vsini=None,
                      epsilon=0.6):
     """Degrade the synthetic template BEFORE the BF/CCF measurement.
 
-    Sentetik tayflar pratikte 'sonsuz' çözünürlüklü ve dönmesizdir; gözlenen
-    tayfla karşılaştırılmadan önce iki etki uygulanmalıdır (kullanıcı
-    seçimi — her teleskop/tayfçekerde farklıdır):
+    Synthetic spectra are effectively of 'infinite' resolution and
+    rotationless; two effects must be applied before comparing them with
+    an observed spectrum (a user choice — they differ per
+    telescope/spectrograph):
 
     resolution : spectrograph resolving power R = lambda/dlambda.
         The template is convolved with a Gaussian of FWHM = c/R [km/s]
@@ -747,15 +761,12 @@ def prepare_template(tpl_wl, tpl_flux, resolution=None, vsini=None,
 
     good = np.isfinite(tpl_wl) & np.isfinite(tpl_flux)
     tpl_wl, tpl_flux = tpl_wl[good], tpl_flux[good]
-    # constant-velocity grid at the template's own median pixel size
     pix = np.median(np.diff(tpl_wl)) / np.median(tpl_wl) * C_KMS
     dv = max(min(pix, 2.0), 0.2)
     grid = log_wave_grid(tpl_wl.min(), tpl_wl.max(), dv)
     flux = np.interp(grid, tpl_wl, tpl_flux)
 
     if vsini and vsini > 0:
-        # minimum meaningful vsini at this resolution: the instrumental
-        # profile is Δv_inst ≈ c/R wide, rotation below it is unresolvable
         if resolution and resolution > 0 and vsini < min_vsini(resolution):
             print(f"Warning: vsini = {vsini:g} km/s is below the "
                   f"instrumental broadening c/R = "
@@ -767,7 +778,6 @@ def prepare_template(tpl_wl, tpl_flux, resolution=None, vsini=None,
             x = v / float(vsini)
             kern = np.zeros_like(x)
             inside = np.abs(x) < 1.0
-            # Gray (1992) rotational profile with linear limb darkening
             kern[inside] = (2.0 * (1.0 - epsilon)
                             * np.sqrt(1.0 - x[inside] ** 2)
                             + 0.5 * np.pi * epsilon * (1.0 - x[inside] ** 2))
@@ -835,7 +845,6 @@ def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
         pix = np.median(np.diff(spec_wl)) / np.median(spec_wl) * C_KMS
         dv = max(pix, 0.5)
 
-    # reference grid: w1 = w00 * (1+r)^arange(n)
     r = dv / C_KMS
     n = int(np.floor(np.log(wl_max / wl_min) / np.log(1.0 + r))) + 1
     w1 = wl_min * np.power(1.0 + r, np.arange(float(n)))
@@ -844,23 +853,21 @@ def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
     obs = np.interp(w1, spec_wl, spec_flux)
 
     half = int(np.ceil(vel_range / dv))
-    m = 2 * half + 1                      # odd, as pyasl requires
+    m = 2 * half + 1
     if n <= 2 * m:
         raise ValueError("Spectrum segment too short for the BF window; "
                          "widen the wavelength range or reduce vel-range.")
 
-    # decompose once; the SVD (u, w, v) is reused for any cutoff
     try:
         from PyAstronomy import pyasl
         svd = pyasl.SVD()
         svd.decompose(tpl, m)
         w = np.ravel(np.asarray(svd.getSingularValues()))
-        rhs_valid = obs                       # pyasl selects the valid window
+        rhs_valid = obs
         solve = lambda lim: svd.getBroadeningFunction(obs, wlimit=lim,
                                                       asarray=True)
         velocity = svd.getRVAxis(r, 1)
     except ImportError:
-        # exact NumPy replication of pyasl.SVD
         nn = n - m + 1
         des = np.empty((nn, m))
         for i in range(m):
@@ -873,11 +880,6 @@ def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
             return Vt.T @ (winv * (U.T @ rhs))
         velocity = (-np.arange(m) + m // 2) * r * C_KMS
 
-    # Reference default is no truncation (svd_rcond=0). On continuum-
-    # dominated / sparsely-lined regions the smallest singular values make
-    # the solution blow up (DC null space). Guard against it: if the BF
-    # amplitude is unphysical (a normalized-flux BF is O(1)), escalate the
-    # relative cutoff until the solution is stable, and report it.
     wlimit = svd_rcond * w.max() if svd_rcond > 0 else 0.0
     bf = solve(wlimit)
     if svd_rcond <= 0 and np.max(np.abs(bf)) > 10.0:
@@ -894,11 +896,9 @@ def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
     n_sv = m
     n_kept = int((w > wlimit).sum())
 
-    # ascending velocity axis for the downstream fitting/plotting
     srt = np.argsort(velocity)
     velocity, bf = velocity[srt], bf[srt]
 
-    # reference: bfsmooth = gaussian_filter1d(bfarray, sigma=2)
     sigma_pix = (smooth_kms / (2.35482 * dv)) if smooth_kms else 2.0
     bf_smooth = gaussian_filter1d(bf, sigma_pix)
 
@@ -930,7 +930,6 @@ def fit_bf_peaks(velocity, bf, components=1, min_sep=30.0, with_offset=False):
         return [dict(rv=popt[1], rv_err=float(err[1]),
                      amp=popt[0], sigma=abs(popt[2]))], popt
 
-    # find two separated peaks
     i1 = int(np.argmax(bf))
     mask = np.abs(velocity - velocity[i1]) > min_sep
     if not mask.any():
@@ -943,20 +942,14 @@ def fit_bf_peaks(velocity, bf, components=1, min_sep=30.0, with_offset=False):
               bf[i2] - offset0, velocity[i2], 20.0, offset0]
         popt, pcov = curve_fit(two_gauss, velocity, bf, p0=p0, maxfev=40000)
     else:
-        # reference: curve_fit(gaussian, bf_ind, bfsmooth, p0=initial_guess)
         p0 = [bf[i1], velocity[i1], 20.0, bf[i2], velocity[i2], 20.0]
         popt, pcov = curve_fit(two_gauss_no, velocity, bf, p0=p0, maxfev=40000)
     err = np.sqrt(np.diag(pcov))
     comps = [dict(rv=popt[1], rv_err=float(err[1]), amp=popt[0], sigma=abs(popt[2])),
              dict(rv=popt[4], rv_err=float(err[4]), amp=popt[3], sigma=abs(popt[5]))]
-    comps.sort(key=lambda c: c["rv"])          # more negative RV first
+    comps.sort(key=lambda c: c["rv"])
     return comps, popt
 
-
-# ----------------------------------------------------------------------
-# Figures (OO Figure API: the same object is saved to disk headlessly and
-# embedded into the GUI without backend conflicts)
-# ----------------------------------------------------------------------
 
 def make_ccf_figure(result):
     from matplotlib.figure import Figure
@@ -993,7 +986,7 @@ def make_bf_figure(bf_result, comps, popt, components, bjd=None, phase=None,
     ax = fig.subplots()
     ax.plot(v, bf_result["bf"], color="0.7", lw=0.8, label="BF (raw)")
     ax.plot(v, bf_result["bf_smooth"], "b-", lw=1.5, label="BF (smoothed)")
-    model = eval_gauss_model(v_raw, popt)   # fit was done in the raw frame
+    model = eval_gauss_model(v_raw, popt)
     ax.plot(v, model, "r--", lw=2, alpha=0.8, label="Gaussian fit")
     title = []
     if bjd is not None:
@@ -1022,7 +1015,6 @@ def save_figure(fig, outfile):
     print(f"Figure saved: {outfile}")
 
 
-# strong diagnostic lines for the model-reliability check
 DIAGNOSTIC_LINES = [
     ("Halpha 6563", 6562.79),
     ("Hbeta 4861", 4861.35),
@@ -1063,8 +1055,6 @@ def line_check(spec_wl, spec_flux, tpl_wl, tpl_flux, comps,
 
     model = build_rv_model(spec_wl, tpl_wl, tpl_flux, comps)
 
-    # diagnostic lines covered by the data; fall back to the deepest
-    # absorption windows when none of the classic lines is in range
     targets = [(name, w0) for name, w0 in DIAGNOSTIC_LINES
                if spec_wl.min() + window < w0 < spec_wl.max() - window]
     if not targets:
@@ -1112,11 +1102,6 @@ def line_check(spec_wl, spec_flux, tpl_wl, tpl_flux, comps,
     return fig, stats
 
 
-# ----------------------------------------------------------------------
-# Analysis commands — used by both the CLI and the interactive modes.
-# Results are always written to result_CCF/result_BF (txt + png).
-# ----------------------------------------------------------------------
-
 def cmd_ccf(args):
     orders = read_spectrum(args.spectrum, args.format)
     tpl_wl, tpl_flux = load_template(args)
@@ -1127,7 +1112,6 @@ def cmd_ccf(args):
                   for w, f in orders]
         orders = [(w, f) for w, f in orders if w.size > 10]
 
-    # user-selected template preparation (R, vsini) BEFORE the measurement
     tpl_wl, tpl_flux = prepare_template(tpl_wl, tpl_flux,
                                         resolution=get_resolution(args),
                                         vsini=args.vsini,
@@ -1139,7 +1123,8 @@ def cmd_ccf(args):
     ctx = get_target_context(args)
     vbary, bjd, phase = ctx["vbary"], ctx["bjd"], ctx["phase"]
 
-    rv = result["rv"] + vbary
+    rv_raw, rv_err = result["rv"], result["rv_err"]
+    rv = rv_raw + vbary
     tpl_name = args.template or f"PHOENIX T={args.teff}K"
     lines = ["================ CCF RESULT ================",
              f"Normalized spectrum : {args.spectrum}",
@@ -1147,8 +1132,10 @@ def cmd_ccf(args):
     if bjd is not None:
         lines.append(f"BJD = {bjd:.6f}"
                      + (f"   phase = {phase:.4f}" if phase is not None else ""))
-    lines.append(f"RV = {rv:.4f} ± {result['rv_err']:.4f} km/s"
-                 + ("  (barycentric corrected)" if vbary else ""))
+    lines.append(f"RV (uncorrected)           = {rv_raw:.4f} "
+                 f"± {rv_err:.4f} km/s")
+    lines.append(f"RV (barycentric corrected) = {rv:.4f} "
+                 f"± {rv_err:.4f} km/s  (v_bary = {vbary:+.4f} km/s)")
     lines.append("============================================")
     summary = "\n".join(lines)
     print("\n" + summary)
@@ -1157,17 +1144,18 @@ def cmd_ccf(args):
     with open(outfile, "w") as f:
         f.write(f"# Normalized spectrum : {args.spectrum}\n")
         f.write(f"# Synthetic template  : {tpl_name}\n")
-        f.write("# method  BJD  phase  RV[km/s]  RV_err[km/s]  bary_corr[km/s]\n")
+        f.write("# method  BJD  phase  RV_raw[km/s]  RV_raw_err[km/s]  "
+                "RV_bary[km/s]  RV_bary_err[km/s]  bary_corr[km/s]\n")
         f.write(f"CCF  {bjd if bjd is not None else 'nan'}  "
                 f"{f'{phase:.5f}' if phase is not None else 'nan'}  "
-                f"{rv:.5f}  {result['rv_err']:.5f}  {vbary:.5f}\n")
+                f"{rv_raw:.5f}  {rv_err:.5f}  "
+                f"{rv:.5f}  {rv_err:.5f}  {vbary:.5f}\n")
     print(f"Results written: {outfile}")
 
     plotfile = args.plot or "result_CCF.png"
     fig = make_ccf_figure(result)
     save_figure(fig, plotfile)
 
-    # model reliability check at the diagnostic lines
     mwl = np.concatenate([w for w, _ in orders])
     mfx = np.concatenate([f for _, f in orders])
     srt = np.argsort(mwl)
@@ -1190,7 +1178,6 @@ def cmd_ccf(args):
 def cmd_bf(args):
     orders = read_spectrum(args.spectrum, args.format)
     if len(orders) > 1:
-        # merge echelle orders into one array (the 'combine' step of the thesis)
         wl = np.concatenate([w for w, _ in orders])
         fx = np.concatenate([f for _, f in orders])
         order_ = np.argsort(wl)
@@ -1205,7 +1192,6 @@ def cmd_bf(args):
         spec_wl, spec_flux = spec_wl[sel], spec_flux[sel]
 
     tpl_wl, tpl_flux = load_template(args)
-    # user-selected template preparation (R, vsini) BEFORE the BF is solved
     tpl_wl, tpl_flux = prepare_template(tpl_wl, tpl_flux,
                                         resolution=get_resolution(args),
                                         vsini=args.vsini,
@@ -1221,8 +1207,6 @@ def cmd_bf(args):
     comps, popt = fit_bf_peaks(bf_result["velocity"], bf_result["bf_smooth"],
                                components=args.components, min_sep=args.min_sep)
     if args.components == 2:
-        # same labelling convention as batch mode: component 1 = the peak
-        # with the larger BF area (larger light contribution / primary)
         comps.sort(key=lambda c: abs(c["amp"] * c["sigma"]), reverse=True)
 
     ctx = get_target_context(args)
@@ -1236,11 +1220,14 @@ def cmd_bf(args):
         lines.append(f"BJD = {bjd:.6f}"
                      + (f"   phase = {phase:.4f}" if phase is not None else ""))
     for i, c in enumerate(comps, 1):
-        lines.append(f"Component {i}: RV = {c['rv'] + vbary:.4f} "
-                     f"± {c['rv_err']:.4f} km/s"
+        lines.append(f"Component {i}: RV (uncorrected)           = "
+                     f"{c['rv']:.4f} ± {c['rv_err']:.4f} km/s"
                      f"   (amp={c['amp']:.4f}, sigma={c['sigma']:.2f} km/s)")
+        lines.append(f"             RV (barycentric corrected) = "
+                     f"{c['rv'] + vbary:.4f} ± {c['rv_err']:.4f} km/s")
+    if vbary:
+        lines.append(f"v_bary = {vbary:+.4f} km/s")
     if len(comps) == 2 and (comps[0]["amp"] > 0) and (comps[1]["amp"] > 0):
-        # BF area ratio ~ light ratio; approximated by amp*sigma
         l2_l1 = (comps[1]["amp"] * comps[1]["sigma"]) / \
                 (comps[0]["amp"] * comps[0]["sigma"])
         lines.append(f"Light ratio (C2/C1, from BF areas) ≈ {l2_l1:.3f}")
@@ -1256,10 +1243,12 @@ def cmd_bf(args):
             f.write(f"# BJD = {bjd:.6f}"
                     + (f"   phase = {phase:.5f}" if phase is not None else "")
                     + "\n")
-        f.write("# component  RV[km/s]  RV_err[km/s]  amp  sigma[km/s]  "
+        f.write("# component  RV_raw[km/s]  RV_raw_err[km/s]  "
+                "RV_bary[km/s]  RV_bary_err[km/s]  amp  sigma[km/s]  "
                 "bary_corr[km/s]\n")
         for i, c in enumerate(comps, 1):
-            f.write(f"{i}  {c['rv'] + vbary:.5f}  {c['rv_err']:.5f}  "
+            f.write(f"{i}  {c['rv']:.5f}  {c['rv_err']:.5f}  "
+                    f"{c['rv'] + vbary:.5f}  {c['rv_err']:.5f}  "
                     f"{c['amp']:.5f}  {c['sigma']:.5f}  {vbary:.5f}\n")
     print(f"Results written: {outfile}")
 
@@ -1268,7 +1257,6 @@ def cmd_bf(args):
                          bjd=bjd, phase=phase, vbary=vbary)
     save_figure(fig, plotfile)
 
-    # model reliability check at the diagnostic lines
     check_fig, stats = line_check(spec_wl, spec_flux, tpl_wl, tpl_flux,
                                   comps, method="BF")
     save_figure(check_fig, "result_BF_linecheck.png")
@@ -1406,11 +1394,11 @@ def make_rv_curve_figure(rows, ncomp, t0=None, period=None):
 
 
 def make_bf_stack_figure(profiles, t0=None, period=None):
-    """BF profiles of all epochs stacked and sorted by orbital phase (the
-    classic figure of the thesis, Sekil 4.3): each profile is offset
-    vertically, its double-Gaussian fit overplotted, and labelled with its
-    phase so the geometry near the primary (phase 0) and secondary
-    (phase 0.5) eclipses is visible at a glance."""
+    """BF profiles of all epochs stacked and sorted by orbital phase:
+    each profile is offset vertically, its double-Gaussian fit
+    overplotted, and labelled with its phase so the geometry near the
+    primary (phase 0) and secondary (phase 0.5) eclipses is visible at
+    a glance."""
     from matplotlib.figure import Figure
 
     have_phase = all(p.get("phase") is not None for p in profiles)
@@ -1473,13 +1461,11 @@ def cmd_batch(args):
     print(f"{len(files)} spectra to process.\n")
 
     tpl_wl, tpl_flux = load_template(args)
-    # user-selected template preparation (R, vsini) BEFORE the measurements
     tpl_wl, tpl_flux = prepare_template(tpl_wl, tpl_flux,
                                         resolution=get_resolution(args),
                                         vsini=args.vsini,
                                         epsilon=args.epsilon)
 
-    # coordinates once (SIMBAD / explicit); per-file obstime from headers
     ra, dec = args.ra, args.dec
     if ra is None and args.object:
         try:
@@ -1495,15 +1481,28 @@ def cmd_batch(args):
         except ValueError as exc:
             print(f"Warning: {exc}\n")
 
-    # ephemeris from VarAstro when requested and not given manually
+    t0_is_hjd = False
     if args.t0 is None and getattr(args, "varastro", False) and args.object:
         try:
             va = query_varastro(args.object)
             args.t0, args.period = va["t0"], va["period"]
-            print(f"VarAstro: {va['star']} -> T0 = {va['t0']:.5f}, "
+            t0_is_hjd = True
+            print(f"VarAstro: {va['star']} -> T0 = {va['t0']:.5f} HJD, "
                   f"P = {va['period']:.7f} d  ({va['url']})\n")
         except ValueError as exc:
             print(f"Warning: {exc}\n")
+    if args.t0 is not None and getattr(args, "t0_to_bjd", False):
+        if ra is not None and dec is not None:
+            t0_bjd = hjd_to_bjd(args.t0, ra, dec)
+            print(f"Ephemeris T0 converted: HJD {args.t0:.6f} -> "
+                  f"BJD {t0_bjd:.6f} (used for the analysis)\n")
+            args.t0 = t0_bjd
+        else:
+            print("Note: HJD -> BJD conversion of T0 skipped "
+                  "(needs target coordinates).\n")
+    elif t0_is_hjd:
+        print("Note: T0 is kept in HJD (VarAstro native unit); "
+              "use --t0-to-bjd to convert it to BJD.\n")
 
     ncomp = args.components
     rows, profiles = [], []
@@ -1543,7 +1542,6 @@ def cmd_batch(args):
                                            components=ncomp,
                                            min_sep=args.min_sep)
                 if ncomp == 2:
-                    # stable labelling: primary = larger BF area
                     comps.sort(key=lambda c: c["amp"] * c["sigma"],
                                reverse=True)
             else:
@@ -1551,7 +1549,6 @@ def cmd_batch(args):
                                  args.rv_min, args.rv_max, args.rv_step)
                 comps = [dict(rv=result["rv"], rv_err=result["rv_err"])]
 
-            # BJD: numeric input is already BJD; ISOT converted (needs coords)
             vbary, bjd = 0.0, np.nan
             if obstime is not None:
                 _, is_jd = parse_time_input(obstime)
@@ -1570,10 +1567,10 @@ def cmd_batch(args):
             rows.append(dict(file=os.path.basename(path), bjd=bjd,
                              phase=phase,
                              rv=[c["rv"] + vbary for c in comps],
-                             rv_err=[c["rv_err"] for c in comps]))
+                             rv_raw=[c["rv"] for c in comps],
+                             rv_err=[c["rv_err"] for c in comps],
+                             vbary=vbary))
             if args.method == "bf":
-                # velocities shifted by vbary so the stacked profiles line
-                # up with the barycentric-corrected RVs of the curve file
                 profiles.append(dict(
                     name=os.path.basename(path),
                     velocity=bf_result["velocity"] + vbary,
@@ -1594,13 +1591,17 @@ def cmd_batch(args):
     with open(outfile, "w") as f:
         f.write(f"# RV curve, method = {args.method.upper()}, "
                 f"template = {args.template or f'PHOENIX T={args.teff}K'}\n")
-        cols = "  ".join(f"RV{j + 1}[km/s]  RV{j + 1}_err" for j in range(ncomp))
-        f.write(f"# file  BJD  phase  {cols}\n")
+        cols = "  ".join(f"RV{j + 1}_raw[km/s]  RV{j + 1}_raw_err  "
+                         f"RV{j + 1}_bary[km/s]  RV{j + 1}_bary_err"
+                         for j in range(ncomp))
+        f.write(f"# file  BJD  phase  {cols}  bary_corr[km/s]\n")
         for r in rows:
-            vals = "  ".join(f"{r['rv'][j]:.5f}  {r['rv_err'][j]:.5f}"
+            vals = "  ".join(f"{r['rv_raw'][j]:.5f}  {r['rv_err'][j]:.5f}  "
+                             f"{r['rv'][j]:.5f}  {r['rv_err'][j]:.5f}"
                              for j in range(len(r["rv"])))
             ph = f"{r['phase']:.5f}" if r["phase"] is not None else "nan"
-            f.write(f"{r['file']}  {r['bjd']:.6f}  {ph}  {vals}\n")
+            f.write(f"{r['file']}  {r['bjd']:.6f}  {ph}  {vals}  "
+                    f"{r['vbary']:.5f}\n")
     print(f"\nRV curve written: {outfile}")
 
     plotfile = args.plot or "result_RV_curve.png"
@@ -1671,21 +1672,19 @@ def cmd_demo(args):
     the CCF peaks are broader and prone to blending.
     """
     rng = np.random.default_rng(42)
-    rv1_true, rv2_true = -80.0, 120.0     # component velocities [km/s]
-    light_ratio = 0.45                    # C2/C1 light contribution
+    rv1_true, rv2_true = -80.0, 120.0
+    light_ratio = 0.45
 
-    # Template: normalized spectrum with random absorption lines, 5000-5500 A
     wl = log_wave_grid(4950.0, 5550.0, 1.0)
     tpl = np.ones_like(wl)
     n_lines = 160
     centers = rng.uniform(4960, 5540, n_lines)
     depths = rng.uniform(0.15, 0.85, n_lines)
-    widths = rng.uniform(0.08, 0.25, n_lines)  # A
+    widths = rng.uniform(0.08, 0.25, n_lines)
     for c0, d, w in zip(centers, depths, widths):
         tpl -= d * np.exp(-((wl - c0) ** 2) / (2 * w ** 2))
     tpl = np.clip(tpl, 0.02, None)
 
-    # Observed: two Doppler-shifted, rotationally broadened components
     def rot_broaden(flux, vsini_kms):
         sigma_pix = vsini_kms / 1.0 / 2.35482
         return gaussian_filter1d(flux, sigma_pix)
@@ -1695,13 +1694,12 @@ def cmd_demo(args):
     f1 = rot_broaden(f1, 40.0)
     f2 = rot_broaden(f2, 25.0)
     obs = (f1 + light_ratio * f2) / (1.0 + light_ratio)
-    obs += rng.normal(0, 0.004, obs.size)   # S/N ~ 250
+    obs += rng.normal(0, 0.004, obs.size)
 
     print("Synthetic SB2 system generated:")
     print(f"  True RV1 = {rv1_true} km/s, RV2 = {rv2_true} km/s, "
           f"light ratio = {light_ratio}\n")
 
-    # --- BF ---
     print("--- BF method ---")
     bf_result = compute_bf(wl, obs, wl, tpl, vel_range=300.0, dv=2.0,
                            svd_rcond=5e-4, smooth_kms=10.0)
@@ -1710,7 +1708,6 @@ def cmd_demo(args):
     for i, c in enumerate(comps, 1):
         print(f"  Component {i}: RV = {c['rv']:8.3f} ± {c['rv_err']:.3f} km/s")
 
-    # --- CCF ---
     print("--- CCF method (same data) ---")
     rv_grid = np.arange(-200, 251, 2.0)
     ccf = calculate_ccf(wl, 1.0 - obs, wl, 1.0 - tpl, rv_grid)
@@ -1765,20 +1762,13 @@ def cmd_demo(args):
         save_figure(fig, args.plot)
 
 
-# ----------------------------------------------------------------------
-# Interactive mode — started when run without arguments.
-# The tkinter widget is tried first; without tkinter/display the terminal
-# wizard runs instead. Both call the same cmd_ccf/cmd_bf core, so the
-# outputs (result_*.txt + result_*.png) are identical.
-# ----------------------------------------------------------------------
-
 def make_args(**overrides):
     """Namespace with every field expected by cmd_ccf/cmd_bf."""
     base = dict(spectrum=None, format="auto", template=None,
                 teff=None, logg=4.5, feh=0.0,
                 wave_min=None, wave_max=None,
                 object=None, ra=None, dec=None, obstime=None, site="paranal",
-                t0=None, period=None, varastro=False,
+                t0=None, period=None, varastro=False, t0_to_bjd=False,
                 plot=None, output=None,
                 rv_min=-200.0, rv_max=200.0, rv_step=0.5,
                 vel_range=400.0, dv=None, svd_rcond=1e-3, smooth=None,
@@ -1841,7 +1831,6 @@ def _ask_target(kw):
                             "empty: read from FITS header)", allow_empty=True)
         kw["site"] = ask("Observatory (astropy site name: tug, paranal, ...)",
                          default="tug")
-    # ephemeris: VarAstro lookup first (if we have a name), manual fallback
     if kw.get("object"):
         fetch = ask("Fetch ephemeris T0/P from VarAstro (var.astro.cz)? "
                     "(y/n)", default="y", cast=str,
@@ -1849,11 +1838,20 @@ def _ask_target(kw):
         if fetch.lower() == "y":
             try:
                 va = query_varastro(kw["object"])
-                print(f"  VarAstro: {va['star']} -> T0 = {va['t0']:.5f}, "
+                print(f"  VarAstro: {va['star']} -> T0 = {va['t0']:.5f} HJD, "
                       f"P = {va['period']:.7f} d  ({va['url']})")
-                # editable: fetched values become the defaults
-                kw["t0"] = ask("Ephemeris T0 [BJD]", default=va["t0"],
-                               cast=float)
+                t0 = ask("Ephemeris T0 [HJD]", default=va["t0"], cast=float)
+                if kw.get("ra") is not None and kw.get("dec") is not None:
+                    conv = ask("Convert T0 from HJD to BJD and use it for "
+                               "the analysis? (y/n)", default="y", cast=str,
+                               validate=lambda s: s.lower() in ("y", "n"))
+                    if conv.lower() == "y":
+                        t0 = hjd_to_bjd(t0, kw["ra"], kw["dec"])
+                        print(f"  T0 converted to BJD: {t0:.6f}")
+                else:
+                    print("  HJD -> BJD conversion needs target coordinates; "
+                          "T0 is kept in HJD.")
+                kw["t0"] = t0
                 kw["period"] = ask("Orbital period [days]",
                                    default=va["period"], cast=float)
                 return kw
@@ -1884,7 +1882,6 @@ def _ask_common_inputs(kw):
                                           iterations=iters))
         spectrum = payload["output"]
         print(f"  Using normalized spectrum: {spectrum}\n")
-        # carry target info over from the raw FITS header (fill gaps only)
         hdr = fits_header_info(raw)
         if not kw.get("obstime") and hdr["obstime"]:
             kw["obstime"] = hdr["obstime"]
@@ -1907,10 +1904,9 @@ def _ask_common_inputs(kw):
                          allow_empty=True, cast=float)
     kw["wave_max"] = ask("Maximum wavelength [A] (empty: all)",
                          allow_empty=True, cast=float)
-    # spectrograph selection -> resolution R (manual entry as fallback)
     print("\nBuilt-in spectrographs:")
     for i, (n, r, note) in enumerate(SPECTROGRAPHS, 1):
-        print(f"  [{i}] {n:<10} R = {r:<7} ({note})")
+        print(f"  [{i:>2}] {n:<14} R = {r:<7} ({note})")
     sel = ask("Spectrograph number (empty: enter R manually / skip)",
               allow_empty=True, cast=int,
               validate=lambda i: 1 <= i <= len(SPECTROGRAPHS))
@@ -1948,10 +1944,10 @@ def run_terminal_wizard():
     print("\nWhich method do you want to continue with?")
     print("  [1] CCF — cross-correlation (practical for single stars / SB1)")
     print("  [2] BF  — broadening function (recommended for binaries / SB2)")
-    secim = ask("Choice", default="2", cast=str,
-                validate=lambda s: s in ("1", "2"))
+    choice = ask("Choice", default="2", cast=str,
+                 validate=lambda s: s in ("1", "2"))
 
-    if secim == "1":
+    if choice == "1":
         kw["rv_min"] = ask("RV scan lower limit [km/s]", default=-200.0, cast=float)
         kw["rv_max"] = ask("RV scan upper limit [km/s]", default=200.0, cast=float)
         kw["rv_step"] = ask("RV step [km/s]", default=0.5, cast=float)
@@ -2005,7 +2001,6 @@ def run_gui():
         if p:
             var.set(p)
 
-    # --- target / barycentric correction ---
     target_var = tk.StringVar()
     ra_var, dec_var = tk.StringVar(), tk.StringVar()
     time_var, site_var = tk.StringVar(), tk.StringVar(value="paranal")
@@ -2063,21 +2058,24 @@ def run_gui():
                                                           sticky="w",
                                                           pady=(4, 0))
 
-    # ephemeris -> orbital phase (primary eclipse at 0.0, secondary at 0.5)
     t0_var, per_var = tk.StringVar(), tk.StringVar()
-    ttk.Label(trow, text="Ephemeris T0 [BJD]:").grid(row=2, column=0,
-                                                     columnspan=2, sticky="w",
-                                                     pady=(4, 0))
+    t0_unit_var = tk.StringVar(value="BJD")
+    ttk.Label(trow, text="Ephemeris T0:").grid(row=2, column=0,
+                                               columnspan=2, sticky="w",
+                                               pady=(4, 0))
     ttk.Entry(trow, textvariable=t0_var, width=14).grid(row=2, column=2,
                                                         sticky="w", pady=(4, 0))
-    ttk.Label(trow, text="Period [d]:").grid(row=2, column=3, sticky="e",
+    ttk.Label(trow, textvariable=t0_unit_var, foreground="gray"
+              ).grid(row=2, column=3, sticky="w", pady=(4, 0))
+    ttk.Label(trow, text="Period [d]:").grid(row=2, column=4, sticky="e",
                                              pady=(4, 0))
-    ttk.Entry(trow, textvariable=per_var, width=10).grid(row=2, column=4,
+    ttk.Entry(trow, textvariable=per_var, width=10).grid(row=2, column=5,
                                                          sticky="w",
                                                          pady=(4, 0))
 
     def varastro_lookup():
-        """Fetch T0/P from var.astro.cz by the target name; the fields
+        """Fetch T0/P from var.astro.cz by the target name; the values come
+        in VarAstro's native units (T0 in HJD, P in days) and the fields
         stay editable for manual override."""
         name = target_var.get().strip()
         if not name:
@@ -2091,15 +2089,46 @@ def run_gui():
             return
         t0_var.set(f"{va['t0']:.5f}")
         per_var.set(f"{va['period']:.7f}")
+        t0_unit_var.set("HJD")
         messagebox.showinfo(
-            "VarAstro", f"{va['star']}\nT0 = {va['t0']:.5f}\n"
+            "VarAstro", f"{va['star']}\nT0 = {va['t0']:.5f} HJD\n"
                         f"P = {va['period']:.7f} d\n\n{va['url']}\n"
-                        "(fields remain editable)")
+                        "(fields remain editable; press 'HJD -> BJD' to "
+                        "convert T0 and use the BJD value in the analysis)")
+
+    def convert_t0_to_bjd():
+        """Convert the T0 field from HJD to BJD_TDB; the converted value
+        replaces the field content and is used in the analysis."""
+        s = t0_var.get().strip()
+        if not s:
+            messagebox.showinfo("HJD -> BJD", "Enter or fetch a T0 first.")
+            return
+        if t0_unit_var.get() == "BJD":
+            messagebox.showinfo("HJD -> BJD", "T0 is already in BJD.")
+            return
+        ra_s, dec_s = ra_var.get().strip(), dec_var.get().strip()
+        if not ra_s or not dec_s:
+            messagebox.showwarning(
+                "HJD -> BJD", "Target coordinates are required: fill the "
+                              "RA/Dec fields (or use the SIMBAD button) "
+                              "first.")
+            return
+        try:
+            bjd = hjd_to_bjd(float(s), float(ra_s), float(dec_s))
+        except Exception as exc:
+            messagebox.showerror("HJD -> BJD", str(exc))
+            return
+        t0_var.set(f"{bjd:.6f}")
+        t0_unit_var.set("BJD")
+        messagebox.showinfo(
+            "HJD -> BJD", f"T0 converted to BJD: {bjd:.6f}\n"
+                          "The BJD value will be used in the analysis.")
 
     ttk.Button(trow, text="VarAstro", command=varastro_lookup
-               ).grid(row=2, column=5, sticky="w", padx=(6, 0), pady=(4, 0))
+               ).grid(row=2, column=6, sticky="w", padx=(6, 0), pady=(4, 0))
+    ttk.Button(trow, text="HJD -> BJD", command=convert_t0_to_bjd
+               ).grid(row=2, column=7, sticky="w", padx=(4, 0), pady=(4, 0))
 
-    # --- input files ---
     spec_var = tk.StringVar()
     tpl_var = tk.StringVar()
 
@@ -2119,7 +2148,6 @@ def run_gui():
                command=lambda: browse(tpl_var, "Select synthetic spectrum")
                ).grid(row=2, column=2, sticky="w")
 
-    # --- wavelength range + template preparation (R, vsini) ---
     wmin_var, wmax_var = tk.StringVar(), tk.StringVar()
     res_var, vsini_var = tk.StringVar(), tk.StringVar()
     wrow = ttk.Frame(main)
@@ -2154,7 +2182,6 @@ def run_gui():
                 res_var.set(str(r))
                 update_min_vsini_hint()
                 return
-        # "Custom": clear for manual entry
         res_var.set("")
         update_min_vsini_hint()
 
@@ -2175,7 +2202,6 @@ def run_gui():
     ttk.Label(prow, textvariable=min_vsini_var, foreground="gray"
               ).pack(side="left", padx=6)
 
-    # --- method ---
     method_var = tk.StringVar(value="BF")
     mrow = ttk.Frame(main)
     mrow.grid(row=5, column=0, columnspan=3, sticky="w", pady=(6, 0))
@@ -2221,7 +2247,6 @@ def run_gui():
                  state="readonly").grid(row=0, column=4, padx=4)
     on_method_change()
 
-    # --- results + plot ---
     result_text = tk.Text(main, height=8, width=90, state="disabled",
                           font=("Courier", 10))
     result_text.grid(row=8, column=0, columnspan=3, sticky="ew", pady=6)
@@ -2279,7 +2304,6 @@ def run_gui():
         canvas.get_tk_widget().pack(fill="both", expand=True)
         canvas_holder["canvas"] = canvas
 
-    # --- normalization dialog for raw spectra ---
     def normalize_dialog():
         dlg = tk.Toplevel(root)
         dlg.title("Normalize raw spectrum")
@@ -2327,7 +2351,6 @@ def run_gui():
                 messagebox.showerror("Error", str(exc), parent=dlg)
                 return
             show_payload(state["payload"])
-            # auto-fill target info from the FITS header, if present
             hdr = fits_header_info(raw_var.get().strip())
             if hdr["obstime"] and not time_var.get().strip():
                 time_var.set(hdr["obstime"])
@@ -2363,7 +2386,6 @@ def run_gui():
                                  "a raw spectrum).")
             if not tpl_var.get().strip():
                 raise ValueError("No synthetic spectrum file selected.")
-            # vsini floor: rotation below c/R is unresolvable at this R
             r_val, v_val = _f(res_var), _f(vsini_var)
             if r_val and v_val and v_val < min_vsini(r_val):
                 messagebox.showwarning(
@@ -2413,10 +2435,6 @@ def run_interactive():
     run_terminal_wizard()
 
 
-# ----------------------------------------------------------------------
-# Command line interface
-# ----------------------------------------------------------------------
-
 def add_common_args(p):
     p.add_argument("--spectrum", required=True,
                    help="Normalized observed spectrum file")
@@ -2459,7 +2477,13 @@ def add_common_args(p):
     p.add_argument("--varastro", action="store_true",
                    help="Fetch T0/P from the VarAstro database "
                         "(var.astro.cz) using the --object name when "
-                        "--t0/--period are not given")
+                        "--t0/--period are not given; values come in "
+                        "VarAstro's native units (T0 in HJD, P in days)")
+    p.add_argument("--t0-to-bjd", action="store_true",
+                   help="Convert the ephemeris T0 from HJD to BJD_TDB "
+                        "before the analysis (needs target coordinates); "
+                        "the converted value is then used for the "
+                        "orbital phase")
     p.add_argument("--plot", help="Figure PNG file name "
                                   "(default: result_CCF.png / result_BF.png)")
     p.add_argument("--output", help="Result text file name "
@@ -2467,7 +2491,6 @@ def add_common_args(p):
 
 
 def main():
-    # No arguments -> interactive mode (widget or terminal wizard)
     if len(sys.argv) == 1:
         run_interactive()
         return
@@ -2577,7 +2600,12 @@ def main():
     p_batch.add_argument("--period", type=float,
                          help="Orbital period [days] for phase-folding")
     p_batch.add_argument("--varastro", action="store_true",
-                         help="Fetch T0/P from VarAstro using --object")
+                         help="Fetch T0/P from VarAstro using --object "
+                              "(T0 in HJD, P in days)")
+    p_batch.add_argument("--t0-to-bjd", action="store_true",
+                         help="Convert the ephemeris T0 from HJD to "
+                              "BJD_TDB before the analysis "
+                              "(needs target coordinates)")
     p_batch.add_argument("--output", help="RV curve file "
                                           "(default: result_RV_curve.txt)")
     p_batch.add_argument("--plot", help="RV curve figure "
