@@ -242,16 +242,31 @@ def fits_header_info(path):
 
     Returns dict with keys object/obstime/ra/dec (values may be None).
     RA/Dec are converted to degrees; sexagesimal strings ('hh:mm:ss') are
-    interpreted as hourangle/deg.
+    interpreted as hourangle/deg. Any radial-velocity related cards
+    (RV, VRAD, VHELIO, BERV, CCF RV, ... with a numeric value) are
+    collected in 'rv_cards' as (keyword, value, comment) tuples.
     """
     from astropy.io import fits
     info = {"object": None, "obstime": None, "ra": None, "dec": None,
-            "exptime": None}
+            "exptime": None, "rv_cards": []}
     try:
         with fits.open(path) as hdul:
             h = hdul[0].header
     except Exception:
         return info
+    rv_tokens = {"RV", "RVC", "RVS", "VRAD", "RADVEL", "VHELIO", "VLSR",
+                 "BERV", "BARYCORR", "HRV", "HJDRV"}
+    for card in h.cards:
+        key = str(card.keyword)
+        if not key:
+            continue
+        tokens = set(key.replace("-", " ").replace("_", " ").split())
+        if tokens & rv_tokens and isinstance(card.value, (int, float)) \
+                and not isinstance(card.value, bool):
+            info["rv_cards"].append((key, float(card.value),
+                                     str(card.comment or "")))
+        if len(info["rv_cards"]) >= 12:
+            break
     info["object"] = h.get("OBJECT")
     info["obstime"] = h.get("DATE-OBS") or h.get("DATE_OBS")
     info["exptime"] = h.get("EXPTIME")
@@ -499,8 +514,9 @@ def parse_time_input(value):
     """Observation time as an astropy Time: accepts an ISOT string
     ('2024-12-03T02:30:00') or a JD/BJD number ('2453254.847090365').
 
-    A numeric value is treated as a JD, matching the reference document:
-    Time(bjd, scale='utc', format='jd').
+    A numeric value is treated as a BJD and, by definition of the BJD,
+    carried on the TDB scale: Time(bjd, scale='tdb', format='jd'). An
+    ISOT calendar stamp is a clock reading and stays on the UTC scale.
     """
     from astropy.time import Time
     s = str(value).strip()
@@ -508,7 +524,7 @@ def parse_time_input(value):
         jd = float(s)
     except ValueError:
         return Time(s, format="isot", scale="utc"), False
-    return Time(jd, format="jd", scale="utc"), True
+    return Time(jd, format="jd", scale="tdb"), True
 
 
 def orbital_phase(bjd, t0, period):
@@ -686,13 +702,11 @@ def run_ccf(spectrum_orders, tpl_wl, tpl_flux, rv_min, rv_max, rv_step):
     ccf_total = np.sum(ccf_orders, axis=0)
     ccf_total = ccf_total / np.nanmax(ccf_total)
 
-    x0 = rv_grid[np.argmax(ccf_total)]
-    amp0 = ccf_total.max() - np.median(ccf_total)
-    p0 = [amp0, x0, 5.0, np.median(ccf_total)]
-    popt, pcov = curve_fit(gauss, rv_grid, ccf_total, p0=p0, maxfev=20000)
-    rv, rv_err = popt[1], float(np.sqrt(pcov[1, 1]))
+    comps, popt = fit_peak_with_base(rv_grid, ccf_total, with_offset=True)
+    rv, rv_err = comps[0]["rv"], comps[0]["rv_err"]
 
-    return dict(rv=rv, rv_err=rv_err, rv_grid=rv_grid,
+    return dict(rv=rv, rv_err=rv_err, amp=comps[0]["amp"],
+                sigma=comps[0]["sigma"], rv_grid=rv_grid,
                 ccf_total=ccf_total, ccf_orders=np.array(ccf_orders), popt=popt)
 
 
@@ -771,8 +785,8 @@ def prepare_template(tpl_wl, tpl_flux, resolution=None, vsini=None,
         The template is convolved with a Gaussian of FWHM = c/R [km/s]
         (e.g. FEROS R=48000 -> 6.2 km/s, ESPRESSO R=140000 -> 2.1 km/s).
         Note: broadening the template makes the SVD design matrix more
-        ill-conditioned, so a small svd_rcond (default 1e-3) is used
-        afterwards for a clean BF (see compute_bf).
+        ill-conditioned; if the BF becomes unstable, the cutoff is
+        auto-escalated or can be set with svd_rcond (see compute_bf).
     vsini : projected rotational velocity [km/s].
         Rotational broadening with the Gray (1992) profile using the
         linear limb-darkening coefficient `epsilon` (default 0.6).
@@ -822,7 +836,7 @@ def prepare_template(tpl_wl, tpl_flux, resolution=None, vsini=None,
 
 
 def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
-               vel_range=400.0, dv=None, svd_rcond=1e-3, smooth_kms=None):
+               vel_range=400.0, dv=None, svd_rcond=0.0, smooth_kms=None):
     """Broadening Function following the reference implementation
     (BF_main.txt; Rucinski 1999 via PyAstronomy's pyasl.SVD).
 
@@ -844,13 +858,12 @@ def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
     Parameters
     ----------
     vel_range : half-width of the BF window [km/s]
-    dv        : velocity step stepV [km/s]; None -> from the median data pixel
-    svd_rcond : relative singular-value cutoff. The reference uses 0 (no
-        truncation), which is stable only for a sharp template over a
-        line-rich, narrow region. Broadened templates and continuum-
-        dominated ranges need a small cutoff; the default 1e-3 works
-        across all cases. When 0 is requested and the BF still blows up
-        (DC null space), the cutoff is auto-escalated with a printed note.
+    dv        : velocity step stepV [km/s]; None -> 5.0, the reference value
+    svd_rcond : relative singular-value cutoff. The default 0 matches the
+        reference (no truncation). Broadened templates and continuum-
+        dominated ranges may need a small cutoff (e.g. 1e-3); when the BF
+        blows up at 0 (DC null space), the cutoff is auto-escalated with
+        a printed note.
     smooth_kms: smoothing FWHM [km/s]; None -> sigma = 2 bins (reference)
 
     Returns: dict(velocity, bf, bf_smooth, dv, n_kept_sv, n_sv)
@@ -867,8 +880,7 @@ def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
                          "do not overlap.")
 
     if dv is None:
-        pix = np.median(np.diff(spec_wl)) / np.median(spec_wl) * C_KMS
-        dv = max(pix, 0.5)
+        dv = 5.0
 
     r = dv / C_KMS
     n = int(np.floor(np.log(wl_max / wl_min) / np.log(1.0 + r))) + 1
@@ -931,30 +943,58 @@ def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
                 n_kept_sv=n_kept, n_sv=n_sv)
 
 
-def fit_bf_peaks(velocity, bf, components=1, min_sep=30.0, with_offset=False):
-    """Fit single/double Gaussians to the BF profile.
+def fit_peak_with_base(velocity, profile, with_offset=False):
+    """Reference-notebook peak fit (BF_main_fixed.ipynb): a bounded double
+    Gaussian made of a sharp peak plus a broad base component, initial
+    guesses taken from the profile maximum. The broad component absorbs
+    the pedestal/wings of the profile so the centre of the sharp
+    component — which carries the RV — is not pulled. Bounds follow the
+    reference: amplitudes >= 0, centres inside the velocity axis,
+    1 <= sigma <= 200 km/s for the peak and <= 300 km/s for the base.
+    with_offset=True adds a constant baseline term (for CCF profiles,
+    whose baseline is not zero).
 
-    The default fit model is the no-offset (single/double) Gaussian of the
-    reference document (BF_main.txt); with_offset=True adds a constant
-    baseline term (useful for CCF profiles, whose baseline is not zero).
-    Initial guesses come from the two highest peaks separated by at least
-    min_sep [km/s].
+    Returns ([dict(rv, rv_err, amp, sigma) of the sharp component], popt).
+    """
+    velocity = np.asarray(velocity, dtype=float)
+    profile = np.asarray(profile, dtype=float)
+    ipk = int(np.argmax(profile))
+    vlo, vhi = float(velocity.min()), float(velocity.max())
+    offset0 = float(np.median(profile)) if with_offset else 0.0
+    amp0 = max(float(profile[ipk]) - offset0, 1e-6)
+    p0 = [amp0, float(velocity[ipk]), 20.0,
+          0.1 * amp0, float(velocity[ipk]), 60.0]
+    lo = [0.0, vlo, 1.0, 0.0, vlo, 1.0]
+    hi = [np.inf, vhi, 200.0, np.inf, vhi, 300.0]
+    if with_offset:
+        p0, lo, hi = p0 + [offset0], lo + [-np.inf], hi + [np.inf]
+        popt, pcov = curve_fit(two_gauss, velocity, profile, p0=p0,
+                               bounds=(lo, hi), maxfev=20000)
+    else:
+        popt, pcov = curve_fit(two_gauss_no, velocity, profile, p0=p0,
+                               bounds=(lo, hi), maxfev=20000)
+    err = np.sqrt(np.diag(pcov))
+    k = 0 if popt[0] >= popt[3] else 3
+    comp = dict(rv=popt[k + 1], rv_err=float(err[k + 1]),
+                amp=popt[k], sigma=abs(popt[k + 2]))
+    return [comp], popt
+
+
+def fit_bf_peaks(velocity, bf, components=1, min_sep=30.0, with_offset=False):
+    """Fit the BF/CCF profile following the reference notebook.
+
+    components=1: bounded sharp-peak + broad-base double Gaussian
+    (fit_peak_with_base); the sharp component is reported. components=2:
+    two bounded Gaussians started from the two highest peaks separated by
+    at least min_sep [km/s]. with_offset=True adds a constant baseline
+    term (useful for CCF profiles, whose baseline is not zero).
 
     Returns: list of dict(rv, rv_err, amp, sigma) per component, and popt.
     """
-    offset0 = np.median(bf) if with_offset else 0.0
     if components == 1:
-        i0 = np.argmax(bf)
-        if with_offset:
-            p0 = [bf[i0] - offset0, velocity[i0], 20.0, offset0]
-            popt, pcov = curve_fit(gauss, velocity, bf, p0=p0, maxfev=20000)
-        else:
-            p0 = [bf[i0], velocity[i0], 20.0]
-            popt, pcov = curve_fit(gauss_no, velocity, bf, p0=p0, maxfev=20000)
-        err = np.sqrt(np.diag(pcov))
-        return [dict(rv=popt[1], rv_err=float(err[1]),
-                     amp=popt[0], sigma=abs(popt[2]))], popt
+        return fit_peak_with_base(velocity, bf, with_offset=with_offset)
 
+    offset0 = np.median(bf) if with_offset else 0.0
     i1 = int(np.argmax(bf))
     mask = np.abs(velocity - velocity[i1]) > min_sep
     if not mask.any():
@@ -962,13 +1002,19 @@ def fit_bf_peaks(velocity, bf, components=1, min_sep=30.0, with_offset=False):
                            "reduce --min-sep.")
     i2 = int(np.flatnonzero(mask)[np.argmax(bf[mask])])
 
+    vlo, vhi = float(np.min(velocity)), float(np.max(velocity))
+    lo = [0.0, vlo, 1.0, 0.0, vlo, 1.0]
+    hi = [np.inf, vhi, 200.0, np.inf, vhi, 200.0]
     if with_offset:
-        p0 = [bf[i1] - offset0, velocity[i1], 20.0,
-              bf[i2] - offset0, velocity[i2], 20.0, offset0]
-        popt, pcov = curve_fit(two_gauss, velocity, bf, p0=p0, maxfev=40000)
+        p0 = [max(bf[i1] - offset0, 1e-6), velocity[i1], 20.0,
+              max(bf[i2] - offset0, 1e-6), velocity[i2], 20.0, offset0]
+        popt, pcov = curve_fit(two_gauss, velocity, bf, p0=p0,
+                               bounds=(lo + [-np.inf], hi + [np.inf]),
+                               maxfev=40000)
     else:
         p0 = [bf[i1], velocity[i1], 20.0, bf[i2], velocity[i2], 20.0]
-        popt, pcov = curve_fit(two_gauss_no, velocity, bf, p0=p0, maxfev=40000)
+        popt, pcov = curve_fit(two_gauss_no, velocity, bf, p0=p0,
+                               bounds=(lo, hi), maxfev=40000)
     err = np.sqrt(np.diag(pcov))
     comps = [dict(rv=popt[1], rv_err=float(err[1]), amp=popt[0], sigma=abs(popt[2])),
              dict(rv=popt[4], rv_err=float(err[4]), amp=popt[3], sigma=abs(popt[5]))]
@@ -987,7 +1033,8 @@ def make_ccf_figure(result):
 
     ax1.plot(result["rv_grid"], result["ccf_total"], "k-", lw=1.2,
              label="Total CCF (normalized)")
-    ax1.plot(result["rv_grid"], gauss(result["rv_grid"], *result["popt"]),
+    ax1.plot(result["rv_grid"],
+             eval_gauss_model(result["rv_grid"], result["popt"]),
              "r-", lw=2, alpha=0.7,
              label=f"Gaussian fit: RV = {result['rv']:.3f} "
                    f"± {result['rv_err']:.3f} km/s")
@@ -1002,10 +1049,11 @@ def make_ccf_figure(result):
 def make_bf_figure(bf_result, comps, popt, components, bjd=None, phase=None,
                    vbary=0.0, bary_applied=True):
     """BF figure in the measured (uncorrected) velocity frame: the axis
-    and the annotated RVs are the raw measurements. When a barycentric
-    correction is available, the corrected RV is annotated alongside and
-    the v_bary value is shown in the title together with whether it was
-    applied to the reported results."""
+    and the annotated RVs are the raw measurements. When the barycentric
+    correction is applied to the reported results, the corrected RV is
+    annotated alongside and the v_bary value is shown in the title; when
+    it is not applied, no v_bary information appears on the figure at
+    all."""
     from matplotlib.figure import Figure
     v = bf_result["velocity"]
     fig = Figure(figsize=(9, 5))
@@ -1014,25 +1062,25 @@ def make_bf_figure(bf_result, comps, popt, components, bjd=None, phase=None,
     ax.plot(v, bf_result["bf_smooth"], "b-", lw=1.5, label="BF (smoothed)")
     model = eval_gauss_model(v, popt)
     ax.plot(v, model, "r--", lw=2, alpha=0.8, label="Gaussian fit")
+    show_bary = bool(vbary) and bary_applied
     title = []
     if bjd is not None:
         title.append(f"BJD {bjd:.6f}")
     if phase is not None:
         title.append(f"phase {phase:.4f}")
-    if vbary:
-        title.append(f"v_bary = {vbary:+.3f} km/s "
-                     + ("(applied in results)" if bary_applied
-                        else "(NOT applied)"))
+    if show_bary:
+        title.append(f"v_bary = {vbary:+.3f} km/s (applied in results)")
     if title:
         ax.set_title("  |  ".join(title), fontsize=10)
     for i, c in enumerate(comps, 1):
         label = f"C{i}: {c['rv']:.2f} km/s"
-        if vbary:
+        if show_bary:
             label += f"  ({c['rv'] + vbary:.2f} bary)"
         ax.axvline(c["rv"], color="r", ls=":", lw=1)
         ax.annotate(label, (c["rv"], c["amp"]),
                     textcoords="offset points", xytext=(6, 6), color="r")
-    ax.set_xlabel("Radial velocity [km/s]  (uncorrected)")
+    ax.set_xlabel("Radial velocity [km/s]"
+                  + ("  (uncorrected)" if show_bary else ""))
     ax.set_ylabel("Broadening Function")
     ax.legend()
     fig.tight_layout()
@@ -1045,11 +1093,10 @@ def save_figure(fig, outfile):
 
 
 DIAGNOSTIC_LINES = [
-    ("Halpha 6563", 6562.79),
-    ("Hbeta 4861", 4861.35),
-    ("Mg b 5184", 5183.60),
-    ("Mg b 5173", 5172.68),
-    ("Mg b 5167", 5167.32),
+    ("Fe I 5269.54", 5269.541),
+    ("Fe I 5328.04", 5328.039),
+    ("Fe I 5371.49", 5371.489),
+    ("Fe I 5405.77", 5405.775),
 ]
 
 
@@ -1069,14 +1116,17 @@ def build_rv_model(spec_wl, tpl_wl, tpl_flux, comps):
 
 
 def line_check(spec_wl, spec_flux, tpl_wl, tpl_flux, comps,
-               window=12.0, method="BF"):
-    """Reliability check of the RV solution: the observed normalized
-    spectrum is compared with the model (template shifted by the measured
-    RVs) in windows around strong diagnostic lines (Halpha 6563, Hbeta
-    4861, Mg triplet 5167/5173/5184 A). For every line the residual RMS,
-    the Pearson correlation and the line-depth ratio (observed/model) are
-    computed — depth ratios near 1 and high correlations mean the model
-    is trustworthy.
+               window=6.0, method="BF"):
+    """Reliability check of the RV solution against real Fe I lines: the
+    observed normalized spectrum is compared with the model (template
+    shifted by the measured RVs) in windows around the strongest Fe I
+    lines of the 500-550 nm region, led by Fe I 5269.54 A (526.954 nm),
+    the strongest of them. Each window is centered on the Doppler-shifted
+    position of the line for the primary component, so the comparison
+    tracks the line wherever the measured RV puts it. For every line the
+    residual RMS, the Pearson correlation and the line-depth ratio
+    (observed/model) are computed — depth ratios near 1 and high
+    correlations mean the model is trustworthy.
 
     Returns (figure, stats) where stats is a list of dicts per line.
     """
@@ -1084,8 +1134,10 @@ def line_check(spec_wl, spec_flux, tpl_wl, tpl_flux, comps,
 
     model = build_rv_model(spec_wl, tpl_wl, tpl_flux, comps)
 
-    targets = [(name, w0) for name, w0 in DIAGNOSTIC_LINES
-               if spec_wl.min() + window < w0 < spec_wl.max() - window]
+    shift = 1.0 + comps[0]["rv"] / C_KMS
+    targets = [(name, w0 * shift) for name, w0 in DIAGNOSTIC_LINES
+               if spec_wl.min() + window < w0 * shift
+               < spec_wl.max() - window]
     if not targets:
         order = np.argsort(spec_flux)
         picked = []
@@ -1162,11 +1214,17 @@ def cmd_ccf(args):
     if bjd is not None:
         lines.append(f"BJD = {bjd:.6f}"
                      + (f"   phase = {phase:.4f}" if phase is not None else ""))
-    lines.append(f"RV (uncorrected)           = {rv_raw:.4f} "
-                 f"± {rv_err:.4f} km/s")
-    lines.append(f"RV (barycentric corrected) = {rv:.4f} "
-                 f"± {rv_err:.4f} km/s  (v_bary = {vbary:+.4f} km/s"
-                 + ("" if apply_bary else ", NOT applied") + ")")
+    if apply_bary:
+        lines.append(f"RV (uncorrected)           = {rv_raw:.4f} "
+                     f"± {rv_err:.4f} km/s")
+        lines.append(f"RV (barycentric corrected) = {rv:.4f} "
+                     f"± {rv_err:.4f} km/s  (v_bary = {vbary:+.4f} km/s)")
+    else:
+        lines.append(f"RV = {rv_raw:.4f} ± {rv_err:.4f} km/s  "
+                     "(no barycentric correction applied)")
+        if vbary:
+            lines.append(f"v_bary = {vbary:+.4f} km/s "
+                         "(for information only, not applied)")
     lines.append("============================================")
     summary = "\n".join(lines)
     print("\n" + summary)
@@ -1177,12 +1235,20 @@ def cmd_ccf(args):
         f.write(f"# Synthetic template  : {tpl_name}\n")
         f.write("# barycentric correction applied: "
                 + ("yes" if apply_bary else "no") + "\n")
-        f.write("# method  BJD  phase  RV_raw[km/s]  RV_raw_err[km/s]  "
-                "RV_bary[km/s]  RV_bary_err[km/s]  bary_corr[km/s]\n")
-        f.write(f"CCF  {bjd if bjd is not None else 'nan'}  "
-                f"{f'{phase:.5f}' if phase is not None else 'nan'}  "
-                f"{rv_raw:.5f}  {rv_err:.5f}  "
-                f"{rv:.5f}  {rv_err:.5f}  {vbary:.5f}\n")
+        if apply_bary:
+            f.write("# method  BJD  phase  RV_raw[km/s]  RV_raw_err[km/s]  "
+                    "RV_bary[km/s]  RV_bary_err[km/s]  bary_corr[km/s]\n")
+            f.write(f"CCF  {bjd if bjd is not None else 'nan'}  "
+                    f"{f'{phase:.5f}' if phase is not None else 'nan'}  "
+                    f"{rv_raw:.5f}  {rv_err:.5f}  "
+                    f"{rv:.5f}  {rv_err:.5f}  {vbary:.5f}\n")
+        else:
+            f.write(f"# v_bary [km/s] = {vbary:.5f}  "
+                    "(computed for information only; NOT applied)\n")
+            f.write("# method  BJD  phase  RV[km/s]  RV_err[km/s]\n")
+            f.write(f"CCF  {bjd if bjd is not None else 'nan'}  "
+                    f"{f'{phase:.5f}' if phase is not None else 'nan'}  "
+                    f"{rv_raw:.5f}  {rv_err:.5f}\n")
     print(f"Results written: {outfile}")
 
     plotfile = args.plot or "result_CCF.png"
@@ -1254,14 +1320,24 @@ def cmd_bf(args):
         lines.append(f"BJD = {bjd:.6f}"
                      + (f"   phase = {phase:.4f}" if phase is not None else ""))
     for i, c in enumerate(comps, 1):
-        lines.append(f"Component {i}: RV (uncorrected)           = "
-                     f"{c['rv']:.4f} ± {c['rv_err']:.4f} km/s"
-                     f"   (amp={c['amp']:.4f}, sigma={c['sigma']:.2f} km/s)")
-        lines.append(f"             RV (barycentric corrected) = "
-                     f"{c['rv'] + vbary:.4f} ± {c['rv_err']:.4f} km/s")
+        if apply_bary:
+            lines.append(f"Component {i}: RV (uncorrected)           = "
+                         f"{c['rv']:.4f} ± {c['rv_err']:.4f} km/s"
+                         f"   (amp={c['amp']:.4f}, "
+                         f"sigma={c['sigma']:.2f} km/s)")
+            lines.append(f"             RV (barycentric corrected) = "
+                         f"{c['rv'] + vbary:.4f} ± {c['rv_err']:.4f} km/s")
+        else:
+            lines.append(f"Component {i}: RV = {c['rv']:.4f} "
+                         f"± {c['rv_err']:.4f} km/s"
+                         f"   (amp={c['amp']:.4f}, "
+                         f"sigma={c['sigma']:.2f} km/s)")
     if vbary:
-        lines.append(f"v_bary = {vbary:+.4f} km/s"
-                     + ("" if apply_bary else "  (NOT applied)"))
+        if apply_bary:
+            lines.append(f"v_bary = {vbary:+.4f} km/s")
+        else:
+            lines.append(f"v_bary = {vbary:+.4f} km/s "
+                         "(for information only, not applied)")
     if len(comps) == 2 and (comps[0]["amp"] > 0) and (comps[1]["amp"] > 0):
         l2_l1 = (comps[1]["amp"] * comps[1]["sigma"]) / \
                 (comps[0]["amp"] * comps[0]["sigma"])
@@ -1280,13 +1356,22 @@ def cmd_bf(args):
                     + "\n")
         f.write("# barycentric correction applied: "
                 + ("yes" if apply_bary else "no") + "\n")
-        f.write("# component  RV_raw[km/s]  RV_raw_err[km/s]  "
-                "RV_bary[km/s]  RV_bary_err[km/s]  amp  sigma[km/s]  "
-                "bary_corr[km/s]\n")
-        for i, c in enumerate(comps, 1):
-            f.write(f"{i}  {c['rv']:.5f}  {c['rv_err']:.5f}  "
-                    f"{c['rv'] + vbary:.5f}  {c['rv_err']:.5f}  "
-                    f"{c['amp']:.5f}  {c['sigma']:.5f}  {vbary:.5f}\n")
+        if apply_bary:
+            f.write("# component  RV_raw[km/s]  RV_raw_err[km/s]  "
+                    "RV_bary[km/s]  RV_bary_err[km/s]  amp  sigma[km/s]  "
+                    "bary_corr[km/s]\n")
+            for i, c in enumerate(comps, 1):
+                f.write(f"{i}  {c['rv']:.5f}  {c['rv_err']:.5f}  "
+                        f"{c['rv'] + vbary:.5f}  {c['rv_err']:.5f}  "
+                        f"{c['amp']:.5f}  {c['sigma']:.5f}  {vbary:.5f}\n")
+        else:
+            f.write(f"# v_bary [km/s] = {vbary:.5f}  "
+                    "(computed for information only; NOT applied)\n")
+            f.write("# component  RV[km/s]  RV_err[km/s]  amp  "
+                    "sigma[km/s]\n")
+            for i, c in enumerate(comps, 1):
+                f.write(f"{i}  {c['rv']:.5f}  {c['rv_err']:.5f}  "
+                        f"{c['amp']:.5f}  {c['sigma']:.5f}\n")
     print(f"Results written: {outfile}")
 
     plotfile = args.plot or "result_BF.png"
@@ -1635,15 +1720,28 @@ def cmd_batch(args):
                 f"template = {args.template or f'PHOENIX T={args.teff}K'}\n")
         f.write("# barycentric correction applied: "
                 + ("yes" if apply_bary else "no") + "\n")
-        cols = "  ".join(f"RV{j + 1}_raw[km/s]  RV{j + 1}_raw_err  "
-                         f"RV{j + 1}_bary[km/s]  RV{j + 1}_bary_err"
-                         for j in range(ncomp))
-        f.write(f"# file  BJD  phase  {cols}  bary_corr[km/s]\n")
+        if apply_bary:
+            cols = "  ".join(f"RV{j + 1}_raw[km/s]  RV{j + 1}_raw_err  "
+                             f"RV{j + 1}_bary[km/s]  RV{j + 1}_bary_err"
+                             for j in range(ncomp))
+            f.write(f"# file  BJD  phase  {cols}  bary_corr[km/s]\n")
+        else:
+            f.write("# v_bary column: computed for information only; "
+                    "NOT applied to the RVs\n")
+            cols = "  ".join(f"RV{j + 1}[km/s]  RV{j + 1}_err"
+                             for j in range(ncomp))
+            f.write(f"# file  BJD  phase  {cols}  v_bary[km/s]\n")
         for r in rows:
-            vals = "  ".join(
-                f"{r['rv_raw'][j]:.5f}  {r['rv_err'][j]:.5f}  "
-                f"{r['rv_raw'][j] + r['vbary']:.5f}  {r['rv_err'][j]:.5f}"
-                for j in range(len(r["rv"])))
+            if apply_bary:
+                vals = "  ".join(
+                    f"{r['rv_raw'][j]:.5f}  {r['rv_err'][j]:.5f}  "
+                    f"{r['rv_raw'][j] + r['vbary']:.5f}  "
+                    f"{r['rv_err'][j]:.5f}"
+                    for j in range(len(r["rv"])))
+            else:
+                vals = "  ".join(
+                    f"{r['rv_raw'][j]:.5f}  {r['rv_err'][j]:.5f}"
+                    for j in range(len(r["rv"])))
             ph = f"{r['phase']:.5f}" if r["phase"] is not None else "nan"
             f.write(f"{r['file']}  {r['bjd']:.6f}  {ph}  {vals}  "
                     f"{r['vbary']:.5f}\n")
@@ -1676,8 +1774,11 @@ def cmd_header(args):
     info = fits_header_info(args.spectrum)
     lines = ["================ FITS HEADER ================",
              f"File     : {args.spectrum}",
-             f"OBJECT   : {info['object']}",
-             f"DATE-OBS : {info['obstime']}",
+             f"OBJECT   : {info['object']}"]
+    for key, val, comment in info.get("rv_cards", []):
+        note = f"   ({comment})" if comment else ""
+        lines.append(f"RV info  : {key} = {val:g}{note}")
+    lines += [f"DATE-OBS : {info['obstime']}",
              f"RA [deg] : "
              + (f"{info['ra']:.5f}" if info['ra'] is not None else "-"),
              f"Dec [deg]: "
@@ -1817,7 +1918,7 @@ def make_args(**overrides):
                 t0=None, period=None, varastro=False, t0_to_bjd=False,
                 plot=None, output=None,
                 rv_min=-200.0, rv_max=200.0, rv_step=0.5,
-                vel_range=400.0, dv=None, svd_rcond=1e-3, smooth=None,
+                vel_range=400.0, dv=None, svd_rcond=0.0, smooth=None,
                 components=1, min_sep=30.0,
                 spectrograph=None, resolution=None, vsini=None, epsilon=0.6,
                 poly_order=3, iterations=10, low_clip=1.0, high_clip=4.0)
@@ -1878,8 +1979,8 @@ def _ask_target(kw):
         kw["site"] = ask("Observatory (astropy site name: tug, paranal, ...)",
                          default="tug")
         apply = ask("Apply the barycentric correction to the reported RVs? "
-                    "(y/n; both velocities are written to the result file "
-                    "either way)", default="y", cast=str,
+                    "(n: v_bary is computed and kept in the result file "
+                    "for information only)", default="y", cast=str,
                     validate=lambda s: s.lower() in ("y", "n"))
         kw["no_bary"] = apply.lower() == "n"
     if kw.get("object"):
@@ -2011,8 +2112,8 @@ def run_terminal_wizard():
                                cast=int, validate=lambda n: n in (1, 2))
         kw["smooth"] = ask("BF smoothing FWHM [km/s] (empty: auto)",
                            allow_empty=True, cast=float)
-        kw["svd_rcond"] = ask("SVD cutoff (default 1e-3, robust)",
-                              default=1e-3, cast=float)
+        kw["svd_rcond"] = ask("SVD cutoff (0 = reference, no truncation)",
+                              default=0.0, cast=float)
         print()
         cmd_bf(make_args(**kw))
 
@@ -2534,9 +2635,9 @@ def add_common_args(p):
                    help="Observatory (astropy site name, e.g. paranal, tug)")
     p.add_argument("--no-bary", action="store_true",
                    help="Compute the barycentric correction but do NOT "
-                        "apply it to the reported RVs; both the corrected "
-                        "and uncorrected velocities are always written to "
-                        "the result file")
+                        "apply it to the RVs: the value is kept in the "
+                        "result file for information only and does not "
+                        "appear on the figure")
     p.add_argument("--t0", type=float,
                    help="Ephemeris T0 [BJD] (primary minimum) for the "
                         "orbital phase")
@@ -2586,11 +2687,12 @@ def main():
     p_bf.add_argument("--vel-range", type=float, default=400.0,
                       help="BF window half-width [km/s]")
     p_bf.add_argument("--dv", type=float,
-                      help="Velocity step [km/s] (default: data pixel)")
-    p_bf.add_argument("--svd-rcond", type=float, default=1e-3,
-                      help="Relative SVD cutoff (default 1e-3, robust; the "
-                           "reference uses 0 but that is unstable for "
-                           "broadened templates)")
+                      help="Velocity step [km/s] (default: 5, the "
+                           "reference stepV)")
+    p_bf.add_argument("--svd-rcond", type=float, default=0.0,
+                      help="Relative SVD cutoff (default 0 = no "
+                           "truncation, as the reference; auto-escalated "
+                           "with a note when the BF is unstable)")
     p_bf.add_argument("--smooth", type=float,
                       help="BF smoothing FWHM [km/s] "
                            "(default: sigma = 2 bins, as the reference)")
@@ -2648,14 +2750,15 @@ def main():
                          help="Observatory (astropy site name)")
     p_batch.add_argument("--no-bary", action="store_true",
                          help="Compute the barycentric correction but do "
-                              "NOT apply it to the reported RVs; both "
-                              "velocities are always written to the "
-                              "RV curve file")
+                              "NOT apply it to the RVs: the value is kept "
+                              "in the RV curve file for information only")
     p_batch.add_argument("--vel-range", type=float, default=400.0,
                          help="BF window half-width [km/s]")
-    p_batch.add_argument("--dv", type=float, help="BF velocity step [km/s]")
-    p_batch.add_argument("--svd-rcond", type=float, default=1e-3,
-                         help="BF relative SVD cutoff (default 1e-3)")
+    p_batch.add_argument("--dv", type=float,
+                         help="BF velocity step [km/s] (default: 5)")
+    p_batch.add_argument("--svd-rcond", type=float, default=0.0,
+                         help="BF relative SVD cutoff (default 0 = no "
+                              "truncation, as the reference)")
     p_batch.add_argument("--smooth", type=float,
                          help="BF smoothing FWHM [km/s]")
     p_batch.add_argument("--components", type=int, default=2, choices=[1, 2],
