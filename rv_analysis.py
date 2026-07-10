@@ -110,16 +110,26 @@ def two_gauss_no(x, amp1, mu1, sig1, amp2, mu2, sig2):
     return gauss1 + gauss2
 
 
+def multi_gauss_no(x, *params):
+    """Sum of N offset-free Gaussians; params = (amp, mu, sigma) per
+    component, so len(params) = 3N."""
+    x = np.asarray(x, dtype=float)
+    y = np.zeros_like(x)
+    for k in range(0, len(params), 3):
+        amp, mu, sig = params[k:k + 3]
+        y = y + amp * np.exp(-((x - mu) ** 2) / (2.0 * sig ** 2))
+    return y
+
+
 def eval_gauss_model(x, popt):
     """Evaluate the fitted Gaussian model from the popt length
-    (3/6: reference no-offset models, 4/7: models with offset)."""
-    if len(popt) == 3:
-        return gauss_no(x, *popt)
+    (multiples of 3: offset-free N-Gaussian models; 4/7: models with a
+    constant offset term)."""
     if len(popt) == 4:
         return gauss(x, *popt)
-    if len(popt) == 6:
-        return two_gauss_no(x, *popt)
-    return two_gauss(x, *popt)
+    if len(popt) == 7:
+        return two_gauss(x, *popt)
+    return multi_gauss_no(x, *popt)
 
 
 def read_ascii_spectrum(path):
@@ -995,10 +1005,11 @@ def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
                 n_kept_sv=n_kept, n_sv=n_sv)
 
 
-def fit_peak_with_base(velocity, profile, with_offset=False):
+def fit_peak_with_base(velocity, profile, with_offset=False, center=None):
     """Reference-notebook peak fit (BF_main_fixed.ipynb): a bounded double
     Gaussian made of a sharp peak plus a broad base component, initial
-    guesses taken from the profile maximum. The broad component absorbs
+    guesses taken from the profile maximum (or from `center` when an
+    explicit initial RV guess is given). The broad component absorbs
     the pedestal/wings of the profile so the centre of the sharp
     component — which carries the RV — is not pulled. Bounds follow the
     reference: amplitudes >= 0, centres inside the velocity axis,
@@ -1010,7 +1021,10 @@ def fit_peak_with_base(velocity, profile, with_offset=False):
     """
     velocity = np.asarray(velocity, dtype=float)
     profile = np.asarray(profile, dtype=float)
-    ipk = int(np.argmax(profile))
+    if center is None:
+        ipk = int(np.argmax(profile))
+    else:
+        ipk = int(np.argmin(np.abs(velocity - float(center))))
     vlo, vhi = float(velocity.min()), float(velocity.max())
     offset0 = float(np.median(profile)) if with_offset else 0.0
     amp0 = max(float(profile[ipk]) - offset0, 1e-6)
@@ -1032,45 +1046,99 @@ def fit_peak_with_base(velocity, profile, with_offset=False):
     return [comp], popt
 
 
-def fit_bf_peaks(velocity, bf, components=1, min_sep=30.0, with_offset=False):
-    """Fit the BF/CCF profile following the reference notebook.
+def find_bf_peaks(velocity, bf, n, min_sep):
+    """Indices of the n highest local maxima of the profile separated by
+    at least min_sep [km/s] (scipy find_peaks; real local maxima, so a
+    smaller secondary/tertiary bump is found even far from the global
+    maximum, as in BF-rvplotter)."""
+    from scipy.signal import find_peaks
+    step = float(np.median(np.abs(np.diff(velocity))))
+    dist = max(int(round(min_sep / step)), 1)
+    idx, _ = find_peaks(bf, distance=dist)
+    order = idx[np.argsort(bf[idx])[::-1]] if idx.size else \
+        np.array([], dtype=int)
+    picked = list(order[:n])
+    while len(picked) < n:
+        mask = np.ones(bf.size, dtype=bool)
+        for i in picked:
+            mask &= np.abs(velocity - velocity[i]) > min_sep
+        if not mask.any():
+            raise RuntimeError(f"Not enough velocity range for {n} "
+                               "separated peaks; reduce --min-sep.")
+        picked.append(int(np.flatnonzero(mask)[np.argmax(bf[mask])]))
+    return picked
+
+
+def fit_bf_peaks(velocity, bf, components=1, min_sep=30.0, with_offset=False,
+                 guesses=None):
+    """Fit the BF/CCF profile following the reference notebook and
+    BF-rvplotter.
 
     components=1: bounded sharp-peak + broad-base double Gaussian
-    (fit_peak_with_base); the sharp component is reported. components=2:
-    two bounded Gaussians started from the two highest peaks separated by
-    at least min_sep [km/s]. with_offset=True adds a constant baseline
-    term (useful for CCF profiles, whose baseline is not zero).
+    (fit_peak_with_base); the sharp component is reported.
+    components=2/3: one bounded Gaussian per stellar component, started
+    from the highest separated local maxima of the profile (at least
+    min_sep [km/s] apart) or from explicit initial guesses.
+
+    guesses: optional list of initial RVs [km/s], one per component —
+    BF-rvplotter's gausspars practice. The returned components keep the
+    guess order, so the C1/C2/... labels are fixed by the user and the
+    star identity of every Gaussian is unambiguous. Without guesses the
+    components are returned sorted by RV (callers may re-sort by area).
+
+    with_offset=True adds a constant baseline term (used for CCF
+    profiles, whose baseline is not zero); it supports 2 components.
 
     Returns: list of dict(rv, rv_err, amp, sigma) per component, and popt.
     """
+    velocity = np.asarray(velocity, dtype=float)
+    bf = np.asarray(bf, dtype=float)
+    if guesses is not None and len(guesses) != components:
+        raise ValueError(f"{components} components but {len(guesses)} "
+                         "initial guesses given.")
     if components == 1:
-        return fit_peak_with_base(velocity, bf, with_offset=with_offset)
+        center = guesses[0] if guesses else None
+        return fit_peak_with_base(velocity, bf, with_offset=with_offset,
+                                  center=center)
+    if with_offset and components != 2:
+        raise ValueError("Offset fits support 2 components only.")
 
-    offset0 = np.median(bf) if with_offset else 0.0
-    i1 = int(np.argmax(bf))
-    mask = np.abs(velocity - velocity[i1]) > min_sep
-    if not mask.any():
-        raise RuntimeError("Not enough velocity range for a second peak; "
-                           "reduce --min-sep.")
-    i2 = int(np.flatnonzero(mask)[np.argmax(bf[mask])])
+    offset0 = float(np.median(bf)) if with_offset else 0.0
+    if guesses:
+        centers = [float(g) for g in guesses]
+    else:
+        centers = [float(velocity[i])
+                   for i in find_bf_peaks(velocity, bf, components, min_sep)]
 
-    vlo, vhi = float(np.min(velocity)), float(np.max(velocity))
-    lo = [0.0, vlo, 1.0, 0.0, vlo, 1.0]
-    hi = [np.inf, vhi, 200.0, np.inf, vhi, 200.0]
+    vlo, vhi = float(velocity.min()), float(velocity.max())
+    p0, lo, hi = [], [], []
+    for c in centers:
+        a = float(bf[np.argmin(np.abs(velocity - c))])
+        p0 += [max(a - offset0, 1e-6), c, 20.0]
+        lo += [0.0, vlo, 1.0]
+        hi += [np.inf, vhi, 200.0]
+
     if with_offset:
-        p0 = [max(bf[i1] - offset0, 1e-6), velocity[i1], 20.0,
-              max(bf[i2] - offset0, 1e-6), velocity[i2], 20.0, offset0]
-        popt, pcov = curve_fit(two_gauss, velocity, bf, p0=p0,
+        popt, pcov = curve_fit(two_gauss, velocity, bf, p0=p0 + [offset0],
                                bounds=(lo + [-np.inf], hi + [np.inf]),
                                maxfev=40000)
     else:
-        p0 = [bf[i1], velocity[i1], 20.0, bf[i2], velocity[i2], 20.0]
-        popt, pcov = curve_fit(two_gauss_no, velocity, bf, p0=p0,
-                               bounds=(lo, hi), maxfev=40000)
+        popt, pcov = curve_fit(multi_gauss_no, velocity, bf, p0=p0,
+                               bounds=(lo, hi), maxfev=60000)
     err = np.sqrt(np.diag(pcov))
-    comps = [dict(rv=popt[1], rv_err=float(err[1]), amp=popt[0], sigma=abs(popt[2])),
-             dict(rv=popt[4], rv_err=float(err[4]), amp=popt[3], sigma=abs(popt[5]))]
-    comps.sort(key=lambda c: c["rv"])
+    comps = [dict(rv=popt[k + 1], rv_err=float(err[k + 1]), amp=popt[k],
+                  sigma=abs(popt[k + 2]))
+             for k in range(0, 3 * components, 3)]
+    if guesses:
+        remaining = list(range(components))
+        ordered = []
+        for g in guesses:
+            j = min(remaining, key=lambda k: abs(comps[k]["rv"] - g))
+            remaining.remove(j)
+            ordered.append(comps[j])
+        comps = ordered
+    else:
+        comps.sort(key=lambda c: c["rv"])
     return comps, popt
 
 
@@ -1158,17 +1226,20 @@ DIAGNOSTIC_LINES = [
 
 def build_rv_model(spec_wl, tpl_wl, tpl_flux, comps):
     """Model spectrum on the data grid from the measured (observed-frame)
-    RVs: the template shifted per component and, for SB2, combined with
-    the light ratio estimated from the BF areas (amp*sigma)."""
+    RVs: the template shifted per component and combined with the light
+    contributions estimated from the BF areas (amp*sigma)."""
     if len(comps) == 1:
         return np.interp(spec_wl, doppler_shift(tpl_wl, comps[0]["rv"]),
                          tpl_flux)
-    a1 = abs(comps[0].get("amp", 1.0) * comps[0].get("sigma", 1.0))
-    a2 = abs(comps[1].get("amp", 1.0) * comps[1].get("sigma", 1.0))
-    lr = a2 / a1 if a1 > 0 else 1.0
-    f1 = np.interp(spec_wl, doppler_shift(tpl_wl, comps[0]["rv"]), tpl_flux)
-    f2 = np.interp(spec_wl, doppler_shift(tpl_wl, comps[1]["rv"]), tpl_flux)
-    return (f1 + lr * f2) / (1.0 + lr)
+    weights = [abs(c.get("amp", 1.0) * c.get("sigma", 1.0)) for c in comps]
+    total = sum(weights)
+    if total <= 0:
+        weights, total = [1.0] * len(comps), float(len(comps))
+    model = np.zeros_like(np.asarray(spec_wl, dtype=float))
+    for c, wgt in zip(comps, weights):
+        model += wgt * np.interp(spec_wl, doppler_shift(tpl_wl, c["rv"]),
+                                 tpl_flux)
+    return model / total
 
 
 def line_check(spec_wl, spec_flux, tpl_wl, tpl_flux, comps,
@@ -1360,9 +1431,20 @@ def cmd_bf(args):
           f"singular values kept: {bf_result['n_kept_sv']}/{bf_result['n_sv']}")
 
     comps, popt = fit_bf_peaks(bf_result["velocity"], bf_result["bf_smooth"],
-                               components=args.components, min_sep=args.min_sep)
-    if args.components == 2:
-        comps.sort(key=lambda c: abs(c["amp"] * c["sigma"]), reverse=True)
+                               components=args.components,
+                               min_sep=args.min_sep,
+                               guesses=getattr(args, "guess", None))
+    label_note = None
+    if args.components >= 2:
+        if getattr(args, "guess", None):
+            label_note = ("Component labels follow the given initial "
+                          "guesses: C1 = first guess, C2 = second, ...")
+        else:
+            comps.sort(key=lambda c: abs(c["amp"] * c["sigma"]),
+                       reverse=True)
+            label_note = ("Component labels sorted by BF area: C1 = "
+                          "largest light contribution. Use --guess to fix "
+                          "the labels explicitly.")
 
     ctx = get_target_context(args)
     vbary, bjd, phase = ctx["vbary"], ctx["bjd"], ctx["phase"]
@@ -1394,10 +1476,14 @@ def cmd_bf(args):
         else:
             lines.append(f"v_bary = {vbary:+.4f} km/s "
                          "(for information only, not applied)")
-    if len(comps) == 2 and (comps[0]["amp"] > 0) and (comps[1]["amp"] > 0):
-        l2_l1 = (comps[1]["amp"] * comps[1]["sigma"]) / \
-                (comps[0]["amp"] * comps[0]["sigma"])
-        lines.append(f"Light ratio (C2/C1, from BF areas) ≈ {l2_l1:.3f}")
+    if label_note:
+        lines.append(label_note)
+    if len(comps) >= 2 and all(c["amp"] > 0 for c in comps):
+        a1 = comps[0]["amp"] * comps[0]["sigma"]
+        if a1 > 0:
+            for i, c in enumerate(comps[1:], 2):
+                lines.append(f"Light ratio (C{i}/C1, from BF areas) ≈ "
+                             f"{c['amp'] * c['sigma'] / a1:.3f}")
     lines.append("============================================")
     summary = "\n".join(lines)
     print("\n" + summary)
@@ -1722,8 +1808,10 @@ def cmd_batch(args):
                 comps, popt = fit_bf_peaks(bf_result["velocity"],
                                            bf_result["bf_smooth"],
                                            components=ncomp,
-                                           min_sep=args.min_sep)
-                if ncomp == 2:
+                                           min_sep=args.min_sep,
+                                           guesses=getattr(args, "guess",
+                                                           None))
+                if ncomp >= 2 and not getattr(args, "guess", None):
                     comps.sort(key=lambda c: c["amp"] * c["sigma"],
                                reverse=True)
             else:
@@ -1975,7 +2063,7 @@ def make_args(**overrides):
                 plot=None, output=None,
                 rv_min=-200.0, rv_max=200.0, rv_step=0.5,
                 vel_range=400.0, dv=None, svd_rcond=None, smooth=None,
-                components=1, min_sep=30.0,
+                components=1, min_sep=30.0, guess=None,
                 spectrograph=None, resolution=None, vsini=None, epsilon=0.6,
                 poly_order=3, iterations=10, low_clip=1.0, high_clip=4.0)
     base.update(overrides)
@@ -2164,8 +2252,16 @@ def run_terminal_wizard():
     else:
         kw["vel_range"] = ask("BF window half-width [km/s]",
                               default=400.0, cast=float)
-        kw["components"] = ask("Number of components (SB1=1, SB2=2)", default=2,
-                               cast=int, validate=lambda n: n in (1, 2))
+        kw["components"] = ask("Number of components (SB1=1, SB2=2, SB3=3)",
+                               default=2, cast=int,
+                               validate=lambda n: n in (1, 2, 3))
+        if kw["components"] >= 2:
+            g = ask("Initial RV guesses, comma-separated [km/s] "
+                    "(empty: automatic peak search; giving them fixes "
+                    "the C1/C2/... labels)", allow_empty=True)
+            if g:
+                kw["guess"] = [float(t) for t in
+                               str(g).replace(",", " ").split()]
         kw["smooth"] = ask("BF smoothing FWHM [km/s] (empty: auto)",
                            allow_empty=True, cast=float)
         kw["svd_rcond"] = ask("SVD cutoff (empty: automatic; "
@@ -2456,13 +2552,23 @@ def run_gui():
 
     vrange_var = tk.StringVar(value="400")
     comp_var = tk.IntVar(value=2)
+    guess_var = tk.StringVar()
     ttk.Label(bf_frame, text="Velocity window ±").grid(row=0, column=0, sticky="w")
     ttk.Entry(bf_frame, textvariable=vrange_var, width=8
               ).grid(row=0, column=1, padx=2)
     ttk.Label(bf_frame, text="km/s").grid(row=0, column=2, padx=(0, 12))
     ttk.Label(bf_frame, text="Components").grid(row=0, column=3)
-    ttk.Combobox(bf_frame, textvariable=comp_var, values=[1, 2], width=3,
+    ttk.Combobox(bf_frame, textvariable=comp_var, values=[1, 2, 3], width=3,
                  state="readonly").grid(row=0, column=4, padx=4)
+    ttk.Label(bf_frame, text="RV guesses [km/s]:").grid(row=1, column=0,
+                                                        sticky="w",
+                                                        pady=(4, 0))
+    ttk.Entry(bf_frame, textvariable=guess_var, width=20
+              ).grid(row=1, column=1, columnspan=2, sticky="w", pady=(4, 0))
+    ttk.Label(bf_frame, text="(optional, comma-separated, one per "
+                             "component; fixes the C1/C2/... labels)",
+              foreground="gray").grid(row=1, column=3, columnspan=3,
+                                      sticky="w", pady=(4, 0))
     on_method_change()
 
     result_text = tk.Text(main, height=8, width=90, state="disabled",
@@ -2629,8 +2735,10 @@ def run_gui():
                           rv_step=_f(rvstep_var, 0.5))
                 payload = cmd_ccf(make_args(**kw))
             else:
+                gtxt = guess_var.get().replace(",", " ").split()
                 kw.update(vel_range=_f(vrange_var, 400.0),
-                          components=int(comp_var.get()))
+                          components=int(comp_var.get()),
+                          guess=[float(t) for t in gtxt] if gtxt else None)
                 payload = cmd_bf(make_args(**kw))
         except Exception as exc:
             messagebox.showerror("Error", str(exc))
@@ -2754,10 +2862,17 @@ def main():
     p_bf.add_argument("--smooth", type=float,
                       help="BF smoothing FWHM [km/s] "
                            "(default: sigma = 2 bins, as the reference)")
-    p_bf.add_argument("--components", type=int, default=1, choices=[1, 2],
-                      help="Number of Gaussians to fit: SB1=1, SB2=2")
+    p_bf.add_argument("--components", type=int, default=1,
+                      choices=[1, 2, 3],
+                      help="Number of stellar components to fit: SB1=1, "
+                           "SB2=2, SB3/triple=3")
     p_bf.add_argument("--min-sep", type=float, default=30.0,
-                      help="Minimum separation of the two peaks [km/s]")
+                      help="Minimum separation of the peaks [km/s]")
+    p_bf.add_argument("--guess", type=float, nargs="+",
+                      help="Initial RV guesses [km/s], one per component "
+                           "(BF-rvplotter gausspars practice); also fixes "
+                           "the component labels: C1 = first guess, "
+                           "C2 = second, ...")
     p_bf.set_defaults(func=cmd_bf)
 
     p_batch = sub.add_parser("batch",
@@ -2820,10 +2935,14 @@ def main():
                               "automatic)")
     p_batch.add_argument("--smooth", type=float,
                          help="BF smoothing FWHM [km/s]")
-    p_batch.add_argument("--components", type=int, default=2, choices=[1, 2],
+    p_batch.add_argument("--components", type=int, default=2,
+                         choices=[1, 2, 3],
                          help="Components to fit (default: 2)")
     p_batch.add_argument("--min-sep", type=float, default=30.0,
                          help="Minimum peak separation [km/s]")
+    p_batch.add_argument("--guess", type=float, nargs="+",
+                         help="Initial RV guesses [km/s], one per "
+                              "component; also fixes the component labels")
     p_batch.add_argument("--rv-min", type=float, default=-200.0,
                          help="CCF scan lower limit [km/s]")
     p_batch.add_argument("--rv-max", type=float, default=200.0,
