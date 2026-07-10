@@ -836,7 +836,7 @@ def prepare_template(tpl_wl, tpl_flux, resolution=None, vsini=None,
 
 
 def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
-               vel_range=400.0, dv=None, svd_rcond=0.0, smooth_kms=None):
+               vel_range=400.0, dv=None, svd_rcond=None, smooth_kms=None):
     """Broadening Function following the reference implementation
     (BF_main.txt; Rucinski 1999 via PyAstronomy's pyasl.SVD).
 
@@ -858,12 +858,18 @@ def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
     Parameters
     ----------
     vel_range : half-width of the BF window [km/s]
-    dv        : velocity step stepV [km/s]; None -> 5.0, the reference value
-    svd_rcond : relative singular-value cutoff. The default 0 matches the
-        reference (no truncation). Broadened templates and continuum-
-        dominated ranges may need a small cutoff (e.g. 1e-3); when the BF
-        blows up at 0 (DC null space), the cutoff is auto-escalated with
-        a printed note.
+    dv        : velocity step stepV [km/s]; None -> the median velocity
+        pixel of the data (BF-rvplotter practice: stepV close to the
+        spectrograph pixel; the reference-notebook value 5.0 can be given
+        explicitly)
+    svd_rcond : relative singular-value cutoff. None (default) selects it
+        automatically: the smallest cutoff from a ladder starting at 0
+        (no truncation — the choice of both the reference notebook and
+        BF-rvplotter, Rucinski's smooth-instead-of-truncate route) whose
+        smoothed BF keeps the wing noise below a tenth of the peak; wide
+        continuum-dominated ranges and broadened templates then get just
+        enough truncation to stay clean. The selection is printed. An
+        explicit number is used as-is (0 = never truncate).
     smooth_kms: smoothing FWHM [km/s]; None -> sigma = 2 bins (reference)
 
     Returns: dict(velocity, bf, bf_smooth, dv, n_kept_sv, n_sv)
@@ -878,9 +884,14 @@ def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
     if wl_max <= wl_min:
         raise ValueError("The spectrum and template wavelength ranges "
                          "do not overlap.")
+    if wl_max - wl_min > 800.0:
+        print(f"Note: BF computed over a {wl_max - wl_min:.0f} A wide "
+              "range; a narrower line-rich window (e.g. --wave-min 500 "
+              "--wave-max 550) usually gives a cleaner BF.")
 
     if dv is None:
-        dv = 5.0
+        pix = np.median(np.diff(spec_wl)) / np.median(spec_wl) * C_KMS
+        dv = max(pix, 0.5)
 
     r = dv / C_KMS
     n = int(np.floor(np.log(wl_max / wl_min) / np.log(1.0 + r))) + 1
@@ -917,26 +928,67 @@ def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
             return Vt.T @ (winv * (U.T @ rhs))
         velocity = (-np.arange(m) + m // 2) * r * C_KMS
 
-    wlimit = svd_rcond * w.max() if svd_rcond > 0 else 0.0
-    bf = solve(wlimit)
-    if svd_rcond <= 0 and np.max(np.abs(bf)) > 10.0:
-        for rc in (1e-4, 3e-4, 1e-3, 3e-3, 1e-2):
-            wlimit = rc * w.max()
-            bf = solve(wlimit)
-            if np.max(np.abs(bf)) <= 10.0:
-                print(f"Note: BF was unstable at svd_rcond=0 (continuum-"
-                      f"dominated region); auto-regularized to "
-                      f"svd_rcond={rc:g}. Pass --svd-rcond to set it "
-                      "explicitly.")
-                break
-    bf = np.ravel(np.asarray(bf))
+    sigma_pix = (smooth_kms / (2.35482 * dv)) if smooth_kms else 2.0
+
+    def bf_quality(b):
+        """Noise-to-peak ratio of a candidate BF: smoothed wing noise
+        plus high-frequency wing roughness of the raw solution, relative
+        to the peak amplitude (lower is cleaner). The peak region itself
+        is excluded so sharp real peaks are not penalized."""
+        sm = gaussian_filter1d(b, sigma_pix)
+        ipk = int(np.argmax(np.abs(sm)))
+        peak = abs(float(sm[ipk]))
+        if peak <= 0 or not np.isfinite(peak):
+            return np.inf
+        span = float(velocity.max() - velocity.min())
+        away = np.abs(velocity - velocity[ipk]) > 0.25 * span
+        if not away.any():
+            return np.inf
+        wing = sm[away]
+        noise = 1.4826 * np.median(np.abs(wing - np.median(wing)))
+        rough = float(np.std((b - sm)[away]))
+        return (float(noise) + rough) / peak
+
+    if svd_rcond is None:
+        cand = []
+        for rc in (0.0, 1e-5, 3e-5, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2):
+            lim = rc * w.max() if rc > 0 else 0.0
+            b = np.ravel(np.asarray(solve(lim)))
+            if not np.all(np.isfinite(b)):
+                continue
+            ratio = bf_quality(b)
+            if np.isfinite(ratio):
+                cand.append((rc, b, ratio))
+        if not cand:
+            raise RuntimeError("The BF could not be stabilized at any "
+                               "SVD cutoff; check the input spectra.")
+        best_ratio = min(c[2] for c in cand)
+        tol = max(0.10, 1.3 * best_ratio)
+        best = next(c for c in cand if c[2] <= tol)
+        svd_rcond, bf, ratio = best
+        wlimit = svd_rcond * w.max() if svd_rcond > 0 else 0.0
+        print(f"SVD regularization: svd_rcond = {svd_rcond:g} selected "
+              f"automatically (BF noise / peak = {ratio:.3f}, least "
+              "truncation within tolerance); use --svd-rcond to override.")
+    else:
+        wlimit = svd_rcond * w.max() if svd_rcond > 0 else 0.0
+        bf = np.ravel(np.asarray(solve(wlimit)))
+        if svd_rcond <= 0 and np.max(np.abs(bf)) > 10.0:
+            for rc in (1e-4, 3e-4, 1e-3, 3e-3, 1e-2):
+                wlimit = rc * w.max()
+                bf = np.ravel(np.asarray(solve(wlimit)))
+                if np.max(np.abs(bf)) <= 10.0:
+                    print(f"Note: BF was unstable at svd_rcond=0 "
+                          f"(continuum-dominated region); "
+                          f"auto-regularized to svd_rcond={rc:g}. "
+                          "Pass --svd-rcond to set it explicitly.")
+                    break
     n_sv = m
     n_kept = int((w > wlimit).sum())
 
     srt = np.argsort(velocity)
     velocity, bf = velocity[srt], bf[srt]
 
-    sigma_pix = (smooth_kms / (2.35482 * dv)) if smooth_kms else 2.0
     bf_smooth = gaussian_filter1d(bf, sigma_pix)
 
     return dict(velocity=velocity, bf=bf, bf_smooth=bf_smooth, dv=dv,
@@ -1062,6 +1114,10 @@ def make_bf_figure(bf_result, comps, popt, components, bjd=None, phase=None,
     ax.plot(v, bf_result["bf_smooth"], "b-", lw=1.5, label="BF (smoothed)")
     model = eval_gauss_model(v, popt)
     ax.plot(v, model, "r--", lw=2, alpha=0.8, label="Gaussian fit")
+    ymin = float(min(np.min(bf_result["bf_smooth"]), np.min(model)))
+    ymax = float(max(np.max(bf_result["bf_smooth"]), np.max(model)))
+    span = max(ymax - ymin, 1e-12)
+    ax.set_ylim(ymin - 0.15 * span, ymax + 0.35 * span)
     show_bary = bool(vbary) and bary_applied
     title = []
     if bjd is not None:
@@ -1918,7 +1974,7 @@ def make_args(**overrides):
                 t0=None, period=None, varastro=False, t0_to_bjd=False,
                 plot=None, output=None,
                 rv_min=-200.0, rv_max=200.0, rv_step=0.5,
-                vel_range=400.0, dv=None, svd_rcond=0.0, smooth=None,
+                vel_range=400.0, dv=None, svd_rcond=None, smooth=None,
                 components=1, min_sep=30.0,
                 spectrograph=None, resolution=None, vsini=None, epsilon=0.6,
                 poly_order=3, iterations=10, low_clip=1.0, high_clip=4.0)
@@ -2112,8 +2168,9 @@ def run_terminal_wizard():
                                cast=int, validate=lambda n: n in (1, 2))
         kw["smooth"] = ask("BF smoothing FWHM [km/s] (empty: auto)",
                            allow_empty=True, cast=float)
-        kw["svd_rcond"] = ask("SVD cutoff (0 = reference, no truncation)",
-                              default=0.0, cast=float)
+        kw["svd_rcond"] = ask("SVD cutoff (empty: automatic; "
+                              "0 = no truncation)",
+                              allow_empty=True, cast=float)
         print()
         cmd_bf(make_args(**kw))
 
@@ -2687,12 +2744,13 @@ def main():
     p_bf.add_argument("--vel-range", type=float, default=400.0,
                       help="BF window half-width [km/s]")
     p_bf.add_argument("--dv", type=float,
-                      help="Velocity step [km/s] (default: 5, the "
-                           "reference stepV)")
-    p_bf.add_argument("--svd-rcond", type=float, default=0.0,
-                      help="Relative SVD cutoff (default 0 = no "
-                           "truncation, as the reference; auto-escalated "
-                           "with a note when the BF is unstable)")
+                      help="Velocity step [km/s] (default: the median "
+                           "velocity pixel of the data)")
+    p_bf.add_argument("--svd-rcond", type=float, default=None,
+                      help="Relative SVD cutoff; default: automatic - "
+                           "the smallest cutoff (starting at 0, no "
+                           "truncation) that keeps the BF wing noise "
+                           "below a tenth of the peak")
     p_bf.add_argument("--smooth", type=float,
                       help="BF smoothing FWHM [km/s] "
                            "(default: sigma = 2 bins, as the reference)")
@@ -2755,10 +2813,11 @@ def main():
     p_batch.add_argument("--vel-range", type=float, default=400.0,
                          help="BF window half-width [km/s]")
     p_batch.add_argument("--dv", type=float,
-                         help="BF velocity step [km/s] (default: 5)")
-    p_batch.add_argument("--svd-rcond", type=float, default=0.0,
-                         help="BF relative SVD cutoff (default 0 = no "
-                              "truncation, as the reference)")
+                         help="BF velocity step [km/s] (default: the "
+                              "median velocity pixel of the data)")
+    p_batch.add_argument("--svd-rcond", type=float, default=None,
+                         help="BF relative SVD cutoff (default: "
+                              "automatic)")
     p_batch.add_argument("--smooth", type=float,
                          help="BF smoothing FWHM [km/s]")
     p_batch.add_argument("--components", type=int, default=2, choices=[1, 2],
