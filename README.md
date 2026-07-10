@@ -78,8 +78,8 @@ python rv_analysis.py demo --plot demo.png
 ### Inputs
 
 - **Observed spectrum**: any ASCII table (`.txt`, `.dat`, `.obs`, ...; first
-  two numeric columns are wavelength [Å] and normalized flux) or a supported
-  FITS layout.
+  two numeric columns are wavelength — Å or nm, auto-detected — and
+  normalized flux) or a supported FITS layout.
 - **Template spectrum**: an ASCII/`.prf` synthetic spectrum, or a PHOENIX
   model downloaded automatically via `--teff/--logg/--feh` (needs `expecto`).
 

@@ -35,7 +35,7 @@ Modes of operation
    python rv_analysis.py ccf --spectrum spec.fits --format s2d \
        --teff 6628 --logg 4.251 --feh 0.17 --rv-min -20 --rv-max 100
    python rv_analysis.py bf --spectrum spec.obs --template synth.prf \
-       --vel-range 500 --components 2 --wave-min 5000 --wave-max 5500
+       --vel-range 500 --components 2 --wave-min 500 --wave-max 550
 
 3) Self-test on synthetic data (no input files needed):
 
@@ -51,8 +51,9 @@ Supported inputs
 ----------------
 - Normalized observed spectrum:
   * any ASCII table (.txt, .dat, .ascii, .obs, ...): first two numeric
-    columns are used as wavelength [A] and flux; comment lines (# ; ! %),
-    header lines and '-' placeholders are skipped automatically
+    columns are used as wavelength (Angstrom or nm, auto-detected) and
+    flux; comment lines (# ; ! %), header lines and '-' placeholders are
+    skipped automatically
   * ESPRESSO S2D FITS (multi-order echelle: flux ext=1, wavelength ext=4)
 - Synthetic template spectrum:
   * synth3 / SynthV style .prf files, .obs files, or any ASCII table
@@ -135,6 +136,10 @@ def read_ascii_spectrum(path):
       - takes the first two numeric columns (wavelength, flux) and drops
         rows containing NaN,
       - sorts by wavelength.
+
+    Wavelengths may be given in Angstrom or nm: a median value below 1500
+    is taken to mean nm and converted to Angstrom, the internal unit of
+    the analysis.
     """
     rows = []
     with open(path, "r", errors="ignore") as fh:
@@ -162,7 +167,10 @@ def read_ascii_spectrum(path):
         raise ValueError(f"{path}: fewer than 5 usable data rows "
                          "(check the file format).")
     order = np.argsort(data[:, 0])
-    return data[order, 0], data[order, 1]
+    wl, fx = data[order, 0], data[order, 1]
+    if np.median(wl) < 1500.0:
+        wl = wl * 10.0
+    return wl, fx
 
 
 def read_fits_spectrum(path):
@@ -395,9 +403,15 @@ def hjd_to_bjd(hjd, ra_deg, dec_deg, scale="utc"):
     return float((t_geo.tdb + ltt_bary).jd)
 
 
-def normalize_continuum(wl, flux, poly_order=5, iterations=8,
+def normalize_continuum(wl, flux, poly_order=3, iterations=10,
                         low_clip=1.0, high_clip=4.0):
     """Iterative continuum normalization of a raw spectrum (FEROS-style).
+
+    The defaults (polynomial order 3, 10 clipping iterations) are tuned
+    for the 500-550 nm region typically used for RV work: over such a
+    narrow window the continuum is smooth, so a low-order polynomial
+    avoids over-fitting broad features while the extra iterations let the
+    clipping converge. Both values remain user-adjustable.
 
     'All FEROS spectra were normalised to the continuum level iteratively':
     a polynomial is fitted to the spectrum, then points lying more than
@@ -437,7 +451,7 @@ def normalize_continuum(wl, flux, poly_order=5, iterations=8,
     return norm, cont
 
 
-def normalize_spectrum_file(path, fmt="auto", poly_order=5, iterations=8,
+def normalize_spectrum_file(path, fmt="auto", poly_order=3, iterations=10,
                             low_clip=1.0, high_clip=4.0):
     """Normalize a raw spectrum file order by order and merge.
 
@@ -570,7 +584,12 @@ def get_target_context(args):
     vbary = 0.0
     if ra is not None and dec is not None and obstime is not None:
         vbary = barycentric_correction(ra, dec, obstime, args.site)
-        print(f"Barycentric correction: {vbary:+.4f} km/s (added to the RV)")
+        if getattr(args, "no_bary", False):
+            print(f"Barycentric correction: {vbary:+.4f} km/s "
+                  "(computed, NOT applied to the reported RVs)")
+        else:
+            print(f"Barycentric correction: {vbary:+.4f} km/s "
+                  "(added to the RV)")
     elif getattr(args, "object", None) or args.ra is not None or obstime:
         print("Note: barycentric correction skipped "
               "(needs coordinates AND observation time).")
@@ -981,18 +1000,19 @@ def make_ccf_figure(result):
 
 
 def make_bf_figure(bf_result, comps, popt, components, bjd=None, phase=None,
-                   vbary=0.0):
-    """BF figure. The velocity axis and the annotated RVs are shifted by
-    the barycentric correction (vbary), so the numbers on the figure are
-    IDENTICAL to the reported/tabulated results."""
+                   vbary=0.0, bary_applied=True):
+    """BF figure in the measured (uncorrected) velocity frame: the axis
+    and the annotated RVs are the raw measurements. When a barycentric
+    correction is available, the corrected RV is annotated alongside and
+    the v_bary value is shown in the title together with whether it was
+    applied to the reported results."""
     from matplotlib.figure import Figure
-    v_raw = bf_result["velocity"]
-    v = v_raw + vbary
+    v = bf_result["velocity"]
     fig = Figure(figsize=(9, 5))
     ax = fig.subplots()
     ax.plot(v, bf_result["bf"], color="0.7", lw=0.8, label="BF (raw)")
     ax.plot(v, bf_result["bf_smooth"], "b-", lw=1.5, label="BF (smoothed)")
-    model = eval_gauss_model(v_raw, popt)
+    model = eval_gauss_model(v, popt)
     ax.plot(v, model, "r--", lw=2, alpha=0.8, label="Gaussian fit")
     title = []
     if bjd is not None:
@@ -1000,16 +1020,19 @@ def make_bf_figure(bf_result, comps, popt, components, bjd=None, phase=None,
     if phase is not None:
         title.append(f"phase {phase:.4f}")
     if vbary:
-        title.append(f"v_bary = {vbary:+.3f} km/s applied")
+        title.append(f"v_bary = {vbary:+.3f} km/s "
+                     + ("(applied in results)" if bary_applied
+                        else "(NOT applied)"))
     if title:
         ax.set_title("  |  ".join(title), fontsize=10)
     for i, c in enumerate(comps, 1):
-        rv_c = c["rv"] + vbary
-        ax.axvline(rv_c, color="r", ls=":", lw=1)
-        ax.annotate(f"C{i}: {rv_c:.2f} km/s", (rv_c, c["amp"]),
+        label = f"C{i}: {c['rv']:.2f} km/s"
+        if vbary:
+            label += f"  ({c['rv'] + vbary:.2f} bary)"
+        ax.axvline(c["rv"], color="r", ls=":", lw=1)
+        ax.annotate(label, (c["rv"], c["amp"]),
                     textcoords="offset points", xytext=(6, 6), color="r")
-    ax.set_xlabel("Radial velocity [km/s]"
-                  + ("  (barycentric corrected)" if vbary else ""))
+    ax.set_xlabel("Radial velocity [km/s]  (uncorrected)")
     ax.set_ylabel("Broadening Function")
     ax.legend()
     fig.tight_layout()
@@ -1112,8 +1135,8 @@ def cmd_ccf(args):
     orders = read_spectrum(args.spectrum, args.format)
     tpl_wl, tpl_flux = load_template(args)
     if args.wave_min or args.wave_max:
-        lo = args.wave_min or -np.inf
-        hi = args.wave_max or np.inf
+        lo = args.wave_min * 10.0 if args.wave_min else -np.inf
+        hi = args.wave_max * 10.0 if args.wave_max else np.inf
         orders = [(w[(w >= lo) & (w <= hi)], f[(w >= lo) & (w <= hi)])
                   for w, f in orders]
         orders = [(w, f) for w, f in orders if w.size > 10]
@@ -1129,6 +1152,7 @@ def cmd_ccf(args):
     ctx = get_target_context(args)
     vbary, bjd, phase = ctx["vbary"], ctx["bjd"], ctx["phase"]
 
+    apply_bary = not getattr(args, "no_bary", False)
     rv_raw, rv_err = result["rv"], result["rv_err"]
     rv = rv_raw + vbary
     tpl_name = args.template or f"PHOENIX T={args.teff}K"
@@ -1141,7 +1165,8 @@ def cmd_ccf(args):
     lines.append(f"RV (uncorrected)           = {rv_raw:.4f} "
                  f"± {rv_err:.4f} km/s")
     lines.append(f"RV (barycentric corrected) = {rv:.4f} "
-                 f"± {rv_err:.4f} km/s  (v_bary = {vbary:+.4f} km/s)")
+                 f"± {rv_err:.4f} km/s  (v_bary = {vbary:+.4f} km/s"
+                 + ("" if apply_bary else ", NOT applied") + ")")
     lines.append("============================================")
     summary = "\n".join(lines)
     print("\n" + summary)
@@ -1150,6 +1175,8 @@ def cmd_ccf(args):
     with open(outfile, "w") as f:
         f.write(f"# Normalized spectrum : {args.spectrum}\n")
         f.write(f"# Synthetic template  : {tpl_name}\n")
+        f.write("# barycentric correction applied: "
+                + ("yes" if apply_bary else "no") + "\n")
         f.write("# method  BJD  phase  RV_raw[km/s]  RV_raw_err[km/s]  "
                 "RV_bary[km/s]  RV_bary_err[km/s]  bary_corr[km/s]\n")
         f.write(f"CCF  {bjd if bjd is not None else 'nan'}  "
@@ -1192,8 +1219,8 @@ def cmd_bf(args):
         spec_wl, spec_flux = orders[0]
 
     if args.wave_min or args.wave_max:
-        lo = args.wave_min or -np.inf
-        hi = args.wave_max or np.inf
+        lo = args.wave_min * 10.0 if args.wave_min else -np.inf
+        hi = args.wave_max * 10.0 if args.wave_max else np.inf
         sel = (spec_wl >= lo) & (spec_wl <= hi)
         spec_wl, spec_flux = spec_wl[sel], spec_flux[sel]
 
@@ -1217,6 +1244,7 @@ def cmd_bf(args):
 
     ctx = get_target_context(args)
     vbary, bjd, phase = ctx["vbary"], ctx["bjd"], ctx["phase"]
+    apply_bary = not getattr(args, "no_bary", False)
 
     tpl_name = args.template or f"PHOENIX T={args.teff}K"
     lines = ["================ BF RESULT =================",
@@ -1232,7 +1260,8 @@ def cmd_bf(args):
         lines.append(f"             RV (barycentric corrected) = "
                      f"{c['rv'] + vbary:.4f} ± {c['rv_err']:.4f} km/s")
     if vbary:
-        lines.append(f"v_bary = {vbary:+.4f} km/s")
+        lines.append(f"v_bary = {vbary:+.4f} km/s"
+                     + ("" if apply_bary else "  (NOT applied)"))
     if len(comps) == 2 and (comps[0]["amp"] > 0) and (comps[1]["amp"] > 0):
         l2_l1 = (comps[1]["amp"] * comps[1]["sigma"]) / \
                 (comps[0]["amp"] * comps[0]["sigma"])
@@ -1249,6 +1278,8 @@ def cmd_bf(args):
             f.write(f"# BJD = {bjd:.6f}"
                     + (f"   phase = {phase:.5f}" if phase is not None else "")
                     + "\n")
+        f.write("# barycentric correction applied: "
+                + ("yes" if apply_bary else "no") + "\n")
         f.write("# component  RV_raw[km/s]  RV_raw_err[km/s]  "
                 "RV_bary[km/s]  RV_bary_err[km/s]  amp  sigma[km/s]  "
                 "bary_corr[km/s]\n")
@@ -1260,7 +1291,8 @@ def cmd_bf(args):
 
     plotfile = args.plot or "result_BF.png"
     fig = make_bf_figure(bf_result, comps, popt, args.components,
-                         bjd=bjd, phase=phase, vbary=vbary)
+                         bjd=bjd, phase=phase, vbary=vbary,
+                         bary_applied=apply_bary)
     save_figure(fig, plotfile)
 
     check_fig, stats = line_check(spec_wl, spec_flux, tpl_wl, tpl_flux,
@@ -1282,27 +1314,28 @@ def cmd_bf(args):
 def make_norm_figure(diag, wl, nf, tpl=None):
     """Two-panel normalization figure: raw + continuum fits, and the
     normalized spectrum overplotted on the synthetic template (the
-    'interactive comparison with a synthetic spectrum' step)."""
+    'interactive comparison with a synthetic spectrum' step). The
+    wavelength axis is in nm, matching the unit of the output file."""
     from matplotlib.figure import Figure
     fig = Figure(figsize=(9, 6))
     ax0, ax1 = fig.subplots(2, 1, sharex=True)
 
     for w, f, cont in diag:
-        ax0.plot(w, f, lw=0.5, alpha=0.6)
-        ax0.plot(w, cont, "r-", lw=1.0, alpha=0.8)
+        ax0.plot(w / 10.0, f, lw=0.5, alpha=0.6)
+        ax0.plot(w / 10.0, cont, "r-", lw=1.0, alpha=0.8)
     ax0.set_ylabel("Raw flux")
     ax0.set_title("Raw spectrum and fitted continuum (red)")
 
-    ax1.plot(wl, nf, "k-", lw=0.6, label="Normalized spectrum")
+    ax1.plot(wl / 10.0, nf, "k-", lw=0.6, label="Normalized spectrum")
     if tpl is not None:
         tw, tf = tpl
         sel = (tw >= wl.min()) & (tw <= wl.max())
         if sel.any():
-            ax1.plot(tw[sel], tf[sel] / np.nanmax(tf[sel]), "C0-", lw=0.8,
-                     alpha=0.7, label="Synthetic template")
+            ax1.plot(tw[sel] / 10.0, tf[sel] / np.nanmax(tf[sel]), "C0-",
+                     lw=0.8, alpha=0.7, label="Synthetic template")
     ax1.axhline(1.0, color="0.6", ls=":", lw=1)
     ax1.set_ylim(-0.1, 1.6)
-    ax1.set_xlabel("Wavelength [Å]")
+    ax1.set_xlabel("Wavelength [nm]")
     ax1.set_ylabel("Normalized flux")
     ax1.legend()
     fig.tight_layout()
@@ -1327,12 +1360,13 @@ def cmd_normalize(args):
 
     outfile = args.output or \
         os.path.splitext(os.path.basename(args.spectrum))[0] + "_norm.txt"
-    np.savetxt(outfile, np.column_stack([wl, nf]),
-               fmt="%.4f %.5f",
-               header=f"normalized from {args.spectrum} "
+    np.savetxt(outfile, np.column_stack([wl / 10.0, nf]),
+               fmt="%.5f %.5f",
+               header=f"wavelength [nm]  normalized flux; "
+                      f"from {args.spectrum} "
                       f"(poly order {args.poly_order}, "
                       f"{args.iterations} iterations)")
-    print(f"Normalized spectrum written: {outfile}")
+    print(f"Normalized spectrum written: {outfile} (wavelength in nm)")
 
     plotfile = args.plot or "result_normalization.png"
     fig = make_norm_figure(diag, wl, nf, tpl)
@@ -1510,6 +1544,7 @@ def cmd_batch(args):
         print("Note: T0 is kept in HJD (VarAstro native unit); "
               "use --t0-to-bjd to convert it to BJD.\n")
 
+    apply_bary = not getattr(args, "no_bary", False)
     ncomp = args.components
     rows, profiles = [], []
     for i_file, path in enumerate(files):
@@ -1526,8 +1561,8 @@ def cmd_batch(args):
                 srt = np.argsort(wl)
                 wl, fx = wl[srt], fx[srt]
             if args.wave_min or args.wave_max:
-                lo = args.wave_min or -np.inf
-                hi = args.wave_max or np.inf
+                lo = args.wave_min * 10.0 if args.wave_min else -np.inf
+                hi = args.wave_max * 10.0 if args.wave_max else np.inf
                 sel = (wl >= lo) & (wl <= hi)
                 wl, fx = wl[sel], fx[sel]
 
@@ -1570,20 +1605,21 @@ def cmd_batch(args):
                      if np.isfinite(bjd) and args.t0 is not None
                      and args.period else None)
 
+            vb_used = vbary if apply_bary else 0.0
             rows.append(dict(file=os.path.basename(path), bjd=bjd,
                              phase=phase,
-                             rv=[c["rv"] + vbary for c in comps],
+                             rv=[c["rv"] + vb_used for c in comps],
                              rv_raw=[c["rv"] for c in comps],
                              rv_err=[c["rv_err"] for c in comps],
                              vbary=vbary))
             if args.method == "bf":
                 profiles.append(dict(
                     name=os.path.basename(path),
-                    velocity=bf_result["velocity"] + vbary,
+                    velocity=bf_result["velocity"],
                     bf=bf_result["bf_smooth"],
                     fit=eval_gauss_model(bf_result["velocity"], popt),
                     bjd=bjd, phase=phase))
-            msg = ", ".join(f"RV{j + 1} = {c['rv'] + vbary:8.3f} "
+            msg = ", ".join(f"RV{j + 1} = {c['rv'] + vb_used:8.3f} "
                             f"± {c['rv_err']:.3f}"
                             for j, c in enumerate(comps))
             ph_txt = f"  phase = {phase:.4f}" if phase is not None else ""
@@ -1597,14 +1633,17 @@ def cmd_batch(args):
     with open(outfile, "w") as f:
         f.write(f"# RV curve, method = {args.method.upper()}, "
                 f"template = {args.template or f'PHOENIX T={args.teff}K'}\n")
+        f.write("# barycentric correction applied: "
+                + ("yes" if apply_bary else "no") + "\n")
         cols = "  ".join(f"RV{j + 1}_raw[km/s]  RV{j + 1}_raw_err  "
                          f"RV{j + 1}_bary[km/s]  RV{j + 1}_bary_err"
                          for j in range(ncomp))
         f.write(f"# file  BJD  phase  {cols}  bary_corr[km/s]\n")
         for r in rows:
-            vals = "  ".join(f"{r['rv_raw'][j]:.5f}  {r['rv_err'][j]:.5f}  "
-                             f"{r['rv'][j]:.5f}  {r['rv_err'][j]:.5f}"
-                             for j in range(len(r["rv"])))
+            vals = "  ".join(
+                f"{r['rv_raw'][j]:.5f}  {r['rv_err'][j]:.5f}  "
+                f"{r['rv_raw'][j] + r['vbary']:.5f}  {r['rv_err'][j]:.5f}"
+                for j in range(len(r["rv"])))
             ph = f"{r['phase']:.5f}" if r["phase"] is not None else "nan"
             f.write(f"{r['file']}  {r['bjd']:.6f}  {ph}  {vals}  "
                     f"{r['vbary']:.5f}\n")
@@ -1774,13 +1813,14 @@ def make_args(**overrides):
                 teff=None, logg=4.5, feh=0.0,
                 wave_min=None, wave_max=None,
                 object=None, ra=None, dec=None, obstime=None, site="paranal",
+                no_bary=False,
                 t0=None, period=None, varastro=False, t0_to_bjd=False,
                 plot=None, output=None,
                 rv_min=-200.0, rv_max=200.0, rv_step=0.5,
                 vel_range=400.0, dv=None, svd_rcond=1e-3, smooth=None,
                 components=1, min_sep=30.0,
                 spectrograph=None, resolution=None, vsini=None, epsilon=0.6,
-                poly_order=5, iterations=8, low_clip=1.0, high_clip=4.0)
+                poly_order=3, iterations=10, low_clip=1.0, high_clip=4.0)
     base.update(overrides)
     return argparse.Namespace(**base)
 
@@ -1837,6 +1877,11 @@ def _ask_target(kw):
                             "empty: read from FITS header)", allow_empty=True)
         kw["site"] = ask("Observatory (astropy site name: tug, paranal, ...)",
                          default="tug")
+        apply = ask("Apply the barycentric correction to the reported RVs? "
+                    "(y/n; both velocities are written to the result file "
+                    "either way)", default="y", cast=str,
+                    validate=lambda s: s.lower() in ("y", "n"))
+        kw["no_bary"] = apply.lower() == "n"
     if kw.get("object"):
         fetch = ask("Fetch ephemeris T0/P from VarAstro (var.astro.cz)? "
                     "(y/n)", default="y", cast=str,
@@ -1882,8 +1927,8 @@ def _ask_common_inputs(kw):
     else:
         raw = ask("Raw spectrum file (FITS or ASCII)",
                   cast=str, validate=os.path.isfile)
-        order = ask("  Continuum polynomial order", default=5, cast=int)
-        iters = ask("  Clipping iterations", default=8, cast=int)
+        order = ask("  Continuum polynomial order", default=3, cast=int)
+        iters = ask("  Clipping iterations", default=10, cast=int)
         payload = cmd_normalize(make_args(spectrum=raw, poly_order=order,
                                           iterations=iters))
         spectrum = payload["output"]
@@ -1906,9 +1951,9 @@ def _ask_common_inputs(kw):
         kw["teff"] = ask("  Template T_eff [K]", cast=float)
         kw["logg"] = ask("  Template log g", default=4.5, cast=float)
         kw["feh"] = ask("  Template [Fe/H]", default=0.0, cast=float)
-    kw["wave_min"] = ask("Minimum wavelength [A] (empty: all)",
+    kw["wave_min"] = ask("Minimum wavelength [nm] (empty: all)",
                          allow_empty=True, cast=float)
-    kw["wave_max"] = ask("Maximum wavelength [A] (empty: all)",
+    kw["wave_max"] = ask("Maximum wavelength [nm] (empty: all)",
                          allow_empty=True, cast=float)
     print("\nBuilt-in spectrographs:")
     for i, (n, r, note) in enumerate(SPECTROGRAPHS, 1):
@@ -2063,6 +2108,10 @@ def run_gui():
                                                           columnspan=2,
                                                           sticky="w",
                                                           pady=(4, 0))
+    bary_var = tk.BooleanVar(value=True)
+    ttk.Checkbutton(trow, text="Apply barycentric correction",
+                    variable=bary_var).grid(row=1, column=7, sticky="w",
+                                            padx=(8, 0), pady=(4, 0))
 
     t0_var, per_var = tk.StringVar(), tk.StringVar()
     t0_unit_var = tk.StringVar(value="BJD")
@@ -2163,7 +2212,7 @@ def run_gui():
     res_var, vsini_var = tk.StringVar(), tk.StringVar()
     wrow = ttk.Frame(main)
     wrow.grid(row=3, column=0, columnspan=3, sticky="w", pady=(6, 0))
-    ttk.Label(wrow, text="Wavelength range [Å]:").pack(side="left")
+    ttk.Label(wrow, text="Wavelength range [nm]:").pack(side="left")
     ttk.Entry(wrow, textvariable=wmin_var, width=8).pack(side="left", padx=(4, 2))
     ttk.Label(wrow, text="–").pack(side="left")
     ttk.Entry(wrow, textvariable=wmax_var, width=8).pack(side="left", padx=2)
@@ -2323,8 +2372,8 @@ def run_gui():
         frm.grid(row=0, column=0)
 
         raw_var = tk.StringVar()
-        ord_var = tk.StringVar(value="5")
-        it_var = tk.StringVar(value="8")
+        ord_var = tk.StringVar(value="3")
+        it_var = tk.StringVar(value="10")
 
         ttk.Label(frm, text="Raw spectrum (FITS/ASCII):").grid(row=0, column=0,
                                                                sticky="w")
@@ -2413,6 +2462,7 @@ def run_gui():
                       ra=_f(ra_var), dec=_f(dec_var),
                       obstime=time_var.get().strip() or None,
                       site=site_var.get().strip() or "paranal",
+                      no_bary=not bary_var.get(),
                       t0=_f(t0_var), period=_f(per_var),
                       resolution=_f(res_var), vsini=_f(vsini_var))
             if method_var.get() == "CCF":
@@ -2456,8 +2506,10 @@ def add_common_args(p):
     p.add_argument("--teff", type=float, help="Template T_eff [K] (expecto)")
     p.add_argument("--logg", type=float, default=4.5, help="Template log g")
     p.add_argument("--feh", type=float, default=0.0, help="Template [Fe/H]")
-    p.add_argument("--wave-min", type=float, help="Minimum wavelength to use [A]")
-    p.add_argument("--wave-max", type=float, help="Maximum wavelength to use [A]")
+    p.add_argument("--wave-min", type=float,
+                   help="Minimum wavelength to use [nm]")
+    p.add_argument("--wave-max", type=float,
+                   help="Maximum wavelength to use [nm]")
     p.add_argument("--spectrograph",
                    help="Built-in instrument; sets R automatically. Known: "
                         + ", ".join(n for n, _, _ in SPECTROGRAPHS))
@@ -2480,6 +2532,11 @@ def add_common_args(p):
                                      "(2453254.847090365)")
     p.add_argument("--site", default="paranal",
                    help="Observatory (astropy site name, e.g. paranal, tug)")
+    p.add_argument("--no-bary", action="store_true",
+                   help="Compute the barycentric correction but do NOT "
+                        "apply it to the reported RVs; both the corrected "
+                        "and uncorrected velocities are always written to "
+                        "the result file")
     p.add_argument("--t0", type=float,
                    help="Ephemeris T0 [BJD] (primary minimum) for the "
                         "orbital phase")
@@ -2559,9 +2616,9 @@ def main():
     p_batch.add_argument("--logg", type=float, default=4.5, help="Template log g")
     p_batch.add_argument("--feh", type=float, default=0.0, help="Template [Fe/H]")
     p_batch.add_argument("--wave-min", type=float,
-                         help="Minimum wavelength to use [A]")
+                         help="Minimum wavelength to use [nm]")
     p_batch.add_argument("--wave-max", type=float,
-                         help="Maximum wavelength to use [A]")
+                         help="Maximum wavelength to use [nm]")
     p_batch.add_argument("--spectrograph",
                          help="Built-in instrument name (sets R)")
     p_batch.add_argument("--resolution", type=float,
@@ -2573,9 +2630,9 @@ def main():
                          help="Limb-darkening coefficient (default 0.6)")
     p_batch.add_argument("--normalize", action="store_true",
                          help="Continuum-normalize each raw spectrum first")
-    p_batch.add_argument("--poly-order", type=int, default=5,
+    p_batch.add_argument("--poly-order", type=int, default=3,
                          help="Continuum polynomial order (with --normalize)")
-    p_batch.add_argument("--iterations", type=int, default=8,
+    p_batch.add_argument("--iterations", type=int, default=10,
                          help="Clipping iterations (with --normalize)")
     p_batch.add_argument("--object", help="Star name for SIMBAD coordinates")
     p_batch.add_argument("--ra", type=float, help="RA [deg]")
@@ -2589,6 +2646,11 @@ def main():
                               "reference document)")
     p_batch.add_argument("--site", default="paranal",
                          help="Observatory (astropy site name)")
+    p_batch.add_argument("--no-bary", action="store_true",
+                         help="Compute the barycentric correction but do "
+                              "NOT apply it to the reported RVs; both "
+                              "velocities are always written to the "
+                              "RV curve file")
     p_batch.add_argument("--vel-range", type=float, default=400.0,
                          help="BF window half-width [km/s]")
     p_batch.add_argument("--dv", type=float, help="BF velocity step [km/s]")
@@ -2638,10 +2700,12 @@ def main():
     p_norm.add_argument("--spectrum", required=True, help="Raw spectrum file")
     p_norm.add_argument("--format", default="auto",
                         choices=["auto", "s2d", "text"])
-    p_norm.add_argument("--poly-order", type=int, default=5,
-                        help="Continuum polynomial order")
-    p_norm.add_argument("--iterations", type=int, default=8,
-                        help="Sigma-clipping iterations")
+    p_norm.add_argument("--poly-order", type=int, default=3,
+                        help="Continuum polynomial order (default tuned "
+                             "for the 500-550 nm RV region)")
+    p_norm.add_argument("--iterations", type=int, default=10,
+                        help="Sigma-clipping iterations (default tuned "
+                             "for the 500-550 nm RV region)")
     p_norm.add_argument("--low-clip", type=float, default=1.0,
                         help="Rejection threshold below the fit [sigma]")
     p_norm.add_argument("--high-clip", type=float, default=4.0,
