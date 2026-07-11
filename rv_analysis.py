@@ -132,6 +132,41 @@ def eval_gauss_model(x, popt):
     return multi_gauss_no(x, *popt)
 
 
+def multi_rot_profile(x, params, epsilon=0.6, inst_sigma_pix=None):
+    """Sum of N Gray (1992) rotational profiles, params = (amp, v0,
+    vsini) per component; amp is the profile height at the centre. When
+    inst_sigma_pix is given the summed profile is convolved with the
+    instrumental Gaussian (x must then be a uniform velocity grid). The
+    DDO-series / saphires practice for the broadened components of close
+    binaries."""
+    x = np.asarray(x, dtype=float)
+    y = np.zeros_like(x)
+    peak = 2.0 * (1.0 - epsilon) + 0.5 * np.pi * epsilon
+    for k in range(0, len(params), 3):
+        amp, v0, vsini = params[k:k + 3]
+        u = (x - v0) / max(abs(vsini), 1e-6)
+        inside = np.abs(u) < 1.0
+        prof = np.zeros_like(x)
+        prof[inside] = (2.0 * (1.0 - epsilon) * np.sqrt(1.0 - u[inside] ** 2)
+                        + 0.5 * np.pi * epsilon * (1.0 - u[inside] ** 2))
+        y = y + amp * prof / peak
+    if inst_sigma_pix:
+        y = gaussian_filter1d(y, inst_sigma_pix)
+    return y
+
+
+def eval_bf_model(x, model):
+    """Evaluate a fitted profile model descriptor as returned by
+    fit_bf_peaks / fit_peak_with_base: dict(kind, popt, epsilon,
+    inst_sigma_pix). kind 'rot' uses rotational profiles, anything else
+    the Gaussian models."""
+    if model.get("kind") == "rot":
+        return multi_rot_profile(x, model["popt"],
+                                 epsilon=model.get("epsilon", 0.6),
+                                 inst_sigma_pix=model.get("inst_sigma_pix"))
+    return eval_gauss_model(x, model["popt"])
+
+
 def read_ascii_spectrum(path):
     """Tolerant ASCII spectrum reader (.txt/.dat/.ascii/.obs/.prf/...).
 
@@ -229,8 +264,32 @@ def read_fits_spectrum(path):
                     crpix = h.get("CRPIX1", 1.0)
                     wl = h["CRVAL1"] + (np.arange(data.size) + 1 - crpix) * cdelt
                     return [(wl, data)]
-    raise ValueError(f"{path}: unrecognized FITS layout (expected S2D, a "
-                     "WAVE/FLUX binary table, or a 1D image with CRVAL1/CDELT1).")
+        for hdu in hdul:
+            if hdu.data is None:
+                continue
+            data = np.asarray(hdu.data)
+            h = hdu.header
+            ctypes = " ".join(str(h.get(k, "")) for k in
+                              ("CTYPE1", "CTYPE2", "CTYPE3")).strip()
+            celestial = any(t in ctypes for t in ("RA--", "DEC-", "-TAN"))
+            if data.ndim >= 3 or (data.ndim == 2 and celestial):
+                inst = h.get("INSTRUME", "unknown instrument")
+                tel = h.get("TELESCOP", "unknown telescope")
+                raise ValueError(
+                    f"{path}: this FITS contains IMAGING data, not a "
+                    f"spectrum: {data.shape} pixels from {inst} on {tel}"
+                    + (f", celestial WCS '{ctypes}'" if ctypes else "")
+                    + ". No spectrum can be extracted from it; RVCalPy "
+                    "needs a spectral layout (ESPRESSO S2D, a WAVE/FLUX "
+                    "binary table, or a 1D image with CRVAL1/CDELT1).")
+        layout = "; ".join(
+            f"HDU{i} {type(h).__name__}"
+            + (f" {np.asarray(h.data).shape}" if h.data is not None
+               else " (no data)")
+            for i, h in enumerate(hdul))
+    raise ValueError(f"{path}: unrecognized FITS layout ({layout}); "
+                     "expected S2D, a WAVE/FLUX binary table, or a 1D "
+                     "image with CRVAL1/CDELT1.")
 
 
 def read_spectrum(path, fmt="auto"):
@@ -1042,8 +1101,8 @@ def fit_peak_with_base(velocity, profile, with_offset=False, center=None):
     err = np.sqrt(np.diag(pcov))
     k = 0 if popt[0] >= popt[3] else 3
     comp = dict(rv=popt[k + 1], rv_err=float(err[k + 1]),
-                amp=popt[k], sigma=abs(popt[k + 2]))
-    return [comp], popt
+                amp=popt[k], sigma=abs(popt[k + 2]), kind="gauss")
+    return [comp], dict(kind="gauss", popt=popt)
 
 
 def find_bf_peaks(velocity, bf, n, min_sep):
@@ -1070,26 +1129,34 @@ def find_bf_peaks(velocity, bf, n, min_sep):
 
 
 def fit_bf_peaks(velocity, bf, components=1, min_sep=30.0, with_offset=False,
-                 guesses=None):
-    """Fit the BF/CCF profile following the reference notebook and
-    BF-rvplotter.
+                 guesses=None, profile="gauss", inst_fwhm=None, epsilon=0.6):
+    """Fit the BF/CCF profile following the reference notebook,
+    BF-rvplotter and the DDO close-binary series.
 
     components=1: bounded sharp-peak + broad-base double Gaussian
     (fit_peak_with_base); the sharp component is reported.
-    components=2/3: one bounded Gaussian per stellar component, started
+    components=2/3: one bounded profile per stellar component, started
     from the highest separated local maxima of the profile (at least
     min_sep [km/s] apart) or from explicit initial guesses.
+
+    profile: 'gauss' (default) fits Gaussians; 'rot' fits Gray (1992)
+    rotational profiles convolved with the instrumental Gaussian
+    (inst_fwhm [km/s], from the spectrograph R) — the DDO-series /
+    saphires practice for the rotation-dominated components of close
+    binaries: the width parameter is then vsini, not a Gaussian sigma.
 
     guesses: optional list of initial RVs [km/s], one per component —
     BF-rvplotter's gausspars practice. The returned components keep the
     guess order, so the C1/C2/... labels are fixed by the user and the
-    star identity of every Gaussian is unambiguous. Without guesses the
-    components are returned sorted by RV (callers may re-sort by area).
+    star identity of every profile is unambiguous. Without guesses the
+    components are returned sorted by RV (callers may re-sort by area or
+    by orbital phase).
 
     with_offset=True adds a constant baseline term (used for CCF
     profiles, whose baseline is not zero); it supports 2 components.
 
-    Returns: list of dict(rv, rv_err, amp, sigma) per component, and popt.
+    Returns: (list of dict(rv, rv_err, amp, sigma, kind) per component,
+    model descriptor dict for eval_bf_model).
     """
     velocity = np.asarray(velocity, dtype=float)
     bf = np.asarray(bf, dtype=float)
@@ -1110,24 +1177,44 @@ def fit_bf_peaks(velocity, bf, components=1, min_sep=30.0, with_offset=False,
         centers = [float(velocity[i])
                    for i in find_bf_peaks(velocity, bf, components, min_sep)]
 
+    use_rot = profile == "rot" and not with_offset
+    step = float(np.median(np.abs(np.diff(velocity))))
+    inst_sigma_pix = (inst_fwhm / 2.35482 / step) if (use_rot and inst_fwhm
+                                                      ) else None
     vlo, vhi = float(velocity.min()), float(velocity.max())
     p0, lo, hi = [], [], []
     for c in centers:
         a = float(bf[np.argmin(np.abs(velocity - c))])
-        p0 += [max(a - offset0, 1e-6), c, 20.0]
-        lo += [0.0, vlo, 1.0]
-        hi += [np.inf, vhi, 200.0]
+        if use_rot:
+            p0 += [max(a - offset0, 1e-6), c, 40.0]
+            lo += [0.0, vlo, 2.0]
+            hi += [np.inf, vhi, 300.0]
+        else:
+            p0 += [max(a - offset0, 1e-6), c, 20.0]
+            lo += [0.0, vlo, 1.0]
+            hi += [np.inf, vhi, 200.0]
 
     if with_offset:
         popt, pcov = curve_fit(two_gauss, velocity, bf, p0=p0 + [offset0],
                                bounds=(lo + [-np.inf], hi + [np.inf]),
                                maxfev=40000)
+        model = dict(kind="gauss", popt=popt)
+    elif use_rot:
+        def rot_model(x, *params):
+            return multi_rot_profile(x, params, epsilon=epsilon,
+                                     inst_sigma_pix=inst_sigma_pix)
+        popt, pcov = curve_fit(rot_model, velocity, bf, p0=p0,
+                               bounds=(lo, hi), maxfev=60000)
+        model = dict(kind="rot", popt=popt, epsilon=epsilon,
+                     inst_sigma_pix=inst_sigma_pix)
     else:
         popt, pcov = curve_fit(multi_gauss_no, velocity, bf, p0=p0,
                                bounds=(lo, hi), maxfev=60000)
+        model = dict(kind="gauss", popt=popt)
     err = np.sqrt(np.diag(pcov))
+    kind = "rot" if use_rot else "gauss"
     comps = [dict(rv=popt[k + 1], rv_err=float(err[k + 1]), amp=popt[k],
-                  sigma=abs(popt[k + 2]))
+                  sigma=abs(popt[k + 2]), kind=kind)
              for k in range(0, 3 * components, 3)]
     if guesses:
         remaining = list(range(components))
@@ -1139,7 +1226,49 @@ def fit_bf_peaks(velocity, bf, components=1, min_sep=30.0, with_offset=False,
         comps = ordered
     else:
         comps.sort(key=lambda c: c["rv"])
-    return comps, popt
+    return comps, model
+
+
+def identify_components(comps, phase, gamma=None):
+    """Assign star identities to fitted BF components from the orbital
+    phase, following the DDO close-binary series and Mennickent et al.
+    (2010), where RV_i(phase) = gamma + K_i sin(2 pi phase + phi_i):
+    right after the primary eclipse (0 < phase < 0.5) the primary is
+    blueshifted with respect to the systemic velocity and the secondary
+    redshifted; between phase 0.5 and 1 the signs swap. With three
+    components the narrowest profile is taken as the tertiary — additional
+    components appear as sharp peaks near the systemic velocity (Pribulla
+    & Rucinski series) — and is listed last. gamma defaults to the
+    area-weighted mean RV of the binary pair.
+
+    Returns (ordered comps, note string).
+    """
+    comps = list(comps)
+    tertiary = None
+    if len(comps) >= 3:
+        tertiary = min(comps, key=lambda c: c["sigma"])
+        pair = [c for c in comps if c is not tertiary]
+    else:
+        pair = comps
+    if gamma is None:
+        weights = [max(abs(c["amp"] * c["sigma"]), 1e-12) for c in pair]
+        gamma = (sum(c["rv"] * w for c, w in zip(pair, weights))
+                 / sum(weights))
+        gamma_src = "estimated from the BF-area-weighted mean"
+    else:
+        gamma_src = "given"
+    blue, red = sorted(pair, key=lambda c: c["rv"])
+    if (phase % 1.0) < 0.5:
+        ordered = [blue, red]
+    else:
+        ordered = [red, blue]
+    note = (f"Component labels from the orbital phase ({phase:.4f}): "
+            f"C1 = primary ({'blue' if (phase % 1.0) < 0.5 else 'red'}"
+            f"-shifted side of gamma = {gamma:+.2f} km/s, {gamma_src})")
+    if tertiary is not None:
+        ordered.append(tertiary)
+        note += "; C3 = narrowest peak (tertiary near systemic velocity)"
+    return ordered, note
 
 
 def make_ccf_figure(result):
@@ -1154,7 +1283,7 @@ def make_ccf_figure(result):
     ax1.plot(result["rv_grid"], result["ccf_total"], "k-", lw=1.2,
              label="Total CCF (normalized)")
     ax1.plot(result["rv_grid"],
-             eval_gauss_model(result["rv_grid"], result["popt"]),
+             eval_bf_model(result["rv_grid"], result["popt"]),
              "r-", lw=2, alpha=0.7,
              label=f"Gaussian fit: RV = {result['rv']:.3f} "
                    f"± {result['rv_err']:.3f} km/s")
@@ -1180,7 +1309,7 @@ def make_bf_figure(bf_result, comps, popt, components, bjd=None, phase=None,
     ax = fig.subplots()
     ax.plot(v, bf_result["bf"], color="0.7", lw=0.8, label="BF (raw)")
     ax.plot(v, bf_result["bf_smooth"], "b-", lw=1.5, label="BF (smoothed)")
-    model = eval_gauss_model(v, popt)
+    model = eval_bf_model(v, popt)
     ax.plot(v, model, "r--", lw=2, alpha=0.8, label="Gaussian fit")
     ymin = float(min(np.min(bf_result["bf_smooth"]), np.min(model)))
     ymax = float(max(np.max(bf_result["bf_smooth"]), np.max(model)))
@@ -1433,22 +1562,28 @@ def cmd_bf(args):
     comps, popt = fit_bf_peaks(bf_result["velocity"], bf_result["bf_smooth"],
                                components=args.components,
                                min_sep=args.min_sep,
-                               guesses=getattr(args, "guess", None))
+                               guesses=getattr(args, "guess", None),
+                               profile=getattr(args, "profile", "gauss"),
+                               epsilon=args.epsilon)
+
+    ctx = get_target_context(args)
+    vbary, bjd, phase = ctx["vbary"], ctx["bjd"], ctx["phase"]
+    apply_bary = not getattr(args, "no_bary", False)
+
     label_note = None
     if args.components >= 2:
         if getattr(args, "guess", None):
             label_note = ("Component labels follow the given initial "
                           "guesses: C1 = first guess, C2 = second, ...")
+        elif phase is not None:
+            comps, label_note = identify_components(
+                comps, phase, gamma=getattr(args, "gamma", None))
         else:
             comps.sort(key=lambda c: abs(c["amp"] * c["sigma"]),
                        reverse=True)
             label_note = ("Component labels sorted by BF area: C1 = "
-                          "largest light contribution. Use --guess to fix "
-                          "the labels explicitly.")
-
-    ctx = get_target_context(args)
-    vbary, bjd, phase = ctx["vbary"], ctx["bjd"], ctx["phase"]
-    apply_bary = not getattr(args, "no_bary", False)
+                          "largest light contribution. Use --guess or an "
+                          "ephemeris (phase) to fix the identities.")
 
     tpl_name = args.template or f"PHOENIX T={args.teff}K"
     lines = ["================ BF RESULT =================",
@@ -1458,18 +1593,19 @@ def cmd_bf(args):
         lines.append(f"BJD = {bjd:.6f}"
                      + (f"   phase = {phase:.4f}" if phase is not None else ""))
     for i, c in enumerate(comps, 1):
+        wname = "vsini" if c.get("kind") == "rot" else "sigma"
         if apply_bary:
             lines.append(f"Component {i}: RV (uncorrected)           = "
                          f"{c['rv']:.4f} ± {c['rv_err']:.4f} km/s"
                          f"   (amp={c['amp']:.4f}, "
-                         f"sigma={c['sigma']:.2f} km/s)")
+                         f"{wname}={c['sigma']:.2f} km/s)")
             lines.append(f"             RV (barycentric corrected) = "
                          f"{c['rv'] + vbary:.4f} ± {c['rv_err']:.4f} km/s")
         else:
             lines.append(f"Component {i}: RV = {c['rv']:.4f} "
                          f"± {c['rv_err']:.4f} km/s"
                          f"   (amp={c['amp']:.4f}, "
-                         f"sigma={c['sigma']:.2f} km/s)")
+                         f"{wname}={c['sigma']:.2f} km/s)")
     if vbary:
         if apply_bary:
             lines.append(f"v_bary = {vbary:+.4f} km/s")
@@ -1498,6 +1634,11 @@ def cmd_bf(args):
                     + "\n")
         f.write("# barycentric correction applied: "
                 + ("yes" if apply_bary else "no") + "\n")
+        if getattr(args, "profile", "gauss") == "rot":
+            f.write("# fit profile: rotational (Gray 1992); the sigma "
+                    "column is vsini [km/s]\n")
+        if label_note:
+            f.write(f"# {label_note}\n")
         if apply_bary:
             f.write("# component  RV_raw[km/s]  RV_raw_err[km/s]  "
                     "RV_bary[km/s]  RV_bary_err[km/s]  amp  sigma[km/s]  "
@@ -1810,10 +1951,10 @@ def cmd_batch(args):
                                            components=ncomp,
                                            min_sep=args.min_sep,
                                            guesses=getattr(args, "guess",
-                                                           None))
-                if ncomp >= 2 and not getattr(args, "guess", None):
-                    comps.sort(key=lambda c: c["amp"] * c["sigma"],
-                               reverse=True)
+                                                           None),
+                                           profile=getattr(args, "profile",
+                                                           "gauss"),
+                                           epsilon=args.epsilon)
             else:
                 result = run_ccf([(wl, fx)], tpl_wl, tpl_flux,
                                  args.rv_min, args.rv_max, args.rv_step)
@@ -1833,6 +1974,13 @@ def cmd_batch(args):
             phase = (orbital_phase(bjd, args.t0, args.period)
                      if np.isfinite(bjd) and args.t0 is not None
                      and args.period else None)
+            if ncomp >= 2 and not getattr(args, "guess", None):
+                if phase is not None:
+                    comps, _ = identify_components(
+                        comps, phase, gamma=getattr(args, "gamma", None))
+                else:
+                    comps.sort(key=lambda c: c["amp"] * c["sigma"],
+                               reverse=True)
 
             vb_used = vbary if apply_bary else 0.0
             rows.append(dict(file=os.path.basename(path), bjd=bjd,
@@ -1846,7 +1994,7 @@ def cmd_batch(args):
                     name=os.path.basename(path),
                     velocity=bf_result["velocity"],
                     bf=bf_result["bf_smooth"],
-                    fit=eval_gauss_model(bf_result["velocity"], popt),
+                    fit=eval_bf_model(bf_result["velocity"], popt),
                     bjd=bjd, phase=phase))
             msg = ", ".join(f"RV{j + 1} = {c['rv'] + vb_used:8.3f} "
                             f"± {c['rv_err']:.3f}"
@@ -2030,7 +2178,7 @@ def cmd_demo(args):
 
         v = bf_result["velocity"]
         axes[1].plot(v, bf_result["bf_smooth"], "b-", lw=1.5, label="BF")
-        axes[1].plot(v, eval_gauss_model(v, popt), "r--", lw=1.5,
+        axes[1].plot(v, eval_bf_model(v, popt), "r--", lw=1.5,
                      label="Double Gaussian fit")
         for rvt in (rv1_true, rv2_true):
             axes[1].axvline(rvt, color="0.5", ls=":", lw=1)
@@ -2039,7 +2187,7 @@ def cmd_demo(args):
         axes[1].legend()
 
         axes[2].plot(rv_grid, ccf, "k-", lw=1.5, label="CCF")
-        axes[2].plot(rv_grid, eval_gauss_model(rv_grid, cpopt), "r--", lw=1.5,
+        axes[2].plot(rv_grid, eval_bf_model(rv_grid, cpopt), "r--", lw=1.5,
                      label="Double Gaussian fit")
         for rvt in (rv1_true, rv2_true):
             axes[2].axvline(rvt, color="0.5", ls=":", lw=1)
@@ -2063,7 +2211,8 @@ def make_args(**overrides):
                 plot=None, output=None,
                 rv_min=-200.0, rv_max=200.0, rv_step=0.5,
                 vel_range=400.0, dv=None, svd_rcond=None, smooth=None,
-                components=1, min_sep=30.0, guess=None,
+                components=1, min_sep=30.0, guess=None, profile="gauss",
+                gamma=None,
                 spectrograph=None, resolution=None, vsini=None, epsilon=0.6,
                 poly_order=3, iterations=10, low_clip=1.0, high_clip=4.0)
     base.update(overrides)
@@ -2161,8 +2310,35 @@ def _ask_target(kw):
 
 
 def _ask_common_inputs(kw):
-    """Inputs shared by both methods: files and wavelength range.
+    """Inputs shared by both methods: spectrograph, files and wavelength
+    range — the spectrograph is asked first, before any file is read.
     Mutates and returns kw (which may already hold the target info)."""
+    print("\nBuilt-in spectrographs:")
+    for i, (n, r, note) in enumerate(SPECTROGRAPHS, 1):
+        print(f"  [{i:>2}] {n:<14} R = {r:<7} ({note})")
+    sel = ask("Spectrograph number (empty: enter R manually / skip)",
+              allow_empty=True, cast=int,
+              validate=lambda i: 1 <= i <= len(SPECTROGRAPHS))
+    if sel is not None:
+        name, r, _ = SPECTROGRAPHS[sel - 1]
+        kw["resolution"] = float(r)
+        print(f"  {name}: R = {r}  (instrumental broadening "
+              f"c/R = {C_KMS / r:.2f} km/s)")
+    else:
+        kw["resolution"] = ask("Resolution R, e.g. 48000 (empty: skip)",
+                               allow_empty=True, cast=float)
+
+    r_val = kw.get("resolution")
+    if r_val:
+        floor = min_vsini(r_val)
+        print(f"  Minimum resolvable vsini at this R: c/R = {floor:.1f} km/s")
+        kw["vsini"] = ask(f"Template vsini [km/s], >= {floor:.1f} "
+                          "(empty: skip)", allow_empty=True, cast=float,
+                          validate=lambda v: v >= floor)
+    else:
+        kw["vsini"] = ask("Template vsini [km/s] (empty: skip)",
+                          allow_empty=True, cast=float)
+
     have_norm = ask("Do you already have a normalized spectrum? (y/n)",
                     default="y", cast=str,
                     validate=lambda s: s.lower() in ("y", "n"))
@@ -2200,31 +2376,6 @@ def _ask_common_inputs(kw):
                          allow_empty=True, cast=float)
     kw["wave_max"] = ask("Maximum wavelength [nm] (empty: all)",
                          allow_empty=True, cast=float)
-    print("\nBuilt-in spectrographs:")
-    for i, (n, r, note) in enumerate(SPECTROGRAPHS, 1):
-        print(f"  [{i:>2}] {n:<14} R = {r:<7} ({note})")
-    sel = ask("Spectrograph number (empty: enter R manually / skip)",
-              allow_empty=True, cast=int,
-              validate=lambda i: 1 <= i <= len(SPECTROGRAPHS))
-    if sel is not None:
-        name, r, _ = SPECTROGRAPHS[sel - 1]
-        kw["resolution"] = float(r)
-        print(f"  {name}: R = {r}  (instrumental broadening "
-              f"c/R = {C_KMS / r:.2f} km/s)")
-    else:
-        kw["resolution"] = ask("Resolution R, e.g. 48000 (empty: skip)",
-                               allow_empty=True, cast=float)
-
-    r_val = kw.get("resolution")
-    if r_val:
-        floor = min_vsini(r_val)
-        print(f"  Minimum resolvable vsini at this R: c/R = {floor:.1f} km/s")
-        kw["vsini"] = ask(f"Template vsini [km/s], >= {floor:.1f} "
-                          "(empty: skip)", allow_empty=True, cast=float,
-                          validate=lambda v: v >= floor)
-    else:
-        kw["vsini"] = ask("Template vsini [km/s] (empty: skip)",
-                          allow_empty=True, cast=float)
     return kw
 
 
@@ -2262,6 +2413,13 @@ def run_terminal_wizard():
             if g:
                 kw["guess"] = [float(t) for t in
                                str(g).replace(",", " ").split()]
+            prof = ask("Peak model: [1] Gaussian  [2] rotational profile "
+                       "(DDO practice, width = vsini)", default="1",
+                       cast=str, validate=lambda s: s in ("1", "2"))
+            kw["profile"] = "rot" if prof == "2" else "gauss"
+            kw["gamma"] = ask("Systemic velocity gamma [km/s] for the "
+                              "phase-based identification (empty: "
+                              "estimate)", allow_empty=True, cast=float)
         kw["smooth"] = ask("BF smoothing FWHM [km/s] (empty: auto)",
                            allow_empty=True, cast=float)
         kw["svd_rcond"] = ask("SVD cutoff (empty: automatic; "
@@ -2446,26 +2604,26 @@ def run_gui():
     spec_var = tk.StringVar()
     tpl_var = tk.StringVar()
 
-    ttk.Label(main, text="Normalized spectrum:").grid(row=1, column=0, sticky="w")
-    ttk.Entry(main, textvariable=spec_var, width=48).grid(row=1, column=1,
+    ttk.Label(main, text="Normalized spectrum:").grid(row=2, column=0, sticky="w")
+    ttk.Entry(main, textvariable=spec_var, width=48).grid(row=2, column=1,
                                                           sticky="ew", padx=4)
     fbtns = ttk.Frame(main)
-    fbtns.grid(row=1, column=2, sticky="w")
+    fbtns.grid(row=2, column=2, sticky="w")
     ttk.Button(fbtns, text="Browse...",
                command=lambda: browse(spec_var, "Select normalized spectrum")
                ).pack(side="left")
 
-    ttk.Label(main, text="Synthetic spectrum:").grid(row=2, column=0, sticky="w")
-    ttk.Entry(main, textvariable=tpl_var, width=48).grid(row=2, column=1,
+    ttk.Label(main, text="Synthetic spectrum:").grid(row=3, column=0, sticky="w")
+    ttk.Entry(main, textvariable=tpl_var, width=48).grid(row=3, column=1,
                                                          sticky="ew", padx=4)
     ttk.Button(main, text="Browse...",
                command=lambda: browse(tpl_var, "Select synthetic spectrum")
-               ).grid(row=2, column=2, sticky="w")
+               ).grid(row=3, column=2, sticky="w")
 
     wmin_var, wmax_var = tk.StringVar(), tk.StringVar()
     res_var, vsini_var = tk.StringVar(), tk.StringVar()
     wrow = ttk.Frame(main)
-    wrow.grid(row=3, column=0, columnspan=3, sticky="w", pady=(6, 0))
+    wrow.grid(row=4, column=0, columnspan=3, sticky="w", pady=(6, 0))
     ttk.Label(wrow, text="Wavelength range [nm]:").pack(side="left")
     ttk.Entry(wrow, textvariable=wmin_var, width=8).pack(side="left", padx=(4, 2))
     ttk.Label(wrow, text="–").pack(side="left")
@@ -2473,7 +2631,7 @@ def run_gui():
     ttk.Label(wrow, text="(empty: full range)").pack(side="left", padx=4)
 
     prow = ttk.Frame(main)
-    prow.grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 0))
+    prow.grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
     spectro_var = tk.StringVar()
     min_vsini_var = tk.StringVar(value="")
@@ -2560,6 +2718,12 @@ def run_gui():
     ttk.Label(bf_frame, text="Components").grid(row=0, column=3)
     ttk.Combobox(bf_frame, textvariable=comp_var, values=[1, 2, 3], width=3,
                  state="readonly").grid(row=0, column=4, padx=4)
+    profile_var = tk.StringVar(value="Gaussian")
+    gamma_var = tk.StringVar()
+    ttk.Label(bf_frame, text="Profile").grid(row=0, column=5, padx=(12, 0))
+    ttk.Combobox(bf_frame, textvariable=profile_var,
+                 values=["Gaussian", "Rotational (vsini)"], width=16,
+                 state="readonly").grid(row=0, column=6, padx=4)
     ttk.Label(bf_frame, text="RV guesses [km/s]:").grid(row=1, column=0,
                                                         sticky="w",
                                                         pady=(4, 0))
@@ -2568,6 +2732,15 @@ def run_gui():
     ttk.Label(bf_frame, text="(optional, comma-separated, one per "
                              "component; fixes the C1/C2/... labels)",
               foreground="gray").grid(row=1, column=3, columnspan=3,
+                                      sticky="w", pady=(4, 0))
+    ttk.Label(bf_frame, text="Systemic gamma [km/s]:").grid(row=2, column=0,
+                                                            sticky="w",
+                                                            pady=(4, 0))
+    ttk.Entry(bf_frame, textvariable=gamma_var, width=10
+              ).grid(row=2, column=1, sticky="w", pady=(4, 0))
+    ttk.Label(bf_frame, text="(optional, for the phase-based component "
+                             "identification)",
+              foreground="gray").grid(row=2, column=2, columnspan=4,
                                       sticky="w", pady=(4, 0))
     on_method_change()
 
@@ -2738,7 +2911,10 @@ def run_gui():
                 gtxt = guess_var.get().replace(",", " ").split()
                 kw.update(vel_range=_f(vrange_var, 400.0),
                           components=int(comp_var.get()),
-                          guess=[float(t) for t in gtxt] if gtxt else None)
+                          guess=[float(t) for t in gtxt] if gtxt else None,
+                          profile=("rot" if profile_var.get().startswith(
+                              "Rot") else "gauss"),
+                          gamma=_f(gamma_var))
                 payload = cmd_bf(make_args(**kw))
         except Exception as exc:
             messagebox.showerror("Error", str(exc))
@@ -2873,6 +3049,17 @@ def main():
                            "(BF-rvplotter gausspars practice); also fixes "
                            "the component labels: C1 = first guess, "
                            "C2 = second, ...")
+    p_bf.add_argument("--profile", default="gauss",
+                      choices=["gauss", "rot"],
+                      help="Peak model for multi-component fits: 'gauss' "
+                           "(default) or 'rot' - Gray (1992) rotational "
+                           "profiles, the DDO-series practice for the "
+                           "rotation-dominated components of close "
+                           "binaries (the fitted width is then vsini)")
+    p_bf.add_argument("--gamma", type=float,
+                      help="Systemic velocity [km/s] for the phase-based "
+                           "component identification (default: estimated "
+                           "from the BF-area-weighted mean of the pair)")
     p_bf.set_defaults(func=cmd_bf)
 
     p_batch = sub.add_parser("batch",
@@ -2943,6 +3130,14 @@ def main():
     p_batch.add_argument("--guess", type=float, nargs="+",
                          help="Initial RV guesses [km/s], one per "
                               "component; also fixes the component labels")
+    p_batch.add_argument("--profile", default="gauss",
+                         choices=["gauss", "rot"],
+                         help="Peak model: 'gauss' (default) or 'rot' "
+                              "(Gray rotational profiles; the width is "
+                              "then vsini)")
+    p_batch.add_argument("--gamma", type=float,
+                         help="Systemic velocity [km/s] for the "
+                              "phase-based component identification")
     p_batch.add_argument("--rv-min", type=float, default=-200.0,
                          help="CCF scan lower limit [km/s]")
     p_batch.add_argument("--rv-max", type=float, default=200.0,
