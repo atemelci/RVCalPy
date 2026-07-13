@@ -980,7 +980,6 @@ def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
         svd = pyasl.SVD()
         svd.decompose(tpl, m)
         w = np.ravel(np.asarray(svd.getSingularValues()))
-        rhs_valid = obs
         solve = lambda lim: svd.getBroadeningFunction(obs, wlimit=lim,
                                                       asarray=True)
         velocity = svd.getRVAxis(r, 1)
@@ -1295,7 +1294,7 @@ def make_ccf_figure(result):
     return fig
 
 
-def make_bf_figure(bf_result, comps, popt, components, bjd=None, phase=None,
+def make_bf_figure(bf_result, comps, popt, bjd=None, phase=None,
                    vbary=0.0, bary_applied=True):
     """BF figure in the measured (uncorrected) velocity frame: the axis
     and the annotated RVs are the raw measurements. When the barycentric
@@ -1547,8 +1546,9 @@ def cmd_bf(args):
         spec_wl, spec_flux = spec_wl[sel], spec_flux[sel]
 
     tpl_wl, tpl_flux = load_template(args)
+    resolution = get_resolution(args)
     tpl_wl, tpl_flux = prepare_template(tpl_wl, tpl_flux,
-                                        resolution=get_resolution(args),
+                                        resolution=resolution,
                                         vsini=args.vsini,
                                         epsilon=args.epsilon)
 
@@ -1564,6 +1564,8 @@ def cmd_bf(args):
                                min_sep=args.min_sep,
                                guesses=getattr(args, "guess", None),
                                profile=getattr(args, "profile", "gauss"),
+                               inst_fwhm=(C_KMS / resolution
+                                          if resolution else None),
                                epsilon=args.epsilon)
 
     ctx = get_target_context(args)
@@ -1658,7 +1660,7 @@ def cmd_bf(args):
     print(f"Results written: {outfile}")
 
     plotfile = args.plot or "result_BF.png"
-    fig = make_bf_figure(bf_result, comps, popt, args.components,
+    fig = make_bf_figure(bf_result, comps, popt,
                          bjd=bjd, phase=phase, vbary=vbary,
                          bary_applied=apply_bary)
     save_figure(fig, plotfile)
@@ -1786,13 +1788,13 @@ def make_rv_curve_figure(rows, ncomp, t0=None, period=None):
     folded = t0 is not None and period is not None and np.isfinite(bjd).all()
     x = ((bjd - t0) / period) % 1.0 if folded else bjd
 
-    colors = ["C0", "C3"]
-    labels = ["Component 1", "Component 2"]
+    colors = ["C0", "C3", "C2"]
     for j in range(ncomp):
         rv = [r["rv"][j] for r in rows]
         err = [r["rv_err"][j] for r in rows]
         ax.errorbar(x, rv, yerr=err, fmt="o", ms=5, capsize=2,
-                    color=colors[j], label=labels[j])
+                    color=colors[j % len(colors)],
+                    label=f"Component {j + 1}")
     ax.set_xlabel("Orbital phase" if folded else "BJD_TDB")
     ax.set_ylabel("RV [km/s]")
     ax.set_title("Radial velocity curve")
@@ -1801,7 +1803,7 @@ def make_rv_curve_figure(rows, ncomp, t0=None, period=None):
     return fig
 
 
-def make_bf_stack_figure(profiles, t0=None, period=None):
+def make_bf_stack_figure(profiles):
     """BF profiles of all epochs stacked and sorted by orbital phase:
     each profile is offset vertically, its double-Gaussian fit
     overplotted, and labelled with its phase so the geometry near the
@@ -1869,8 +1871,9 @@ def cmd_batch(args):
     print(f"{len(files)} spectra to process.\n")
 
     tpl_wl, tpl_flux = load_template(args)
+    resolution = get_resolution(args)
     tpl_wl, tpl_flux = prepare_template(tpl_wl, tpl_flux,
-                                        resolution=get_resolution(args),
+                                        resolution=resolution,
                                         vsini=args.vsini,
                                         epsilon=args.epsilon)
 
@@ -1914,6 +1917,10 @@ def cmd_batch(args):
 
     apply_bary = not getattr(args, "no_bary", False)
     ncomp = args.components
+    if args.method == "ccf" and ncomp > 1:
+        print(f"Note: the CCF method fits a single peak; --components "
+              f"{ncomp} reduced to 1 (use --method bf for SB2/SB3).\n")
+        ncomp = 1
     rows, profiles = [], []
     for i_file, path in enumerate(files):
         print(f"--- {os.path.basename(path)} ---")
@@ -1954,6 +1961,9 @@ def cmd_batch(args):
                                                            None),
                                            profile=getattr(args, "profile",
                                                            "gauss"),
+                                           inst_fwhm=(C_KMS / resolution
+                                                      if resolution
+                                                      else None),
                                            epsilon=args.epsilon)
             else:
                 result = run_ccf([(wl, fx)], tpl_wl, tpl_flux,
@@ -1961,14 +1971,15 @@ def cmd_batch(args):
                 comps = [dict(rv=result["rv"], rv_err=result["rv_err"])]
 
             vbary, bjd = 0.0, np.nan
+            have_coords = ra_i is not None and dec_i is not None
             if obstime is not None:
                 _, is_jd = parse_time_input(obstime)
                 if is_jd:
                     bjd = float(str(obstime).strip())
-                elif ra_i is not None:
+                elif have_coords:
                     bjd = compute_bjd(obstime, ra_i, dec_i, args.site,
                                       exptime=hdr.get("exptime"))
-                if ra_i is not None:
+                if have_coords:
                     vbary = barycentric_correction(ra_i, dec_i, obstime,
                                                    args.site)
             phase = (orbital_phase(bjd, args.t0, args.period)
@@ -2045,8 +2056,7 @@ def cmd_batch(args):
 
     if profiles:
         stackfile = "result_BF_profiles.png"
-        stack_fig = make_bf_stack_figure(profiles, t0=args.t0,
-                                         period=args.period)
+        stack_fig = make_bf_stack_figure(profiles)
         save_figure(stack_fig, stackfile)
 
     return dict(method="batch", fig=fig, output=outfile, plot=plotfile,
