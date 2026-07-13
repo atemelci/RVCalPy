@@ -20,6 +20,16 @@ Two independent methods in one tool:
    the rotation (vsini), areas the light contributions. Single or double
    Gaussians are fitted to the BF profile.
 
+   Several practices are adopted from the saphires package (Tofflemire;
+   github.com/tofflemire/saphires): multi-order spectra get one BF per
+   echelle order combined with 1/std^2 sideband weights
+   (bf.weight_combine), the BF is smoothed by the instrumental FWHM c/R
+   when the resolution is known (bf.analysis), the noisy BF edges are
+   trimmed before profile fitting (fit_trim), unphysical pixels are
+   interpolated over (utils.prepare cr_trim), and the barycentric
+   correction is applied with the relativistic cross term
+   RV + v_bary + RV*v_bary/c (utils.brvc; Wright & Eastman 2014).
+
 Modes of operation
 ------------------
 1) INTERACTIVE (recommended): run without arguments.
@@ -603,8 +613,9 @@ def orbital_phase(bjd, t0, period):
 
 
 def barycentric_correction(ra_deg, dec_deg, obstime, site):
-    """Barycentric velocity correction [km/s]; ADD it to the measured RV.
-    `obstime` may be an ISOT string or a JD/BJD number."""
+    """Barycentric velocity correction [km/s]; combine it with the
+    measured RV via apply_barycentric. `obstime` may be an ISOT string
+    or a JD/BJD number."""
     from astropy.coordinates import SkyCoord, EarthLocation
     import astropy.units as u
 
@@ -612,6 +623,19 @@ def barycentric_correction(ra_deg, dec_deg, obstime, site):
     coord = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg)
     t, _ = parse_time_input(obstime)
     return coord.radial_velocity_correction(obstime=t, location=loc).to(u.km / u.s).value
+
+
+def apply_barycentric(rv_measured, vbary):
+    """Barycentric-correct a measured RV [km/s]:
+
+        RV = RV_measured + v_bary + RV_measured * v_bary / c
+
+    (Wright & Eastman 2014; the saphires brvc practice and the form
+    recommended by astropy's radial_velocity_correction). The
+    relativistic cross term matters at the ~10 m/s level for
+    |RV| ~ 100 km/s and simple addition is inconsistent for large RVs.
+    """
+    return rv_measured + vbary + rv_measured * vbary / C_KMS
 
 
 def get_target_context(args):
@@ -905,7 +929,8 @@ def prepare_template(tpl_wl, tpl_flux, resolution=None, vsini=None,
 
 
 def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
-               vel_range=400.0, dv=None, svd_rcond=None, smooth_kms=None):
+               vel_range=400.0, dv=None, svd_rcond=None, smooth_kms=None,
+               inst_fwhm=None, verbose=True):
     """Broadening Function following the reference implementation
     (BF_main.txt; Rucinski 1999 via PyAstronomy's pyasl.SVD).
 
@@ -939,7 +964,17 @@ def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
         continuum-dominated ranges and broadened templates then get just
         enough truncation to stay clean. The selection is printed. An
         explicit number is used as-is (0 = never truncate).
-    smooth_kms: smoothing FWHM [km/s]; None -> sigma = 2 bins (reference)
+    smooth_kms: smoothing FWHM [km/s]; None -> the instrumental FWHM
+        c/R when `inst_fwhm` is given (the saphires bf.analysis
+        practice: smoothing below the spectrograph resolution makes no
+        sense), else sigma = 2 bins (reference notebook)
+    inst_fwhm : instrumental FWHM c/R [km/s]; used as the default
+        smoothing width (see smooth_kms)
+    verbose   : print notes/selections (set False for per-order runs)
+
+    Observed pixels with unphysical normalized flux (> 1.2 or < 0:
+    cosmic rays, emission spikes) are interpolated over before the SVD,
+    following the cr_trim step of saphires.utils.prepare.
 
     Returns: dict(velocity, bf, bf_smooth, dv, n_kept_sv, n_sv)
     """
@@ -948,12 +983,22 @@ def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
     spec_wl, spec_flux = spec_wl[good_s], spec_flux[good_s]
     tpl_wl, tpl_flux = tpl_wl[good_t], tpl_flux[good_t]
 
+    bad = (spec_flux > 1.2) | (spec_flux < 0.0)
+    if 0 < bad.sum() < 0.5 * spec_flux.size:
+        spec_flux = spec_flux.copy()
+        spec_flux[bad] = np.interp(spec_wl[bad], spec_wl[~bad],
+                                   spec_flux[~bad])
+        if verbose:
+            print(f"Note: {bad.sum()} unphysical pixel(s) (flux > 1.2 "
+                  "or < 0: cosmics/emission) interpolated over before "
+                  "the SVD.")
+
     wl_min = max(spec_wl.min(), tpl_wl.min())
     wl_max = min(spec_wl.max(), tpl_wl.max())
     if wl_max <= wl_min:
         raise ValueError("The spectrum and template wavelength ranges "
                          "do not overlap.")
-    if wl_max - wl_min > 800.0:
+    if wl_max - wl_min > 800.0 and verbose:
         print(f"Note: BF computed over a {wl_max - wl_min:.0f} A wide "
               "range; a narrower line-rich window (e.g. --wave-min 500 "
               "--wave-max 550) usually gives a cleaner BF.")
@@ -996,7 +1041,16 @@ def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
             return Vt.T @ (winv * (U.T @ rhs))
         velocity = (-np.arange(m) + m // 2) * r * C_KMS
 
-    sigma_pix = (smooth_kms / (2.35482 * dv)) if smooth_kms else 2.0
+    if smooth_kms:
+        sigma_pix = smooth_kms / (2.35482 * dv)
+    elif inst_fwhm:
+        sigma_pix = inst_fwhm / (2.35482 * dv)
+        if verbose:
+            print(f"BF smoothing: instrumental FWHM c/R = "
+                  f"{inst_fwhm:.2f} km/s (saphires practice; "
+                  "use --smooth to override)")
+    else:
+        sigma_pix = 2.0
 
     def bf_quality(b):
         """Noise-to-peak ratio of a candidate BF: smoothed wing noise
@@ -1035,9 +1089,11 @@ def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
         best = next(c for c in cand if c[2] <= tol)
         svd_rcond, bf, ratio = best
         wlimit = svd_rcond * w.max() if svd_rcond > 0 else 0.0
-        print(f"SVD regularization: svd_rcond = {svd_rcond:g} selected "
-              f"automatically (BF noise / peak = {ratio:.3f}, least "
-              "truncation within tolerance); use --svd-rcond to override.")
+        if verbose:
+            print(f"SVD regularization: svd_rcond = {svd_rcond:g} selected "
+                  f"automatically (BF noise / peak = {ratio:.3f}, least "
+                  "truncation within tolerance); use --svd-rcond to "
+                  "override.")
     else:
         wlimit = svd_rcond * w.max() if svd_rcond > 0 else 0.0
         bf = np.ravel(np.asarray(solve(wlimit)))
@@ -1046,10 +1102,11 @@ def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
                 wlimit = rc * w.max()
                 bf = np.ravel(np.asarray(solve(wlimit)))
                 if np.max(np.abs(bf)) <= 10.0:
-                    print(f"Note: BF was unstable at svd_rcond=0 "
-                          f"(continuum-dominated region); "
-                          f"auto-regularized to svd_rcond={rc:g}. "
-                          "Pass --svd-rcond to set it explicitly.")
+                    if verbose:
+                        print(f"Note: BF was unstable at svd_rcond=0 "
+                              f"(continuum-dominated region); "
+                              f"auto-regularized to svd_rcond={rc:g}. "
+                              "Pass --svd-rcond to set it explicitly.")
                     break
     n_sv = m
     n_kept = int((w > wlimit).sum())
@@ -1063,7 +1120,80 @@ def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
                 n_kept_sv=n_kept, n_sv=n_sv)
 
 
-def fit_peak_with_base(velocity, profile, with_offset=False, center=None):
+def compute_bf_orders(orders, tpl_wl, tpl_flux, vel_range=400.0, dv=None,
+                      svd_rcond=None, smooth_kms=None, inst_fwhm=None,
+                      std_perc=0.1):
+    """Multi-order BF following saphires bf.compute + bf.weight_combine:
+    one BF per echelle order on a common velocity grid, combined with
+    weights 1/std^2 where std is the scatter of each order's BF
+    sidebands (the outer `std_perc` fraction of bins at both ends).
+    Noisy or line-poor orders are down-weighted automatically instead
+    of degrading a single merged-spectrum solution.
+
+    A common dv (the finest median velocity pixel over the orders, as
+    saphires' vel_spacing='uniform') and a common window make every
+    order's velocity axis identical, which is what makes the BFs
+    combinable. Orders that fail (no overlap, too short) are skipped.
+
+    Returns the compute_bf dict plus n_orders (number combined).
+    """
+    if dv is None:
+        pixes = []
+        for wl, fx in orders:
+            good = np.isfinite(wl) & np.isfinite(fx)
+            if good.sum() > 10:
+                w = wl[good]
+                pixes.append(np.median(np.diff(w)) / np.median(w) * C_KMS)
+        if not pixes:
+            raise ValueError("No usable order for the BF.")
+        dv = max(min(pixes), 0.5)
+
+    results, failures = [], []
+    for k, (wl, fx) in enumerate(orders):
+        try:
+            r = compute_bf(wl, fx, tpl_wl, tpl_flux, vel_range=vel_range,
+                           dv=dv, svd_rcond=svd_rcond,
+                           smooth_kms=smooth_kms, inst_fwhm=inst_fwhm,
+                           verbose=False)
+            results.append(r)
+        except (ValueError, RuntimeError) as exc:
+            failures.append((k, exc))
+        print(f"  BF order {k + 1}/{len(orders)} done", end="\r")
+    print()
+    if not results:
+        raise RuntimeError(
+            "The BF could not be computed for any order; first failure: "
+            f"{failures[0][1]}" if failures else "no orders given.")
+
+    velocity = results[0]["velocity"]
+    weights = []
+    for r in results:
+        nb = max(int(round(std_perc * velocity.size)), 5)
+        side = np.concatenate([r["bf_smooth"][:nb], r["bf_smooth"][-nb:]])
+        std = float(np.std(side))
+        weights.append(1.0 / max(std, 1e-12) ** 2)
+    weights = np.array(weights)
+    weights /= weights.sum()
+
+    bf = np.sum([w * r["bf"] for w, r in zip(weights, results)], axis=0)
+    bf_smooth = np.sum([w * r["bf_smooth"]
+                        for w, r in zip(weights, results)], axis=0)
+    top = results[int(np.argmax(weights))]
+    print(f"BF combined from {len(results)} order(s), weighted by "
+          "1/std^2 of the BF sidebands (saphires weight_combine); "
+          f"{len(failures)} order(s) skipped.")
+    return dict(velocity=velocity, bf=bf, bf_smooth=bf_smooth, dv=dv,
+                n_kept_sv=top["n_kept_sv"], n_sv=top["n_sv"],
+                n_orders=len(results))
+
+
+# Bins dropped from each edge of a BF before profile fitting; the edges
+# of the SVD solution are noisy (saphires bf.analysis fit_trim default).
+BF_FIT_TRIM = 20
+
+
+def fit_peak_with_base(velocity, profile, with_offset=False, center=None,
+                       fit_trim=0):
     """Reference-notebook peak fit (BF_main_fixed.ipynb): a bounded double
     Gaussian made of a sharp peak plus a broad base component, initial
     guesses taken from the profile maximum (or from `center` when an
@@ -1073,12 +1203,17 @@ def fit_peak_with_base(velocity, profile, with_offset=False, center=None):
     reference: amplitudes >= 0, centres inside the velocity axis,
     1 <= sigma <= 200 km/s for the peak and <= 300 km/s for the base.
     with_offset=True adds a constant baseline term (for CCF profiles,
-    whose baseline is not zero).
+    whose baseline is not zero). fit_trim drops that many bins from
+    each edge of the profile before fitting (saphires practice: the BF
+    edges are noisy).
 
     Returns ([dict(rv, rv_err, amp, sigma) of the sharp component], popt).
     """
     velocity = np.asarray(velocity, dtype=float)
     profile = np.asarray(profile, dtype=float)
+    if fit_trim and velocity.size > 4 * fit_trim:
+        velocity = velocity[fit_trim:-fit_trim]
+        profile = profile[fit_trim:-fit_trim]
     if center is None:
         ipk = int(np.argmax(profile))
     else:
@@ -1128,7 +1263,8 @@ def find_bf_peaks(velocity, bf, n, min_sep):
 
 
 def fit_bf_peaks(velocity, bf, components=1, min_sep=30.0, with_offset=False,
-                 guesses=None, profile="gauss", inst_fwhm=None, epsilon=0.6):
+                 guesses=None, profile="gauss", inst_fwhm=None, epsilon=0.6,
+                 fit_trim=0):
     """Fit the BF/CCF profile following the reference notebook,
     BF-rvplotter and the DDO close-binary series.
 
@@ -1154,11 +1290,18 @@ def fit_bf_peaks(velocity, bf, components=1, min_sep=30.0, with_offset=False,
     with_offset=True adds a constant baseline term (used for CCF
     profiles, whose baseline is not zero); it supports 2 components.
 
+    fit_trim: number of bins dropped from each edge of the profile
+    before the fit — the BF edges are noisy (saphires bf.analysis,
+    default there 20).
+
     Returns: (list of dict(rv, rv_err, amp, sigma, kind) per component,
     model descriptor dict for eval_bf_model).
     """
     velocity = np.asarray(velocity, dtype=float)
     bf = np.asarray(bf, dtype=float)
+    if fit_trim and velocity.size > 4 * fit_trim:
+        velocity = velocity[fit_trim:-fit_trim]
+        bf = bf[fit_trim:-fit_trim]
     if guesses is not None and len(guesses) != components:
         raise ValueError(f"{components} components but {len(guesses)} "
                          "initial guesses given.")
@@ -1327,7 +1470,7 @@ def make_bf_figure(bf_result, comps, popt, bjd=None, phase=None,
     for i, c in enumerate(comps, 1):
         label = f"C{i}: {c['rv']:.2f} km/s"
         if show_bary:
-            label += f"  ({c['rv'] + vbary:.2f} bary)"
+            label += f"  ({apply_barycentric(c['rv'], vbary):.2f} bary)"
         ax.axvline(c["rv"], color="r", ls=":", lw=1)
         ax.annotate(label, (c["rv"], c["amp"]),
                     textcoords="offset points", xytext=(6, 6), color="r")
@@ -1461,7 +1604,7 @@ def cmd_ccf(args):
 
     apply_bary = not getattr(args, "no_bary", False)
     rv_raw, rv_err = result["rv"], result["rv_err"]
-    rv = rv_raw + vbary
+    rv = apply_barycentric(rv_raw, vbary)
     tpl_name = args.template or f"PHOENIX T={args.teff}K"
     lines = ["================ CCF RESULT ================",
              f"Normalized spectrum : {args.spectrum}",
@@ -1531,31 +1674,43 @@ def cmd_ccf(args):
 
 def cmd_bf(args):
     orders = read_spectrum(args.spectrum, args.format)
-    if len(orders) > 1:
-        wl = np.concatenate([w for w, _ in orders])
-        fx = np.concatenate([f for _, f in orders])
-        order_ = np.argsort(wl)
-        spec_wl, spec_flux = wl[order_], fx[order_]
-    else:
-        spec_wl, spec_flux = orders[0]
 
     if args.wave_min or args.wave_max:
         lo = args.wave_min * 10.0 if args.wave_min else -np.inf
         hi = args.wave_max * 10.0 if args.wave_max else np.inf
-        sel = (spec_wl >= lo) & (spec_wl <= hi)
-        spec_wl, spec_flux = spec_wl[sel], spec_flux[sel]
+        orders = [(w[(w >= lo) & (w <= hi)], f[(w >= lo) & (w <= hi)])
+                  for w, f in orders]
+        orders = [(w, f) for w, f in orders if w.size > 10]
+        if not orders:
+            raise ValueError("No data left in the requested wavelength "
+                             "range.")
+
+    wl = np.concatenate([w for w, _ in orders])
+    fx = np.concatenate([f for _, f in orders])
+    order_ = np.argsort(wl)
+    spec_wl, spec_flux = wl[order_], fx[order_]
 
     tpl_wl, tpl_flux = load_template(args)
     resolution = get_resolution(args)
+    inst_fwhm = C_KMS / resolution if resolution else None
     tpl_wl, tpl_flux = prepare_template(tpl_wl, tpl_flux,
                                         resolution=resolution,
                                         vsini=args.vsini,
                                         epsilon=args.epsilon)
 
     print("Solving the BF via SVD...")
-    bf_result = compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
-                           vel_range=args.vel_range, dv=args.dv,
-                           svd_rcond=args.svd_rcond, smooth_kms=args.smooth)
+    if len(orders) > 1:
+        bf_result = compute_bf_orders(orders, tpl_wl, tpl_flux,
+                                      vel_range=args.vel_range, dv=args.dv,
+                                      svd_rcond=args.svd_rcond,
+                                      smooth_kms=args.smooth,
+                                      inst_fwhm=inst_fwhm)
+    else:
+        bf_result = compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
+                               vel_range=args.vel_range, dv=args.dv,
+                               svd_rcond=args.svd_rcond,
+                               smooth_kms=args.smooth,
+                               inst_fwhm=inst_fwhm)
     print(f"  velocity step dv = {bf_result['dv']:.3f} km/s, "
           f"singular values kept: {bf_result['n_kept_sv']}/{bf_result['n_sv']}")
 
@@ -1564,9 +1719,9 @@ def cmd_bf(args):
                                min_sep=args.min_sep,
                                guesses=getattr(args, "guess", None),
                                profile=getattr(args, "profile", "gauss"),
-                               inst_fwhm=(C_KMS / resolution
-                                          if resolution else None),
-                               epsilon=args.epsilon)
+                               inst_fwhm=inst_fwhm,
+                               epsilon=args.epsilon,
+                               fit_trim=BF_FIT_TRIM)
 
     ctx = get_target_context(args)
     vbary, bjd, phase = ctx["vbary"], ctx["bjd"], ctx["phase"]
@@ -1602,7 +1757,8 @@ def cmd_bf(args):
                          f"   (amp={c['amp']:.4f}, "
                          f"{wname}={c['sigma']:.2f} km/s)")
             lines.append(f"             RV (barycentric corrected) = "
-                         f"{c['rv'] + vbary:.4f} ± {c['rv_err']:.4f} km/s")
+                         f"{apply_barycentric(c['rv'], vbary):.4f} "
+                         f"± {c['rv_err']:.4f} km/s")
         else:
             lines.append(f"Component {i}: RV = {c['rv']:.4f} "
                          f"± {c['rv_err']:.4f} km/s"
@@ -1647,7 +1803,8 @@ def cmd_bf(args):
                     "bary_corr[km/s]\n")
             for i, c in enumerate(comps, 1):
                 f.write(f"{i}  {c['rv']:.5f}  {c['rv_err']:.5f}  "
-                        f"{c['rv'] + vbary:.5f}  {c['rv_err']:.5f}  "
+                        f"{apply_barycentric(c['rv'], vbary):.5f}  "
+                        f"{c['rv_err']:.5f}  "
                         f"{c['amp']:.5f}  {c['sigma']:.5f}  {vbary:.5f}\n")
         else:
             f.write(f"# v_bary [km/s] = {vbary:.5f}  "
@@ -1872,6 +2029,7 @@ def cmd_batch(args):
 
     tpl_wl, tpl_flux = load_template(args)
     resolution = get_resolution(args)
+    inst_fwhm = C_KMS / resolution if resolution else None
     tpl_wl, tpl_flux = prepare_template(tpl_wl, tpl_flux,
                                         resolution=resolution,
                                         vsini=args.vsini,
@@ -1929,17 +2087,21 @@ def cmd_batch(args):
                 wl, fx, _ = normalize_spectrum_file(
                     path, args.format, poly_order=args.poly_order,
                     iterations=args.iterations)
+                orders = [(wl, fx)]
             else:
                 orders = read_spectrum(path, args.format)
-                wl = np.concatenate([w for w, _ in orders])
-                fx = np.concatenate([f for _, f in orders])
-                srt = np.argsort(wl)
-                wl, fx = wl[srt], fx[srt]
             if args.wave_min or args.wave_max:
                 lo = args.wave_min * 10.0 if args.wave_min else -np.inf
                 hi = args.wave_max * 10.0 if args.wave_max else np.inf
-                sel = (wl >= lo) & (wl <= hi)
-                wl, fx = wl[sel], fx[sel]
+                orders = [(w[(w >= lo) & (w <= hi)],
+                           f[(w >= lo) & (w <= hi)]) for w, f in orders]
+                orders = [(w, f) for w, f in orders if w.size > 10]
+                if not orders:
+                    raise ValueError("no data in the wavelength range")
+            wl = np.concatenate([w for w, _ in orders])
+            fx = np.concatenate([f for _, f in orders])
+            srt = np.argsort(wl)
+            wl, fx = wl[srt], fx[srt]
 
             hdr = fits_header_info(path)
             obstime = (args.bjd[i_file] if args.bjd
@@ -1949,10 +2111,20 @@ def cmd_batch(args):
 
             popt = None
             if args.method == "bf":
-                bf_result = compute_bf(wl, fx, tpl_wl, tpl_flux,
-                                       vel_range=args.vel_range, dv=args.dv,
-                                       svd_rcond=args.svd_rcond,
-                                       smooth_kms=args.smooth)
+                if len(orders) > 1:
+                    bf_result = compute_bf_orders(
+                        orders, tpl_wl, tpl_flux,
+                        vel_range=args.vel_range, dv=args.dv,
+                        svd_rcond=args.svd_rcond,
+                        smooth_kms=args.smooth, inst_fwhm=inst_fwhm)
+                else:
+                    bf_result = compute_bf(wl, fx, tpl_wl, tpl_flux,
+                                           vel_range=args.vel_range,
+                                           dv=args.dv,
+                                           svd_rcond=args.svd_rcond,
+                                           smooth_kms=args.smooth,
+                                           inst_fwhm=inst_fwhm,
+                                           verbose=False)
                 comps, popt = fit_bf_peaks(bf_result["velocity"],
                                            bf_result["bf_smooth"],
                                            components=ncomp,
@@ -1961,10 +2133,9 @@ def cmd_batch(args):
                                                            None),
                                            profile=getattr(args, "profile",
                                                            "gauss"),
-                                           inst_fwhm=(C_KMS / resolution
-                                                      if resolution
-                                                      else None),
-                                           epsilon=args.epsilon)
+                                           inst_fwhm=inst_fwhm,
+                                           epsilon=args.epsilon,
+                                           fit_trim=BF_FIT_TRIM)
             else:
                 result = run_ccf([(wl, fx)], tpl_wl, tpl_flux,
                                  args.rv_min, args.rv_max, args.rv_step)
@@ -1996,7 +2167,8 @@ def cmd_batch(args):
             vb_used = vbary if apply_bary else 0.0
             rows.append(dict(file=os.path.basename(path), bjd=bjd,
                              phase=phase,
-                             rv=[c["rv"] + vb_used for c in comps],
+                             rv=[apply_barycentric(c["rv"], vb_used)
+                                 for c in comps],
                              rv_raw=[c["rv"] for c in comps],
                              rv_err=[c["rv_err"] for c in comps],
                              vbary=vbary))
@@ -2007,7 +2179,8 @@ def cmd_batch(args):
                     bf=bf_result["bf_smooth"],
                     fit=eval_bf_model(bf_result["velocity"], popt),
                     bjd=bjd, phase=phase))
-            msg = ", ".join(f"RV{j + 1} = {c['rv'] + vb_used:8.3f} "
+            msg = ", ".join(f"RV{j + 1} = "
+                            f"{apply_barycentric(c['rv'], vb_used):8.3f} "
                             f"± {c['rv_err']:.3f}"
                             for j, c in enumerate(comps))
             ph_txt = f"  phase = {phase:.4f}" if phase is not None else ""
@@ -2038,7 +2211,7 @@ def cmd_batch(args):
             if apply_bary:
                 vals = "  ".join(
                     f"{r['rv_raw'][j]:.5f}  {r['rv_err'][j]:.5f}  "
-                    f"{r['rv_raw'][j] + r['vbary']:.5f}  "
+                    f"{r['rv'][j]:.5f}  "
                     f"{r['rv_err'][j]:.5f}"
                     for j in range(len(r["rv"])))
             else:
@@ -2152,7 +2325,8 @@ def cmd_demo(args):
     bf_result = compute_bf(wl, obs, wl, tpl, vel_range=300.0, dv=2.0,
                            svd_rcond=5e-4, smooth_kms=10.0)
     comps, popt = fit_bf_peaks(bf_result["velocity"], bf_result["bf_smooth"],
-                               components=2, min_sep=50.0)
+                               components=2, min_sep=50.0,
+                               fit_trim=BF_FIT_TRIM)
     for i, c in enumerate(comps, 1):
         print(f"  Component {i}: RV = {c['rv']:8.3f} ± {c['rv_err']:.3f} km/s")
 
@@ -3046,8 +3220,10 @@ def main():
                            "truncation) that keeps the BF wing noise "
                            "below a tenth of the peak")
     p_bf.add_argument("--smooth", type=float,
-                      help="BF smoothing FWHM [km/s] "
-                           "(default: sigma = 2 bins, as the reference)")
+                      help="BF smoothing FWHM [km/s] (default: the "
+                           "instrumental FWHM c/R when a resolution/"
+                           "spectrograph is given — saphires practice — "
+                           "else sigma = 2 bins, as the reference)")
     p_bf.add_argument("--components", type=int, default=1,
                       choices=[1, 2, 3],
                       help="Number of stellar components to fit: SB1=1, "
@@ -3131,7 +3307,9 @@ def main():
                          help="BF relative SVD cutoff (default: "
                               "automatic)")
     p_batch.add_argument("--smooth", type=float,
-                         help="BF smoothing FWHM [km/s]")
+                         help="BF smoothing FWHM [km/s] (default: the "
+                              "instrumental FWHM c/R when a resolution "
+                              "is given, else sigma = 2 bins)")
     p_batch.add_argument("--components", type=int, default=2,
                          choices=[1, 2, 3],
                          help="Components to fit (default: 2)")
