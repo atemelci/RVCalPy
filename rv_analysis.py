@@ -502,30 +502,10 @@ def hjd_to_bjd(hjd, ra_deg, dec_deg, scale="utc"):
     return float((t_geo.tdb + ltt_bary).jd)
 
 
-def normalize_continuum(wl, flux, poly_order=3, iterations=10,
-                        low_clip=1.0, high_clip=4.0):
-    """Iterative continuum normalization of a raw spectrum (FEROS-style).
-
-    The defaults (polynomial order 3, 10 clipping iterations) are tuned
-    for the 500-550 nm region typically used for RV work: over such a
-    narrow window the continuum is smooth, so a low-order polynomial
-    avoids over-fitting broad features while the extra iterations let the
-    clipping converge. Both values remain user-adjustable.
-
-    'All FEROS spectra were normalised to the continuum level iteratively':
-    a polynomial is fitted to the spectrum, then points lying more than
-    low_clip*sigma BELOW the fit (absorption lines) or high_clip*sigma
-    above it (cosmics/emission) are rejected and the fit is repeated, so
-    the polynomial converges onto the upper envelope — the continuum.
-    The interactive comparison with a synthetic spectrum happens in the
-    widget / normalize command, where the result is overplotted on the
-    template so the user can tune poly_order and re-run.
-
-    Returns (normalized_flux, continuum). Pixels where the continuum is
-    not positive come back as NaN.
-    """
-    wl = np.asarray(wl, dtype=float)
-    flux = np.asarray(flux, dtype=float)
+def _fit_continuum_single(wl, flux, poly_order, iterations,
+                          low_clip, high_clip):
+    """One iterative-clipping polynomial continuum fit over a segment;
+    returns the continuum evaluated on every pixel."""
     good = np.isfinite(wl) & np.isfinite(flux) & (flux > 0)
     if good.sum() < poly_order + 2:
         raise ValueError("Too few valid pixels for continuum fitting.")
@@ -544,6 +524,71 @@ def normalize_continuum(wl, flux, poly_order=3, iterations=10,
         if new_mask.sum() < poly_order + 2 or np.array_equal(new_mask, mask):
             break
         mask = new_mask
+    return cont
+
+
+def normalize_continuum(wl, flux, poly_order=3, iterations=10,
+                        low_clip=1.0, high_clip=4.0, window=200.0):
+    """Iterative continuum normalization of a raw spectrum (FEROS-style).
+
+    The defaults (polynomial order 3, 10 clipping iterations) are tuned
+    for the 500-550 nm region typically used for RV work: over such a
+    narrow window the continuum is smooth, so a low-order polynomial
+    avoids over-fitting broad features while the extra iterations let the
+    clipping converge. Both values remain user-adjustable.
+
+    'All FEROS spectra were normalised to the continuum level iteratively':
+    a polynomial is fitted to the spectrum, then points lying more than
+    low_clip*sigma BELOW the fit (absorption lines) or high_clip*sigma
+    above it (cosmics/emission) are rejected and the fit is repeated, so
+    the polynomial converges onto the upper envelope — the continuum.
+    The interactive comparison with a synthetic spectrum happens in the
+    widget / normalize command, where the result is overplotted on the
+    template so the user can tune poly_order and re-run.
+
+    window : continuum window width [Angstrom]. A single low-order
+        polynomial can only follow the continuum over a limited range,
+        so segments wider than 1.5x this value are normalized piecewise:
+        the same iterative fit runs in 50%-overlapping windows and the
+        continua are blended with triangular weights. This matches the
+        common practice for wide wavelength ranges (saphires
+        utils.cont_norm uses a spline with w_width = 200 A; IRAF's
+        continuum task fits piecewise splines). Echelle orders narrower
+        than ~300 A keep the classic single fit. None/0 forces a single
+        fit regardless of width.
+
+    Returns (normalized_flux, continuum). Pixels where the continuum is
+    not positive come back as NaN.
+    """
+    wl = np.asarray(wl, dtype=float)
+    flux = np.asarray(flux, dtype=float)
+
+    span = np.nanmax(wl) - np.nanmin(wl)
+    if window and span > 1.5 * window:
+        half = window / 2.0
+        cont_sum = np.zeros(wl.size)
+        wgt_sum = np.zeros(wl.size)
+        for lo in np.arange(np.nanmin(wl), np.nanmax(wl), half):
+            m = (wl >= lo) & (wl <= lo + window)
+            if m.sum() < max(poly_order + 2, 20):
+                continue
+            try:
+                c = _fit_continuum_single(wl[m], flux[m], poly_order,
+                                          iterations, low_clip, high_clip)
+            except ValueError:
+                continue
+            center = lo + half
+            wgt = np.maximum(1.0 - np.abs(wl[m] - center) / half, 1e-3)
+            cont_sum[m] += wgt * c
+            wgt_sum[m] += wgt
+        if not np.any(wgt_sum > 0):
+            raise ValueError("Too few valid pixels for continuum fitting.")
+        cont = np.full(wl.size, np.nan)
+        covered = wgt_sum > 0
+        cont[covered] = cont_sum[covered] / wgt_sum[covered]
+    else:
+        cont = _fit_continuum_single(wl, flux, poly_order, iterations,
+                                     low_clip, high_clip)
 
     with np.errstate(divide="ignore", invalid="ignore"):
         norm = np.where(cont > 0, flux / cont, np.nan)
@@ -551,7 +596,7 @@ def normalize_continuum(wl, flux, poly_order=3, iterations=10,
 
 
 def normalize_spectrum_file(path, fmt="auto", poly_order=3, iterations=10,
-                            low_clip=1.0, high_clip=4.0):
+                            low_clip=1.0, high_clip=4.0, window=200.0):
     """Normalize a raw spectrum file order by order and merge.
 
     Returns (wl, norm_flux, orders_raw) where orders_raw is the list of
@@ -565,7 +610,7 @@ def normalize_spectrum_file(path, fmt="auto", poly_order=3, iterations=10,
         if wl.size < poly_order + 2:
             continue
         nf, cont = normalize_continuum(wl, fx, poly_order, iterations,
-                                       low_clip, high_clip)
+                                       low_clip, high_clip, window=window)
         keep = np.isfinite(nf)
         normed.append((wl[keep], nf[keep]))
         diag.append((wl, fx, cont))
@@ -1889,12 +1934,14 @@ def make_norm_figure(diag, wl, nf, tpl=None):
 def cmd_normalize(args):
     """Normalize a raw spectrum to the continuum and write an ASCII file
     that can be fed directly into the CCF/BF analysis."""
+    window_a = args.window * 10.0 if getattr(args, "window", None) else None
     print(f"Normalizing {args.spectrum} "
-          f"(poly order {args.poly_order}, {args.iterations} iterations)...")
+          f"(poly order {args.poly_order}, {args.iterations} iterations"
+          + (f", {args.window:g} nm windows" if window_a else "") + ")...")
     wl, nf, diag = normalize_spectrum_file(
         args.spectrum, args.format, poly_order=args.poly_order,
         iterations=args.iterations, low_clip=args.low_clip,
-        high_clip=args.high_clip)
+        high_clip=args.high_clip, window=window_a)
 
     tpl = None
     if args.template or args.teff is not None:
@@ -2103,7 +2150,9 @@ def cmd_batch(args):
             if args.normalize:
                 wl, fx, _ = normalize_spectrum_file(
                     path, args.format, poly_order=args.poly_order,
-                    iterations=args.iterations)
+                    iterations=args.iterations,
+                    window=(args.window * 10.0
+                            if getattr(args, "window", None) else None))
                 orders = [(wl, fx)]
             else:
                 orders = read_spectrum(path, args.format)
@@ -2415,7 +2464,8 @@ def make_args(**overrides):
                 components=1, min_sep=30.0, guess=None, profile="gauss",
                 gamma=None,
                 spectrograph=None, resolution=None, vsini=None, epsilon=0.6,
-                poly_order=3, iterations=10, low_clip=1.0, high_clip=4.0)
+                poly_order=3, iterations=10, low_clip=1.0, high_clip=4.0,
+                window=20.0)
     base.update(overrides)
     return argparse.Namespace(**base)
 
@@ -3299,6 +3349,10 @@ def main():
                          help="Continuum polynomial order (with --normalize)")
     p_batch.add_argument("--iterations", type=int, default=10,
                          help="Clipping iterations (with --normalize)")
+    p_batch.add_argument("--window", type=float, default=20.0,
+                         help="Continuum window width [nm] (with "
+                              "--normalize); wide segments are normalized "
+                              "piecewise (default 20 nm = 200 A)")
     p_batch.add_argument("--object", help="Star name for SIMBAD coordinates")
     p_batch.add_argument("--ra", type=float, help="RA [deg]")
     p_batch.add_argument("--dec", type=float, help="Dec [deg]")
@@ -3391,6 +3445,13 @@ def main():
                         help="Rejection threshold below the fit [sigma]")
     p_norm.add_argument("--high-clip", type=float, default=4.0,
                         help="Rejection threshold above the fit [sigma]")
+    p_norm.add_argument("--window", type=float, default=20.0,
+                        help="Continuum window width [nm]; segments wider "
+                             "than 1.5x this are normalized piecewise with "
+                             "blended overlapping windows (saphires "
+                             "cont_norm w_width practice, default 20 nm = "
+                             "200 A). 0 = single polynomial over the whole "
+                             "segment")
     p_norm.add_argument("--template",
                         help="Synthetic spectrum to overlay for comparison")
     p_norm.add_argument("--spectrograph",
