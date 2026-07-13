@@ -235,8 +235,10 @@ def read_fits_spectrum(path):
       - ESPRESSO S2D (flux ext=1, wavelength ext=4, 2D echelle orders)
       - phase-3 style binary tables with WAVE/LAMBDA and FLUX columns
         (FEROS, HARPS, UVES, ...)
-      - simple 1D image HDU with a linear wavelength WCS (CRVAL1/CDELT1),
-        the classic IRAF product
+      - 1D image HDUs with a linear wavelength WCS (CRVAL1/CDELT1): the
+        classic IRAF product, and multi-extension echelle products that
+        carry one order per extension (e.g. SALT HRS pipeline files) —
+        every such HDU becomes one order
     Returns a list of (wavelength, flux) pairs (one per echelle order).
     """
     from astropy.io import fits
@@ -263,6 +265,7 @@ def read_fits_spectrum(path):
                 fx = np.ravel(np.asarray(hdu.data[fname], dtype=float))
                 order = np.argsort(wl)
                 return [(wl[order], fx[order])]
+        wcs_orders = []
         for hdu in hdul:
             if hdu.data is None:
                 continue
@@ -273,7 +276,9 @@ def read_fits_spectrum(path):
                 if cdelt:
                     crpix = h.get("CRPIX1", 1.0)
                     wl = h["CRVAL1"] + (np.arange(data.size) + 1 - crpix) * cdelt
-                    return [(wl, data)]
+                    wcs_orders.append((wl, data))
+        if wcs_orders:
+            return wcs_orders
         for hdu in hdul:
             if hdu.data is None:
                 continue
@@ -573,8 +578,20 @@ def normalize_spectrum_file(path, fmt="auto", poly_order=3, iterations=10,
 
 
 def load_template(args):
-    """Load the synthetic/template spectrum from file or via expecto/PHOENIX."""
+    """Load the synthetic/template spectrum from file or via expecto/PHOENIX.
+
+    ASCII files (.prf/.obs/...) and FITS templates (e.g. an observed
+    standard used as template, saphires-style) are both accepted;
+    multi-order FITS templates are merged. The template must be
+    continuum-normalized, like the observed spectrum.
+    """
     if args.template:
+        if str(args.template).lower().endswith((".fits", ".fit", ".fits.gz")):
+            orders = read_fits_spectrum(args.template)
+            wl = np.concatenate([w for w, _ in orders])
+            fx = np.concatenate([f for _, f in orders])
+            srt = np.argsort(wl)
+            return wl[srt], fx[srt]
         return read_ascii_spectrum(args.template)
     if args.teff is not None:
         try:
