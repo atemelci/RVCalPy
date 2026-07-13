@@ -353,7 +353,28 @@ def fits_header_info(path):
             break
     info["object"] = h.get("OBJECT")
     info["obstime"] = h.get("DATE-OBS") or h.get("DATE_OBS")
-    info["exptime"] = h.get("EXPTIME")
+    if info["obstime"] and ":" not in str(info["obstime"]) \
+            and "T" not in str(info["obstime"]):
+        # old-standard date-only DATE-OBS ('16/10/98'): the UT time of
+        # day lives in a separate card (UTMIDDLE is already
+        # mid-exposure; plain UT is usually shutter-open)
+        for key in ("UTMIDDLE", "UT", "UTC-OBS", "UT-OBS", "TIME-OBS",
+                    "UTSHUT"):
+            ut = h.get(key)
+            if ut in (None, ""):
+                continue
+            if isinstance(ut, (int, float)):     # decimal hours
+                hh = int(ut) % 24
+                mm = int((ut % 1) * 60)
+                ss = ((ut % 1) * 60 % 1) * 60
+                ut = f"{hh:02d}:{mm:02d}:{ss:06.3f}"
+            if ":" in str(ut):
+                info["obstime"] = f"{info['obstime']} {ut}"
+                if key == "UTMIDDLE":
+                    info["exptime"] = 0.0    # already mid-exposure
+                break
+    info["exptime"] = h.get("EXPTIME") if info["exptime"] is None \
+        else info["exptime"]
     ra, dec = h.get("RA"), h.get("DEC")
     try:
         if isinstance(ra, (int, float)) and isinstance(dec, (int, float)):
@@ -653,19 +674,44 @@ def load_template(args):
 
 def parse_time_input(value):
     """Observation time as an astropy Time: accepts an ISOT string
-    ('2024-12-03T02:30:00') or a JD/BJD number ('2453254.847090365').
+    ('2024-12-03T02:30:00'), an ISO date with or without time
+    ('1998-10-16', '1998-10-16 20:07:42'), an old-standard FITS date
+    'DD/MM/YY' ('16/10/98', optionally followed by a UT time; years
+    >= 50 are taken as 19xx) or a JD/BJD number ('2453254.847090365').
 
     A numeric value is treated as a BJD and, by definition of the BJD,
-    carried on the TDB scale: Time(bjd, scale='tdb', format='jd'). An
-    ISOT calendar stamp is a clock reading and stays on the UTC scale.
+    carried on the TDB scale: Time(bjd, scale='tdb', format='jd'). A
+    calendar stamp is a clock reading and stays on the UTC scale.
     """
+    import re
     from astropy.time import Time
     s = str(value).strip()
     try:
         jd = float(s)
     except ValueError:
+        pass
+    else:
+        return Time(jd, format="jd", scale="tdb"), True
+    m = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{2,4})(?:[T\s]+(.+))?$", s)
+    if m:
+        day, mon, year = (int(m.group(g)) for g in (1, 2, 3))
+        if year < 100:
+            year += 1900 if year >= 50 else 2000
+        s = f"{year:04d}-{mon:02d}-{day:02d}"
+        if m.group(4):
+            s += f" {m.group(4).strip()}"
+    try:
+        return Time(s.replace("T", " "), format="iso", scale="utc"), False
+    except ValueError:
+        pass
+    try:
         return Time(s, format="isot", scale="utc"), False
-    return Time(jd, format="jd", scale="tdb"), True
+    except ValueError as exc:
+        raise ValueError(
+            f"Unrecognized observation time '{value}'. Accepted: ISOT "
+            "(2024-12-03T02:30:00), ISO date [+ time] (1998-10-16 "
+            "20:07:42), old FITS date DD/MM/YY (16/10/98 [+ UT time]), "
+            "or a JD/BJD number.") from exc
 
 
 def orbital_phase(bjd, t0, period):
@@ -1643,6 +1689,22 @@ def line_check(spec_wl, spec_flux, tpl_wl, tpl_flux, comps,
     return fig, stats
 
 
+def save_payload(payload):
+    """Write the result text file and figure(s) of an analysis payload
+    (cmd_ccf / cmd_bf). Separated from the analysis itself so the GUI
+    can run first and write only when the Save button is pressed; the
+    CLI saves immediately after the run as before.
+
+    Returns the list of files written."""
+    with open(payload["output"], "w") as f:
+        f.write(payload["file_text"])
+    print(f"Results written: {payload['output']}")
+    for fig, name in payload["figs"]:
+        save_figure(fig, name)
+    payload["saved"] = True
+    return [payload["output"]] + [name for _, name in payload["figs"]]
+
+
 def cmd_ccf(args):
     orders = read_spectrum(args.spectrum, args.format)
     tpl_wl, tpl_flux = load_template(args)
@@ -1690,48 +1752,50 @@ def cmd_ccf(args):
     print("\n" + summary)
 
     outfile = args.output or "result_CCF.txt"
-    with open(outfile, "w") as f:
-        f.write(f"# Normalized spectrum : {args.spectrum}\n")
-        f.write(f"# Synthetic template  : {tpl_name}\n")
-        f.write("# barycentric correction applied: "
-                + ("yes" if apply_bary else "no") + "\n")
-        if apply_bary:
-            f.write("# method  BJD  phase  RV_raw[km/s]  RV_raw_err[km/s]  "
-                    "RV_bary[km/s]  RV_bary_err[km/s]  bary_corr[km/s]\n")
-            f.write(f"CCF  {bjd if bjd is not None else 'nan'}  "
-                    f"{f'{phase:.5f}' if phase is not None else 'nan'}  "
-                    f"{rv_raw:.5f}  {rv_err:.5f}  "
-                    f"{rv:.5f}  {rv_err:.5f}  {vbary:.5f}\n")
-        else:
-            f.write(f"# v_bary [km/s] = {vbary:.5f}  "
-                    "(computed for information only; NOT applied)\n")
-            f.write("# method  BJD  phase  RV[km/s]  RV_err[km/s]\n")
-            f.write(f"CCF  {bjd if bjd is not None else 'nan'}  "
-                    f"{f'{phase:.5f}' if phase is not None else 'nan'}  "
-                    f"{rv_raw:.5f}  {rv_err:.5f}\n")
-    print(f"Results written: {outfile}")
+    flines = [f"# Normalized spectrum : {args.spectrum}\n",
+              f"# Synthetic template  : {tpl_name}\n",
+              "# barycentric correction applied: "
+              + ("yes" if apply_bary else "no") + "\n"]
+    if apply_bary:
+        flines.append("# method  BJD  phase  RV_raw[km/s]  RV_raw_err[km/s]  "
+                      "RV_bary[km/s]  RV_bary_err[km/s]  bary_corr[km/s]\n")
+        flines.append(f"CCF  {bjd if bjd is not None else 'nan'}  "
+                      f"{f'{phase:.5f}' if phase is not None else 'nan'}  "
+                      f"{rv_raw:.5f}  {rv_err:.5f}  "
+                      f"{rv:.5f}  {rv_err:.5f}  {vbary:.5f}\n")
+    else:
+        flines.append(f"# v_bary [km/s] = {vbary:.5f}  "
+                      "(computed for information only; NOT applied)\n")
+        flines.append("# method  BJD  phase  RV[km/s]  RV_err[km/s]\n")
+        flines.append(f"CCF  {bjd if bjd is not None else 'nan'}  "
+                      f"{f'{phase:.5f}' if phase is not None else 'nan'}  "
+                      f"{rv_raw:.5f}  {rv_err:.5f}\n")
 
     plotfile = args.plot or "result_CCF.png"
     fig = make_ccf_figure(result)
-    save_figure(fig, plotfile)
 
     mwl = np.concatenate([w for w, _ in orders])
     mfx = np.concatenate([f for _, f in orders])
     srt = np.argsort(mwl)
     check_fig, stats = line_check(mwl[srt], mfx[srt], tpl_wl, tpl_flux,
                                   [dict(rv=result["rv"])], method="CCF")
-    save_figure(check_fig, "result_CCF_linecheck.png")
     print("Line check (observed vs model):")
-    with open(outfile, "a") as f:
-        f.write("# line_check: line  RMS  corr  depth_obs/model\n")
-        for s in stats:
-            print(f"  {s['name']:<12} RMS = {s['rms']:.4f}  "
-                  f"r = {s['corr']:.3f}  depth O/M = {s['depth_ratio']:.3f}")
-            f.write(f"# {s['name']}  {s['rms']:.5f}  {s['corr']:.4f}  "
-                    f"{s['depth_ratio']:.4f}\n")
+    flines.append("# line_check: line  RMS  corr  depth_obs/model\n")
+    for s in stats:
+        print(f"  {s['name']:<12} RMS = {s['rms']:.4f}  "
+              f"r = {s['corr']:.3f}  depth O/M = {s['depth_ratio']:.3f}")
+        flines.append(f"# {s['name']}  {s['rms']:.5f}  {s['corr']:.4f}  "
+                      f"{s['depth_ratio']:.4f}\n")
 
-    return dict(method="CCF", fig=fig, text=summary,
-                output=outfile, plot=plotfile)
+    payload = dict(method="CCF", fig=fig, text=summary,
+                   output=outfile, plot=plotfile,
+                   file_text="".join(flines),
+                   figs=[(fig, plotfile),
+                         (check_fig, "result_CCF_linecheck.png")],
+                   saved=False)
+    if not getattr(args, "no_save", False):
+        save_payload(payload)
+    return payload
 
 
 def cmd_bf(args):
@@ -1845,59 +1909,61 @@ def cmd_bf(args):
     print("\n" + summary)
 
     outfile = args.output or "result_BF.txt"
-    with open(outfile, "w") as f:
-        f.write(f"# Normalized spectrum : {args.spectrum}\n")
-        f.write(f"# Synthetic template  : {tpl_name}\n")
-        if bjd is not None:
-            f.write(f"# BJD = {bjd:.6f}"
-                    + (f"   phase = {phase:.5f}" if phase is not None else "")
-                    + "\n")
-        f.write("# barycentric correction applied: "
-                + ("yes" if apply_bary else "no") + "\n")
-        if getattr(args, "profile", "gauss") == "rot":
-            f.write("# fit profile: rotational (Gray 1992); the sigma "
-                    "column is vsini [km/s]\n")
-        if label_note:
-            f.write(f"# {label_note}\n")
-        if apply_bary:
-            f.write("# component  RV_raw[km/s]  RV_raw_err[km/s]  "
-                    "RV_bary[km/s]  RV_bary_err[km/s]  amp  sigma[km/s]  "
-                    "bary_corr[km/s]\n")
-            for i, c in enumerate(comps, 1):
-                f.write(f"{i}  {c['rv']:.5f}  {c['rv_err']:.5f}  "
-                        f"{apply_barycentric(c['rv'], vbary):.5f}  "
-                        f"{c['rv_err']:.5f}  "
-                        f"{c['amp']:.5f}  {c['sigma']:.5f}  {vbary:.5f}\n")
-        else:
-            f.write(f"# v_bary [km/s] = {vbary:.5f}  "
-                    "(computed for information only; NOT applied)\n")
-            f.write("# component  RV[km/s]  RV_err[km/s]  amp  "
-                    "sigma[km/s]\n")
-            for i, c in enumerate(comps, 1):
-                f.write(f"{i}  {c['rv']:.5f}  {c['rv_err']:.5f}  "
-                        f"{c['amp']:.5f}  {c['sigma']:.5f}\n")
-    print(f"Results written: {outfile}")
+    flines = [f"# Normalized spectrum : {args.spectrum}\n",
+              f"# Synthetic template  : {tpl_name}\n"]
+    if bjd is not None:
+        flines.append(f"# BJD = {bjd:.6f}"
+                      + (f"   phase = {phase:.5f}" if phase is not None
+                         else "") + "\n")
+    flines.append("# barycentric correction applied: "
+                  + ("yes" if apply_bary else "no") + "\n")
+    if getattr(args, "profile", "gauss") == "rot":
+        flines.append("# fit profile: rotational (Gray 1992); the sigma "
+                      "column is vsini [km/s]\n")
+    if label_note:
+        flines.append(f"# {label_note}\n")
+    if apply_bary:
+        flines.append("# component  RV_raw[km/s]  RV_raw_err[km/s]  "
+                      "RV_bary[km/s]  RV_bary_err[km/s]  amp  sigma[km/s]  "
+                      "bary_corr[km/s]\n")
+        for i, c in enumerate(comps, 1):
+            flines.append(f"{i}  {c['rv']:.5f}  {c['rv_err']:.5f}  "
+                          f"{apply_barycentric(c['rv'], vbary):.5f}  "
+                          f"{c['rv_err']:.5f}  "
+                          f"{c['amp']:.5f}  {c['sigma']:.5f}  {vbary:.5f}\n")
+    else:
+        flines.append(f"# v_bary [km/s] = {vbary:.5f}  "
+                      "(computed for information only; NOT applied)\n")
+        flines.append("# component  RV[km/s]  RV_err[km/s]  amp  "
+                      "sigma[km/s]\n")
+        for i, c in enumerate(comps, 1):
+            flines.append(f"{i}  {c['rv']:.5f}  {c['rv_err']:.5f}  "
+                          f"{c['amp']:.5f}  {c['sigma']:.5f}\n")
 
     plotfile = args.plot or "result_BF.png"
     fig = make_bf_figure(bf_result, comps, popt,
                          bjd=bjd, phase=phase, vbary=vbary,
                          bary_applied=apply_bary)
-    save_figure(fig, plotfile)
 
     check_fig, stats = line_check(spec_wl, spec_flux, tpl_wl, tpl_flux,
                                   comps, method="BF")
-    save_figure(check_fig, "result_BF_linecheck.png")
     print("Line check (observed vs model):")
-    with open(outfile, "a") as f:
-        f.write("# line_check: line  RMS  corr  depth_obs/model\n")
-        for s in stats:
-            print(f"  {s['name']:<12} RMS = {s['rms']:.4f}  "
-                  f"r = {s['corr']:.3f}  depth O/M = {s['depth_ratio']:.3f}")
-            f.write(f"# {s['name']}  {s['rms']:.5f}  {s['corr']:.4f}  "
-                    f"{s['depth_ratio']:.4f}\n")
+    flines.append("# line_check: line  RMS  corr  depth_obs/model\n")
+    for s in stats:
+        print(f"  {s['name']:<12} RMS = {s['rms']:.4f}  "
+              f"r = {s['corr']:.3f}  depth O/M = {s['depth_ratio']:.3f}")
+        flines.append(f"# {s['name']}  {s['rms']:.5f}  {s['corr']:.4f}  "
+                      f"{s['depth_ratio']:.4f}\n")
 
-    return dict(method="BF", fig=fig, text=summary,
-                output=outfile, plot=plotfile)
+    payload = dict(method="BF", fig=fig, text=summary,
+                   output=outfile, plot=plotfile,
+                   file_text="".join(flines),
+                   figs=[(fig, plotfile),
+                         (check_fig, "result_BF_linecheck.png")],
+                   saved=False)
+    if not getattr(args, "no_save", False):
+        save_payload(payload)
+    return payload
 
 
 def make_norm_figure(diag, wl, nf, tpl=None):
@@ -2465,7 +2531,7 @@ def make_args(**overrides):
                 gamma=None,
                 spectrograph=None, resolution=None, vsini=None, epsilon=0.6,
                 poly_order=3, iterations=10, low_clip=1.0, high_clip=4.0,
-                window=20.0)
+                window=20.0, no_save=False)
     base.update(overrides)
     return argparse.Namespace(**base)
 
@@ -2518,8 +2584,9 @@ def _ask_target(kw):
             kw["ra"] = ask("  RA [deg]", cast=float)
             kw["dec"] = ask("  Dec [deg]", cast=float)
     if kw.get("ra") is not None:
-        kw["obstime"] = ask("Observation time (ISOT or BJD number; "
-                            "empty: read from FITS header)", allow_empty=True)
+        kw["obstime"] = ask("Observation time (ISOT, BJD number or "
+                            "DD/MM/YY; empty: read from FITS header)",
+                            allow_empty=True)
         kw["site"] = ask("Observatory (astropy site name: tug, paranal, ...)",
                          default="tug")
         apply = ask("Apply the barycentric correction to the reported RVs? "
@@ -2759,9 +2826,8 @@ def run_gui():
     ttk.Label(trow, textvariable=siminfo_var, foreground="gray"
               ).grid(row=0, column=7, sticky="w", padx=(8, 0))
 
-    ttk.Label(trow, text="Obs time (ISOT or BJD):").grid(row=1, column=0,
-                                                         columnspan=2,
-                                                         sticky="w", pady=(4, 0))
+    ttk.Label(trow, text="Obs time (ISOT, BJD or DD/MM/YY):").grid(
+        row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
     ttk.Entry(trow, textvariable=time_var, width=20).grid(row=1, column=2,
                                                           columnspan=2,
                                                           sticky="w",
@@ -3039,10 +3105,14 @@ def run_gui():
         return float(s) if s else default
 
     def show_payload(payload):
+        if payload.get("saved", True):
+            note = f"Saved: {payload['output']}, {payload['plot']}"
+        else:
+            note = ("Results NOT saved yet - press 'Save' to write the "
+                    "result files.")
         result_text.configure(state="normal")
         result_text.delete("1.0", "end")
-        result_text.insert("1.0", payload["text"] + "\n"
-                           f"Saved: {payload['output']}, {payload['plot']}")
+        result_text.insert("1.0", payload["text"] + "\n" + note)
         result_text.configure(state="disabled")
 
         if canvas_holder["canvas"] is not None:
@@ -3126,7 +3196,10 @@ def run_gui():
     ttk.Button(fbtns, text="Header", command=show_header
                ).pack(side="left", padx=(4, 0))
 
+    run_payload = {"payload": None}
+
     def run_analysis():
+        run_payload["payload"] = None
         try:
             if not spec_var.get().strip():
                 raise ValueError("No normalized spectrum file selected "
@@ -3152,7 +3225,8 @@ def run_gui():
                       site=site_var.get().strip() or "paranal",
                       no_bary=not bary_var.get(),
                       t0=_f(t0_var), period=_f(per_var),
-                      resolution=_f(res_var), vsini=_f(vsini_var))
+                      resolution=_f(res_var), vsini=_f(vsini_var),
+                      no_save=True)
             if method_var.get() == "CCF":
                 kw.update(rv_min=_f(rvmin_var, -200.0),
                           rv_max=_f(rvmax_var, 200.0),
@@ -3170,10 +3244,28 @@ def run_gui():
         except Exception as exc:
             messagebox.showerror("Error", str(exc))
             return
+        run_payload["payload"] = payload
         show_payload(payload)
 
-    ttk.Button(main, text="Run", command=run_analysis
-               ).grid(row=7, column=0, columnspan=3, pady=6)
+    def save_results():
+        payload = run_payload["payload"]
+        if payload is None:
+            messagebox.showinfo("Save", "Run an analysis first.")
+            return
+        try:
+            files = save_payload(payload)
+        except Exception as exc:
+            messagebox.showerror("Save", str(exc))
+            return
+        show_payload(payload)
+        messagebox.showinfo("Save", "Files written:\n" + "\n".join(files))
+
+    btnrow = ttk.Frame(main)
+    btnrow.grid(row=7, column=0, columnspan=3, pady=6)
+    ttk.Button(btnrow, text="Run", command=run_analysis).pack(side="left",
+                                                              padx=4)
+    ttk.Button(btnrow, text="Save", command=save_results).pack(side="left",
+                                                               padx=4)
 
     root.mainloop()
 
@@ -3221,8 +3313,10 @@ def add_common_args(p):
     p.add_argument("--ra", type=float, help="RA [deg] for barycentric correction")
     p.add_argument("--dec", type=float, help="Dec [deg] for barycentric correction")
     p.add_argument("--obstime", help="Observation time: ISOT "
-                                     "(2024-12-03T02:30:00) or BJD number "
-                                     "(2453254.847090365)")
+                                     "(2024-12-03T02:30:00), BJD number "
+                                     "(2453254.847090365) or old FITS "
+                                     "date DD/MM/YY (16/10/98, optionally "
+                                     "+ UT time)")
     p.add_argument("--site", default="paranal",
                    help="Observatory (astropy site name, e.g. paranal, tug)")
     p.add_argument("--no-bary", action="store_true",
