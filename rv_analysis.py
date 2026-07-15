@@ -1868,10 +1868,17 @@ def cmd_bf(args):
     tpl_wl, tpl_flux = load_template(args)
     resolution = get_resolution(args)
     inst_fwhm = C_KMS / resolution if resolution else None
-    tpl_wl, tpl_flux = prepare_template(tpl_wl, tpl_flux,
-                                        resolution=resolution,
-                                        vsini=args.vsini,
-                                        epsilon=args.epsilon)
+    # In the BF flow the resolution R drives the BF smoothing (and the
+    # rot-profile instrumental convolution) ONLY — the saphires
+    # bf.analysis semantics. Degrading the template as well would count
+    # the instrumental profile twice, and is plain wrong for an
+    # observed template that already carries it; it stays available for
+    # ultra-sharp synthetic templates via --degrade-template.
+    tpl_wl, tpl_flux = prepare_template(
+        tpl_wl, tpl_flux,
+        resolution=(resolution if getattr(args, "degrade_template", False)
+                    else None),
+        vsini=args.vsini, epsilon=args.epsilon)
 
     print("Solving the BF via SVD...")
     if len(orders) > 1:
@@ -2210,10 +2217,15 @@ def cmd_batch(args):
     tpl_wl, tpl_flux = load_template(args)
     resolution = get_resolution(args)
     inst_fwhm = C_KMS / resolution if resolution else None
-    tpl_wl, tpl_flux = prepare_template(tpl_wl, tpl_flux,
-                                        resolution=resolution,
-                                        vsini=args.vsini,
-                                        epsilon=args.epsilon)
+    # BF: R only smooths the BF (saphires semantics; --degrade-template
+    # opts in for ultra-sharp synthetic templates). CCF: the template is
+    # degraded to R as before — matched filtering, no smoothing step.
+    degrade = args.method == "ccf" or getattr(args, "degrade_template",
+                                              False)
+    tpl_wl, tpl_flux = prepare_template(
+        tpl_wl, tpl_flux,
+        resolution=(resolution if degrade else None),
+        vsini=args.vsini, epsilon=args.epsilon)
 
     ra, dec = args.ra, args.dec
     if ra is None and args.object:
@@ -2578,7 +2590,7 @@ def make_args(**overrides):
                 rv_min=-200.0, rv_max=200.0, rv_step=0.5,
                 vel_range=400.0, dv=None, svd_rcond=None, smooth=None,
                 components=1, min_sep=30.0, guess=None, profile="gauss",
-                gamma=None,
+                gamma=None, degrade_template=False,
                 spectrograph=None, resolution=None, vsini=None, epsilon=0.6,
                 poly_order=3, iterations=10, low_clip=1.0, high_clip=4.0,
                 window=20.0, no_save=False)
@@ -3350,8 +3362,11 @@ def add_common_args(p):
                         + ", ".join(n for n, _, _ in SPECTROGRAPHS))
     p.add_argument("--resolution", type=float,
                    help="Resolving power R = lambda/dlambda entered manually "
-                        "(overrides --spectrograph); the template is "
-                        "degraded to this resolution before the measurement")
+                        "(overrides --spectrograph). CCF: the template is "
+                        "degraded to R before the measurement. BF: R sets "
+                        "the BF smoothing FWHM c/R (saphires practice); "
+                        "add --degrade-template to also degrade a "
+                        "synthetic template")
     p.add_argument("--vsini", type=float,
                    help="Rotational broadening vsini [km/s] applied to the "
                         "template before the measurement")
@@ -3457,6 +3472,14 @@ def main():
                       help="Systemic velocity [km/s] for the phase-based "
                            "component identification (default: estimated "
                            "from the BF-area-weighted mean of the pair)")
+    p_bf.add_argument("--degrade-template", action="store_true",
+                      help="Also degrade the template to the resolution R "
+                           "before the BF (only for ultra-sharp synthetic "
+                           "templates; NEVER with an observed template - "
+                           "in the BF flow R normally only sets the BF "
+                           "smoothing, the saphires practice, since "
+                           "degrading the template too would count the "
+                           "instrumental profile twice)")
     p_bf.set_defaults(func=cmd_bf)
 
     p_batch = sub.add_parser("batch",
@@ -3541,6 +3564,10 @@ def main():
     p_batch.add_argument("--gamma", type=float,
                          help="Systemic velocity [km/s] for the "
                               "phase-based component identification")
+    p_batch.add_argument("--degrade-template", action="store_true",
+                         help="Also degrade the template to R before the "
+                              "BF (synthetic templates only; in BF mode R "
+                              "normally only sets the BF smoothing)")
     p_batch.add_argument("--rv-min", type=float, default=-200.0,
                          help="CCF scan lower limit [km/s]")
     p_batch.add_argument("--rv-max", type=float, default=200.0,
