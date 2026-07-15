@@ -121,14 +121,19 @@ def two_gauss_no(x, amp1, mu1, sig1, amp2, mu2, sig2):
 
 
 def multi_gauss_no(x, *params):
-    """Sum of N offset-free Gaussians; params = (amp, mu, sigma) per
-    component, so len(params) = 3N."""
+    """Sum of N Gaussians; params = (amp, mu, sigma) per component, so
+    len(params) = 3N. A trailing (3N+1)-th parameter, when present, is a
+    shared constant baseline offset — the saphires d_gaussian_off /
+    t_gaussian_off model: BFs computed against an observed template sit
+    on a non-zero pedestal that the fit must carry."""
+    params = list(params)
+    offset = params.pop() if len(params) % 3 == 1 else 0.0
     x = np.asarray(x, dtype=float)
     y = np.zeros_like(x)
     for k in range(0, len(params), 3):
         amp, mu, sig = params[k:k + 3]
         y = y + amp * np.exp(-((x - mu) ** 2) / (2.0 * sig ** 2))
-    return y
+    return y + offset
 
 
 def eval_gauss_model(x, popt):
@@ -144,11 +149,14 @@ def eval_gauss_model(x, popt):
 
 def multi_rot_profile(x, params, epsilon=0.6, inst_sigma_pix=None):
     """Sum of N Gray (1992) rotational profiles, params = (amp, v0,
-    vsini) per component; amp is the profile height at the centre. When
-    inst_sigma_pix is given the summed profile is convolved with the
-    instrumental Gaussian (x must then be a uniform velocity grid). The
-    DDO-series / saphires practice for the broadened components of close
-    binaries."""
+    vsini) per component; amp is the profile height at the centre. A
+    trailing (3N+1)-th parameter, when present, is a shared constant
+    baseline offset (see multi_gauss_no). When inst_sigma_pix is given
+    the summed profile is convolved with the instrumental Gaussian
+    (x must then be a uniform velocity grid). The DDO-series / saphires
+    practice for the broadened components of close binaries."""
+    params = list(params)
+    offset = params.pop() if len(params) % 3 == 1 else 0.0
     x = np.asarray(x, dtype=float)
     y = np.zeros_like(x)
     peak = 2.0 * (1.0 - epsilon) + 0.5 * np.pi * epsilon
@@ -162,7 +170,28 @@ def multi_rot_profile(x, params, epsilon=0.6, inst_sigma_pix=None):
         y = y + amp * prof / peak
     if inst_sigma_pix:
         y = gaussian_filter1d(y, inst_sigma_pix)
-    return y
+    return y + offset
+
+
+def model_offset(popt):
+    """Shared constant baseline of a fitted model; 0 when the model has
+    no offset term. Offset models carry it as the last parameter and
+    have len(popt) % 3 == 1 (4, 7, 3N+1)."""
+    popt = np.ravel(np.asarray(popt, dtype=float))
+    return float(popt[-1]) if popt.size % 3 == 1 else 0.0
+
+
+def component_area(comp, epsilon=0.6):
+    """Profile integral of a fitted component — the 'Amp' quoted in the
+    saphires bf plots (fit_int): amp*sigma*sqrt(2 pi) for a Gaussian;
+    for the unit-peak Gray rotational profile amp*vsini*
+    (pi(1-eps) + 2 pi eps/3) / (2(1-eps) + pi eps/2). Proportional to
+    the component's light contribution."""
+    if comp.get("kind") == "rot":
+        num = np.pi * (1.0 - epsilon) + 2.0 * np.pi * epsilon / 3.0
+        den = 2.0 * (1.0 - epsilon) + 0.5 * np.pi * epsilon
+        return abs(comp["amp"] * comp["sigma"]) * num / den
+    return abs(comp["amp"] * comp["sigma"]) * np.sqrt(2.0 * np.pi)
 
 
 def eval_bf_model(x, model):
@@ -1395,8 +1424,10 @@ def fit_bf_peaks(velocity, bf, components=1, min_sep=30.0, with_offset=False,
     components are returned sorted by RV (callers may re-sort by area or
     by orbital phase).
 
-    with_offset=True adds a constant baseline term (used for CCF
-    profiles, whose baseline is not zero); it supports 2 components.
+    Multi-component fits always include a shared constant baseline
+    offset (saphires d_gaussian_off / t_gaussian_off); with_offset=True
+    adds the same constant term to single-component fits (used for CCF
+    profiles, whose baseline is not zero).
 
     fit_trim: number of bins dropped from each edge of the profile
     before the fit — the BF edges are noisy (saphires bf.analysis,
@@ -1417,17 +1448,19 @@ def fit_bf_peaks(velocity, bf, components=1, min_sep=30.0, with_offset=False,
         center = guesses[0] if guesses else None
         return fit_peak_with_base(velocity, bf, with_offset=with_offset,
                                   center=center)
-    if with_offset and components != 2:
-        raise ValueError("Offset fits support 2 components only.")
-
-    offset0 = float(np.median(bf)) if with_offset else 0.0
+    # Multi-component fits always include a shared constant baseline
+    # offset (the saphires d_gaussian_off / t_gaussian_off model): a BF
+    # computed against an observed template sits on a non-zero pedestal
+    # and an offset-free sum of profiles must inflate its widths to
+    # absorb it, biasing every amplitude and sigma.
+    offset0 = float(np.median(bf))
     if guesses:
         centers = [float(g) for g in guesses]
     else:
         centers = [float(velocity[i])
                    for i in find_bf_peaks(velocity, bf, components, min_sep)]
 
-    use_rot = profile == "rot" and not with_offset
+    use_rot = profile == "rot"
     step = float(np.median(np.abs(np.diff(velocity))))
     inst_sigma_pix = (inst_fwhm / 2.35482 / step) if (use_rot and inst_fwhm
                                                       ) else None
@@ -1443,13 +1476,9 @@ def fit_bf_peaks(velocity, bf, components=1, min_sep=30.0, with_offset=False,
             p0 += [max(a - offset0, 1e-6), c, 20.0]
             lo += [0.0, vlo, 1.0]
             hi += [np.inf, vhi, 200.0]
+    p0, lo, hi = p0 + [offset0], lo + [-np.inf], hi + [np.inf]
 
-    if with_offset:
-        popt, pcov = curve_fit(two_gauss, velocity, bf, p0=p0 + [offset0],
-                               bounds=(lo + [-np.inf], hi + [np.inf]),
-                               maxfev=40000)
-        model = dict(kind="gauss", popt=popt)
-    elif use_rot:
+    if use_rot:
         def rot_model(x, *params):
             return multi_rot_profile(x, params, epsilon=epsilon,
                                      inst_sigma_pix=inst_sigma_pix)
@@ -1557,10 +1586,30 @@ def make_bf_figure(bf_result, comps, popt, bjd=None, phase=None,
     v = bf_result["velocity"]
     fig = Figure(figsize=(9, 5))
     ax = fig.subplots()
-    ax.plot(v, bf_result["bf"], color="0.7", lw=0.8, label="BF (raw)")
-    ax.plot(v, bf_result["bf_smooth"], "b-", lw=1.5, label="BF (smoothed)")
+    ax.plot(v, bf_result["bf"], color="0.85", lw=0.8, label="BF (raw)")
+    ax.plot(v, bf_result["bf_smooth"], color="0.55", lw=2.5,
+            label="BF (smoothed)")
     model = eval_bf_model(v, popt)
-    ax.plot(v, model, "r--", lw=2, alpha=0.8, label="Gaussian fit")
+    ax.plot(v, model, "k-", lw=1.2, label="Total fit")
+
+    # per-component profiles, saphires bf_singleplot style: one dashed
+    # curve per component on the shared baseline, the profile integral
+    # ('Amp') and the RV in its legend entry
+    offset = model_offset(popt["popt"])
+    epsilon = popt.get("epsilon", 0.6)
+    colors = ["C0", "C3", "C2"]
+    for i, c in enumerate(comps, 1):
+        if c.get("kind") == "rot":
+            curve = multi_rot_profile(v, [c["amp"], c["rv"], c["sigma"]],
+                                      epsilon=epsilon,
+                                      inst_sigma_pix=popt.get(
+                                          "inst_sigma_pix")) + offset
+        else:
+            curve = gauss_no(v, c["amp"], c["rv"], c["sigma"]) + offset
+        area = component_area(c, epsilon)
+        ax.plot(v, curve, "--", color=colors[(i - 1) % len(colors)], lw=1.8,
+                label=f"C{i}: Amp = {area:.3f}, RV = {c['rv']:.2f} km/s")
+
     ymin = float(min(np.min(bf_result["bf_smooth"]), np.min(model)))
     ymax = float(max(np.max(bf_result["bf_smooth"]), np.max(model)))
     span = max(ymax - ymin, 1e-12)
@@ -1580,12 +1629,12 @@ def make_bf_figure(bf_result, comps, popt, bjd=None, phase=None,
         if show_bary:
             label += f"  ({apply_barycentric(c['rv'], vbary):.2f} bary)"
         ax.axvline(c["rv"], color="r", ls=":", lw=1)
-        ax.annotate(label, (c["rv"], c["amp"]),
+        ax.annotate(label, (c["rv"], c["amp"] + offset),
                     textcoords="offset points", xytext=(6, 6), color="r")
     ax.set_xlabel("Radial velocity [km/s]"
                   + ("  (uncorrected)" if show_bary else ""))
     ax.set_ylabel("Broadening Function")
-    ax.legend()
+    ax.legend(fontsize=9)
     fig.tight_layout()
     return fig
 
@@ -1877,10 +1926,11 @@ def cmd_bf(args):
                      + (f"   phase = {phase:.4f}" if phase is not None else ""))
     for i, c in enumerate(comps, 1):
         wname = "vsini" if c.get("kind") == "rot" else "sigma"
+        area = component_area(c, args.epsilon)
         if apply_bary:
             lines.append(f"Component {i}: RV (uncorrected)           = "
                          f"{c['rv']:.4f} ± {c['rv_err']:.4f} km/s"
-                         f"   (amp={c['amp']:.4f}, "
+                         f"   (Amp={area:.3f}, amp={c['amp']:.4f}, "
                          f"{wname}={c['sigma']:.2f} km/s)")
             lines.append(f"             RV (barycentric corrected) = "
                          f"{apply_barycentric(c['rv'], vbary):.4f} "
@@ -1888,7 +1938,7 @@ def cmd_bf(args):
         else:
             lines.append(f"Component {i}: RV = {c['rv']:.4f} "
                          f"± {c['rv_err']:.4f} km/s"
-                         f"   (amp={c['amp']:.4f}, "
+                         f"   (Amp={area:.3f}, amp={c['amp']:.4f}, "
                          f"{wname}={c['sigma']:.2f} km/s)")
     if vbary:
         if apply_bary:
@@ -1899,11 +1949,11 @@ def cmd_bf(args):
     if label_note:
         lines.append(label_note)
     if len(comps) >= 2 and all(c["amp"] > 0 for c in comps):
-        a1 = comps[0]["amp"] * comps[0]["sigma"]
+        a1 = component_area(comps[0], args.epsilon)
         if a1 > 0:
             for i, c in enumerate(comps[1:], 2):
                 lines.append(f"Light ratio (C{i}/C1, from BF areas) ≈ "
-                             f"{c['amp'] * c['sigma'] / a1:.3f}")
+                             f"{component_area(c, args.epsilon) / a1:.3f}")
     lines.append("============================================")
     summary = "\n".join(lines)
     print("\n" + summary)
