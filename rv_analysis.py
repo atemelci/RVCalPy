@@ -2042,11 +2042,11 @@ def cmd_bf(args):
             comps, label_note = identify_components(
                 comps, phase, gamma=getattr(args, "gamma", None))
         else:
-            comps.sort(key=lambda c: abs(c["amp"] * c["sigma"]),
-                       reverse=True)
-            label_note = ("Component labels sorted by BF area: C1 = "
-                          "largest light contribution. Use --guess or an "
-                          "ephemeris (phase) to fix the identities.")
+            comps.sort(key=lambda c: abs(c["amp"]), reverse=True)
+            label_note = ("Component labels sorted by BF amplitude: "
+                          "C1 = highest peak, the last component the "
+                          "lowest. Use --guess or an ephemeris (phase) "
+                          "to fix the identities.")
 
     tpl_name = args.template or f"PHOENIX T={args.teff}K"
     lines = ["================ BF RESULT =================",
@@ -2323,9 +2323,10 @@ def cmd_batch(args):
     computation. Times are always handled in BJD: they come from --bjd
     (one value per file, as in the reference document), a numeric
     --obstime, or the FITS header DATE-OBS (converted to mid-exposure
-    BJD_TDB). In SB2 mode the component with the larger BF area (larger
-    light contribution) is always reported as component 1, so the labels
-    do not swap between epochs.
+    BJD_TDB). In SB2/SB3 mode the components are labeled by BF
+    amplitude — C1 is the highest peak, the last component the lowest —
+    so the labels do not swap between epochs (initial guesses or an
+    ephemeris phase override this ordering when given).
 
     Outputs: result_RV_curve.txt (file, BJD, phase, RV per component),
     result_RV_curve.png and, in BF mode, result_BF_profiles.png with all
@@ -2479,8 +2480,7 @@ def cmd_batch(args):
                     comps, _ = identify_components(
                         comps, phase, gamma=getattr(args, "gamma", None))
                 else:
-                    comps.sort(key=lambda c: c["amp"] * c["sigma"],
-                               reverse=True)
+                    comps.sort(key=lambda c: abs(c["amp"]), reverse=True)
 
             vb_used = vbary if apply_bary else 0.0
             rows.append(dict(file=os.path.basename(path), bjd=bjd,
@@ -3328,13 +3328,26 @@ def run_gui():
         prow = ttk.Frame(frm)
         prow.grid(row=1, column=0, columnspan=3, sticky="w", pady=6)
         ttk.Label(prow, text="Continuum fit").pack(side="left")
-        ttk.Combobox(prow, textvariable=fitm_var, width=14, state="readonly",
-                     values=["Polynomial", "B-spline"]
-                     ).pack(side="left", padx=(2, 12))
+        fitm_box = ttk.Combobox(prow, textvariable=fitm_var, width=14,
+                                state="readonly",
+                                values=["Polynomial", "B-spline"])
+        fitm_box.pack(side="left", padx=(2, 12))
         ttk.Label(prow, text="Polynomial order").pack(side="left")
-        ttk.Entry(prow, textvariable=ord_var, width=4).pack(side="left", padx=(2, 12))
+        ord_entry = ttk.Entry(prow, textvariable=ord_var, width=4)
+        ord_entry.pack(side="left", padx=(2, 12))
         ttk.Label(prow, text="Iterations").pack(side="left")
-        ttk.Entry(prow, textvariable=it_var, width=4).pack(side="left", padx=2)
+        ttk.Entry(prow, textvariable=it_var, width=4).pack(side="left",
+                                                           padx=2)
+
+        def on_fit_method_change(_event=None):
+            """The B-spline is always cubic, so the polynomial order is
+            meaningless for it; the clipping iterations are used by
+            both models and stay active."""
+            ord_entry.configure(
+                state="disabled" if fitm_var.get().startswith("B-")
+                else "normal")
+
+        fitm_box.bind("<<ComboboxSelected>>", on_fit_method_change)
 
         ttk.Label(frm, text="Preview overlays the result on the synthetic\n"
                             "spectrum; adjust the order until they match, "
