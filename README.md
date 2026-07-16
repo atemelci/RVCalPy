@@ -62,8 +62,10 @@ python rv_analysis.py
 A small window opens: resolve the target via SIMBAD (or enter RA/Dec), pick
 the normalized observed spectrum and the template, choose **CCF** or **BF**,
 and press **Run**. The fit is shown in the window with one dashed profile per
-component, labelled `C1: Amp = ..., RV = ... km/s`. Nothing is written to
-disk until you press **Save** next to Run.
+component, labelled `C1: amp = ..., area = ..., RV = ... km/s` — `amp` is the
+peak height read off the BF axis, `area` the profile integral (proportional
+to the component's light contribution). Nothing is written to disk until you
+press **Save** next to Run.
 
 Other GUI features:
 
@@ -152,8 +154,9 @@ Two continuum models are available (`--fit-method`):
 
 ### BF component labels
 
-By default the fitted components are labelled by BF amplitude: **C1 is the
-highest peak**, the last component the lowest. Two overrides are available:
+By default the fitted components are labelled by BF area: **C1 is the
+component with the largest light contribution** (profile integral). Two
+overrides are available:
 
 - `--guess RV1 RV2 ...` pins the labels to your initial guesses
   (C1 = first guess, C2 = second, ...);
@@ -162,14 +165,15 @@ highest peak**, the last component the lowest. Two overrides are available:
   listed last as the tertiary).
 
 The light ratios reported with multi-component fits come from the fitted
-profile integrals (the `Amp` values shown in the figure legend).
+profile integrals (the `area` values shown in the figure legend and the
+result summary; the `amp` values are the peak heights on the BF axis).
 
 ### Outputs
 
 | File | Content |
 |---|---|
-| `result_CCF.txt` / `result_BF.txt` | RVs with errors, uncorrected and barycentric-corrected, amplitudes, widths, light ratios |
-| `result_CCF.png` / `result_BF.png` | Fit figure (BF: one dashed profile per component with `Amp` and RV in the legend) |
+| `result_CCF.txt` / `result_BF.txt` | RVs with errors, uncorrected and barycentric-corrected, amplitudes, areas, widths, light ratios |
+| `result_CCF.png` / `result_BF.png` | Fit figure (BF: one dashed profile per component with `amp`, `area` and RV in the legend) |
 | `result_CCF_linecheck.png` / `result_BF_linecheck.png` | Model reliability check at strong diagnostic lines |
 | `result_RV_curve.txt` / `.png` | `batch` mode: BJD, phase and per-component RVs for the whole series |
 | `result_BF_profiles.png` | `batch` mode: all BF profiles stacked by orbital phase |

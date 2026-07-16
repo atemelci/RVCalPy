@@ -1738,7 +1738,8 @@ def make_bf_figure(bf_result, comps, popt, bjd=None, phase=None,
             curve = gauss_no(v, c["amp"], c["rv"], c["sigma"]) + offset
         area = component_area(c, epsilon)
         ax.plot(v, curve, "--", color=colors[(i - 1) % len(colors)], lw=1.8,
-                label=f"C{i}: Amp = {area:.3f}, RV = {c['rv']:.2f} km/s")
+                label=(f"C{i}: amp = {c['amp']:.4f}, area = {area:.3f}, "
+                       f"RV = {c['rv']:.2f} km/s"))
 
     ymin = float(min(np.min(bf_result["bf_smooth"]), np.min(model)))
     ymax = float(max(np.max(bf_result["bf_smooth"]), np.max(model)))
@@ -2042,11 +2043,11 @@ def cmd_bf(args):
             comps, label_note = identify_components(
                 comps, phase, gamma=getattr(args, "gamma", None))
         else:
-            comps.sort(key=lambda c: abs(c["amp"]), reverse=True)
-            label_note = ("Component labels sorted by BF amplitude: "
-                          "C1 = highest peak, the last component the "
-                          "lowest. Use --guess or an ephemeris (phase) "
-                          "to fix the identities.")
+            comps.sort(key=lambda c: abs(c["amp"] * c["sigma"]),
+                       reverse=True)
+            label_note = ("Component labels sorted by BF area: C1 = "
+                          "largest light contribution. Use --guess or an "
+                          "ephemeris (phase) to fix the identities.")
 
     tpl_name = args.template or f"PHOENIX T={args.teff}K"
     lines = ["================ BF RESULT =================",
@@ -2061,7 +2062,7 @@ def cmd_bf(args):
         if apply_bary:
             lines.append(f"Component {i}: RV (uncorrected)           = "
                          f"{c['rv']:.4f} ± {c['rv_err']:.4f} km/s"
-                         f"   (Amp={area:.3f}, amp={c['amp']:.4f}, "
+                         f"   (amp={c['amp']:.4f}, area={area:.3f}, "
                          f"{wname}={c['sigma']:.2f} km/s)")
             lines.append(f"             RV (barycentric corrected) = "
                          f"{apply_barycentric(c['rv'], vbary):.4f} "
@@ -2069,7 +2070,7 @@ def cmd_bf(args):
         else:
             lines.append(f"Component {i}: RV = {c['rv']:.4f} "
                          f"± {c['rv_err']:.4f} km/s"
-                         f"   (Amp={area:.3f}, amp={c['amp']:.4f}, "
+                         f"   (amp={c['amp']:.4f}, area={area:.3f}, "
                          f"{wname}={c['sigma']:.2f} km/s)")
     if vbary:
         if apply_bary:
@@ -2323,9 +2324,9 @@ def cmd_batch(args):
     computation. Times are always handled in BJD: they come from --bjd
     (one value per file, as in the reference document), a numeric
     --obstime, or the FITS header DATE-OBS (converted to mid-exposure
-    BJD_TDB). In SB2/SB3 mode the components are labeled by BF
-    amplitude — C1 is the highest peak, the last component the lowest —
-    so the labels do not swap between epochs (initial guesses or an
+    BJD_TDB). In SB2/SB3 mode the component with the larger BF area
+    (larger light contribution) is always reported as component 1, so
+    the labels do not swap between epochs (initial guesses or an
     ephemeris phase override this ordering when given).
 
     Outputs: result_RV_curve.txt (file, BJD, phase, RV per component),
@@ -2480,7 +2481,8 @@ def cmd_batch(args):
                     comps, _ = identify_components(
                         comps, phase, gamma=getattr(args, "gamma", None))
                 else:
-                    comps.sort(key=lambda c: abs(c["amp"]), reverse=True)
+                    comps.sort(key=lambda c: abs(c["amp"] * c["sigma"]),
+                               reverse=True)
 
             vb_used = vbary if apply_bary else 0.0
             rows.append(dict(file=os.path.basename(path), bjd=bjd,
