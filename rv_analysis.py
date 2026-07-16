@@ -17,8 +17,12 @@ Two independent methods in one tool:
    solved linearly via Singular Value Decomposition (SVD). Because the
    method is linear, the components of binary/multiple systems (SB2)
    appear as independent sharp peaks: peak centres give the RVs, widths
-   the rotation (vsini), areas the light contributions. Single or double
-   Gaussians are fitted to the BF profile.
+   the rotation (vsini), areas the light contributions. The spectra
+   enter the SVD as line depths (1 - flux), so the BF baseline sits at
+   zero. Sums of Gaussians are fitted to the smoothed BF; the starting
+   points come either from an automatic iterative fit-and-subtract
+   search or from per-component [amp, RV, sigma] estimates the user
+   reads off the plot (--guess / --guess-amp / --guess-sigma).
 
    Several practices are adopted from the saphires package (Tofflemire;
    github.com/tofflemire/saphires): multi-order spectra get one BF per
@@ -88,6 +92,11 @@ try:
     C_KMS = const.c.value / 1000.0
 except ImportError:
     C_KMS = 299792.458
+
+# BF velocity step of the reference implementation (BF_main stepV). The
+# per-bin BF amplitude scales with the step, so this default keeps amp
+# values on the reference scale; data with coarser pixels use the pixel.
+BF_STEPV = 5.0
 
 
 def doppler_shift(wavelength, rv_kms):
@@ -1211,12 +1220,18 @@ def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
     """Broadening Function following the reference implementation
     (BF_main.txt; Rucinski 1999 via PyAstronomy's pyasl.SVD).
 
-    Reference steps, reproduced exactly:
+    Reference steps:
       1. log-wavelength grid  w1 = w00 * (1+r)^k  with  r = stepV/c
          (w00/stepV in the reference: 4800 A / 5 km/s; here w00 comes from
          the data overlap and stepV from `dv`)
-      2. template and observed spectra are interpolated onto w1 and fed
-         to the SVD AS-IS (continuum-normalized flux, no inversion)
+      2. template and observed spectra are interpolated onto w1 and
+         inverted to line depths (1 - flux). Rucinski's BF is defined on
+         continuum-subtracted line profiles; the inversion removes the
+         continuum from the SVD problem, so the BF baseline sits at zero
+         and the wings decay cleanly. (Feeding continuum-normalized flux
+         as-is makes the SVD reproduce the continuum as a constant
+         pedestal ~ continuum/m under the whole BF, with rolled-off,
+         even negative edges — the profile then rides on a false base.)
       3. svd.decompose(template, m);  bf = svd.getBroadeningFunction(obs)
          (m odd, reference m=501; here m = 2*ceil(vel_range/dv)+1)
       4. velocity axis = svd.getRVAxis(r, 1)
@@ -1229,10 +1244,12 @@ def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
     Parameters
     ----------
     vel_range : half-width of the BF window [km/s]
-    dv        : velocity step stepV [km/s]; None -> the median velocity
-        pixel of the data (BF-rvplotter practice: stepV close to the
-        spectrograph pixel; the reference-notebook value 5.0 can be given
-        explicitly)
+    dv        : velocity step stepV [km/s]; None -> the reference value
+        BF_STEPV (5 km/s), or the median velocity pixel of the data when
+        that is coarser. The per-bin BF amplitude scales linearly with
+        dv (the profile integral is what is conserved), so amplitudes
+        are only comparable between analyses run with the same step;
+        the default keeps them on the reference-implementation scale.
     svd_rcond : relative singular-value cutoff. None (default) selects it
         automatically: the smallest cutoff from a ladder starting at 0
         (no truncation — the choice of both the reference notebook and
@@ -1282,14 +1299,17 @@ def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
 
     if dv is None:
         pix = np.median(np.diff(spec_wl)) / np.median(spec_wl) * C_KMS
-        dv = max(pix, 0.5)
+        dv = max(pix, BF_STEPV)
+        if verbose and dv > pix:
+            print(f"BF velocity step: stepV = {dv:g} km/s (reference "
+                  f"default; data pixel = {pix:.2f} km/s; --dv overrides)")
 
     r = dv / C_KMS
     n = int(np.floor(np.log(wl_max / wl_min) / np.log(1.0 + r))) + 1
     w1 = wl_min * np.power(1.0 + r, np.arange(float(n)))
 
-    tpl = np.interp(w1, tpl_wl, tpl_flux)
-    obs = np.interp(w1, spec_wl, spec_flux)
+    tpl = 1.0 - np.interp(w1, tpl_wl, tpl_flux)
+    obs = 1.0 - np.interp(w1, spec_wl, spec_flux)
 
     half = int(np.ceil(vel_range / dv))
     m = 2 * half + 1
@@ -1407,10 +1427,11 @@ def compute_bf_orders(orders, tpl_wl, tpl_flux, vel_range=400.0, dv=None,
     Noisy or line-poor orders are down-weighted automatically instead
     of degrading a single merged-spectrum solution.
 
-    A common dv (the finest median velocity pixel over the orders, as
-    saphires' vel_spacing='uniform') and a common window make every
-    order's velocity axis identical, which is what makes the BFs
-    combinable. Orders that fail (no overlap, too short) are skipped.
+    A common dv (the reference step BF_STEPV, or the finest median
+    velocity pixel over the orders when that is coarser) and a common
+    window make every order's velocity axis identical, which is what
+    makes the BFs combinable. Orders that fail (no overlap, too short)
+    are skipped.
 
     Returns the compute_bf dict plus n_orders (number combined).
     """
@@ -1423,7 +1444,7 @@ def compute_bf_orders(orders, tpl_wl, tpl_flux, vel_range=400.0, dv=None,
                 pixes.append(np.median(np.diff(w)) / np.median(w) * C_KMS)
         if not pixes:
             raise ValueError("No usable order for the BF.")
-        dv = max(min(pixes), 0.5)
+        dv = max(min(pixes), BF_STEPV)
 
     results, failures = [], []
     for k, (wl, fx) in enumerate(orders):
@@ -1486,7 +1507,8 @@ def fit_peak_with_base(velocity, profile, with_offset=False, center=None,
     """
     velocity = np.asarray(velocity, dtype=float)
     profile = np.asarray(profile, dtype=float)
-    if fit_trim and velocity.size > 4 * fit_trim:
+    fit_trim = min(int(fit_trim), velocity.size // 20)
+    if fit_trim > 0 and velocity.size > 4 * fit_trim:
         velocity = velocity[fit_trim:-fit_trim]
         profile = profile[fit_trim:-fit_trim]
     if center is None:
@@ -1514,31 +1536,69 @@ def fit_peak_with_base(velocity, profile, with_offset=False, center=None,
     return [comp], dict(kind="gauss", popt=popt)
 
 
-def find_bf_peaks(velocity, bf, n, min_sep):
-    """Indices of the n highest local maxima of the profile separated by
-    at least min_sep [km/s] (scipy find_peaks; real local maxima, so a
-    smaller secondary/tertiary bump is found even far from the global
-    maximum, as in BF-rvplotter)."""
-    from scipy.signal import find_peaks
+def find_bf_peaks(velocity, bf, n, min_sep, centers=None):
+    """Initial (amp, centre, sigma) seeds for an n-component fit by
+    iterative fit-and-subtract: fit k Gaussians on a shared constant
+    baseline, smooth the residual with a min_sep-wide kernel, and take
+    its maximum as the (k+1)-th centre. When explicit `centers` are
+    given (user initial guesses), each stage uses the unused centre
+    nearest to the residual maximum — the guesses anchor the components
+    while the staged refits let each one's amplitude and width converge
+    before the next is added.
+
+    Picking the n highest separated local maxima (the previous approach,
+    BF-rvplotter style) fails on real close-binary/triple BFs in two
+    ways: noise wiggles on the shoulder of a broad primary are higher
+    'local maxima' than a genuinely distant faint secondary, and a
+    narrow tertiary superposed on the broad primary at nearly the same
+    RV produces no separate maximum at all. Fitting-and-subtracting
+    finds both, because each new component is placed on the largest
+    coherent structure the current model fails to explain; min_sep
+    [km/s] is the smoothing scale a residual structure must survive, so
+    single-bin noise spikes are never selected.
+
+    Returns a list of n (amp, centre, sigma) tuples from the last
+    iteration's fit; the caller runs the final fit (with its own model
+    and bounds) from these seeds."""
+    velocity = np.asarray(velocity, dtype=float)
+    bf = np.asarray(bf, dtype=float)
     step = float(np.median(np.abs(np.diff(velocity))))
-    dist = max(int(round(min_sep / step)), 1)
-    idx, _ = find_peaks(bf, distance=dist)
-    order = idx[np.argsort(bf[idx])[::-1]] if idx.size else \
-        np.array([], dtype=int)
-    picked = list(order[:n])
-    while len(picked) < n:
-        mask = np.ones(bf.size, dtype=bool)
-        for i in picked:
-            mask &= np.abs(velocity - velocity[i]) > min_sep
-        if not mask.any():
-            raise RuntimeError(f"Not enough velocity range for {n} "
-                               "separated peaks; reduce --min-sep.")
-        picked.append(int(np.flatnonzero(mask)[np.argmax(bf[mask])]))
-    return picked
+    sm_sigma = max(min_sep / 2.35482 / step, 1.0)
+    vlo, vhi = float(velocity.min()), float(velocity.max())
+    sigma0 = max(min_sep / 2.0, 5.0)
+
+    remaining = [float(c) for c in centers] if centers is not None else None
+    popt = None
+    for k in range(1, n + 1):
+        model = (multi_gauss_no(velocity, *popt) if popt is not None
+                 else float(np.median(bf)))
+        resid_sm = gaussian_filter1d(bf - model, sm_sigma)
+        j = int(np.argmax(resid_sm))
+        if remaining is not None:
+            c = min(remaining, key=lambda g: abs(g - velocity[j]))
+            remaining.remove(c)
+            i = int(np.argmin(np.abs(velocity - c)))
+        else:
+            i = j
+        amp0 = max(float((bf - model)[i]), 1e-6)
+        prev = list(popt[:-1]) if popt is not None else []
+        offset0 = float(popt[-1]) if popt is not None else \
+            float(np.median(bf))
+        p0 = prev + [amp0, float(velocity[i]), sigma0] + [offset0]
+        lo = [0.0, vlo, 1.0] * k + [-np.inf]
+        hi = [np.inf, vhi, 200.0] * k + [np.inf]
+        try:
+            popt, _ = curve_fit(multi_gauss_no, velocity, bf, p0=p0,
+                                bounds=(lo, hi), maxfev=60000)
+        except RuntimeError:
+            popt = np.asarray(p0, dtype=float)
+    return [tuple(float(x) for x in popt[j:j + 3])
+            for j in range(0, 3 * n, 3)]
 
 
 def fit_bf_peaks(velocity, bf, components=1, min_sep=30.0, with_offset=False,
-                 guesses=None, profile="gauss", inst_fwhm=None, epsilon=0.6,
+                 guesses=None, guess_amps=None, guess_sigmas=None,
+                 profile="gauss", inst_fwhm=None, epsilon=0.6,
                  fit_trim=0):
     """Fit the BF/CCF profile following the reference notebook,
     BF-rvplotter and the DDO close-binary series.
@@ -1562,6 +1622,15 @@ def fit_bf_peaks(velocity, bf, components=1, min_sep=30.0, with_offset=False,
     components are returned sorted by RV (callers may re-sort by area or
     by orbital phase).
 
+    guess_amps / guess_sigmas: optional initial amplitudes (BF peak
+    heights read off the plot) and widths [km/s], one per component,
+    paired with `guesses`. With amplitudes given the fit runs directly
+    from the user's [amp, RV, sigma] starting point — the reference-
+    notebook workflow: inspect the smoothed BF visually, type in the
+    per-component estimates, and let curve_fit converge from them.
+    Without them the starting widths/amplitudes come from the staged
+    residual search (see find_bf_peaks).
+
     Multi-component fits always include a shared constant baseline
     offset (saphires d_gaussian_off / t_gaussian_off); with_offset=True
     adds the same constant term to single-component fits (used for CCF
@@ -1569,29 +1638,46 @@ def fit_bf_peaks(velocity, bf, components=1, min_sep=30.0, with_offset=False,
 
     fit_trim: number of bins dropped from each edge of the profile
     before the fit — the BF edges are noisy (saphires bf.analysis,
-    default there 20).
+    default there 20). Capped at 5% of the bins per edge so a coarse
+    velocity step cannot trim real profile range away.
 
     Returns: (list of dict(rv, rv_err, amp, sigma, kind) per component,
     model descriptor dict for eval_bf_model).
     """
     velocity = np.asarray(velocity, dtype=float)
     bf = np.asarray(bf, dtype=float)
-    if fit_trim and velocity.size > 4 * fit_trim:
+    fit_trim = min(int(fit_trim), velocity.size // 20)
+    if fit_trim > 0 and velocity.size > 4 * fit_trim:
         velocity = velocity[fit_trim:-fit_trim]
         bf = bf[fit_trim:-fit_trim]
     if guesses is not None and len(guesses) != components:
         raise ValueError(f"{components} components but {len(guesses)} "
                          "initial guesses given.")
+    for name, extra in (("amplitude", guess_amps), ("sigma", guess_sigmas)):
+        if extra is not None:
+            if not guesses:
+                raise ValueError(f"Initial {name} guesses need the RV "
+                                 "guesses as well.")
+            if len(extra) != components:
+                raise ValueError(f"{components} components but "
+                                 f"{len(extra)} initial {name} guesses "
+                                 "given.")
     if components == 1:
         center = guesses[0] if guesses else None
         return fit_peak_with_base(velocity, bf, with_offset=with_offset,
                                   center=center)
     offset0 = float(np.median(bf))
-    if guesses:
-        centers = [float(g) for g in guesses]
+    if guesses and guess_amps:
+        seeds = [(float(a), float(g),
+                  float(guess_sigmas[k]) if guess_sigmas else None)
+                 for k, (a, g) in enumerate(zip(guess_amps, guesses))]
+    elif guesses:
+        staged = sorted((float(g) for g in guesses),
+                        key=lambda g: -bf[np.argmin(np.abs(velocity - g))])
+        seeds = find_bf_peaks(velocity, bf, components, min_sep,
+                              centers=staged)
     else:
-        centers = [float(velocity[i])
-                   for i in find_bf_peaks(velocity, bf, components, min_sep)]
+        seeds = find_bf_peaks(velocity, bf, components, min_sep)
 
     use_rot = profile == "rot"
     step = float(np.median(np.abs(np.diff(velocity))))
@@ -1599,14 +1685,13 @@ def fit_bf_peaks(velocity, bf, components=1, min_sep=30.0, with_offset=False,
                                                       ) else None
     vlo, vhi = float(velocity.min()), float(velocity.max())
     p0, lo, hi = [], [], []
-    for c in centers:
-        a = float(bf[np.argmin(np.abs(velocity - c))])
+    for a0, c, s0 in seeds:
         if use_rot:
-            p0 += [max(a - offset0, 1e-6), c, 40.0]
+            p0 += [max(a0, 1e-6), c, min(max(s0 or 40.0, 2.0), 300.0)]
             lo += [0.0, vlo, 2.0]
             hi += [np.inf, vhi, 300.0]
         else:
-            p0 += [max(a - offset0, 1e-6), c, 20.0]
+            p0 += [max(a0, 1e-6), c, min(max(s0 or 20.0, 1.0), 200.0)]
             lo += [0.0, vlo, 1.0]
             hi += [np.inf, vhi, 200.0]
     p0, lo, hi = p0 + [offset0], lo + [-np.inf], hi + [np.inf]
@@ -1628,14 +1713,14 @@ def fit_bf_peaks(velocity, bf, components=1, min_sep=30.0, with_offset=False,
     comps = [dict(rv=popt[k + 1], rv_err=float(err[k + 1]), amp=popt[k],
                   sigma=abs(popt[k + 2]), kind=kind)
              for k in range(0, 3 * components, 3)]
-    if guesses:
-        remaining = list(range(components))
-        ordered = []
-        for g in guesses:
-            j = min(remaining, key=lambda k: abs(comps[k]["rv"] - g))
-            remaining.remove(j)
-            ordered.append(comps[j])
-        comps = ordered
+    if guesses and guess_amps:
+        pass  # p0 slots were built in guess order, which curve_fit keeps
+    elif guesses:
+        from itertools import permutations
+        best = min(permutations(range(components)),
+                   key=lambda p: sum(abs(comps[j]["rv"] - g)
+                                     for j, g in zip(p, guesses)))
+        comps = [comps[j] for j in best]
     else:
         comps.sort(key=lambda c: c["rv"])
     return comps, model
@@ -1736,9 +1821,8 @@ def make_bf_figure(bf_result, comps, popt, bjd=None, phase=None,
                                           "inst_sigma_pix")) + offset
         else:
             curve = gauss_no(v, c["amp"], c["rv"], c["sigma"]) + offset
-        area = component_area(c, epsilon)
         ax.plot(v, curve, "--", color=colors[(i - 1) % len(colors)], lw=1.8,
-                label=(f"C{i}: amp = {c['amp']:.4f}, area = {area:.3f}, "
+                label=(f"C{i}: amp = {c['amp']:.4f}, "
                        f"RV = {c['rv']:.2f} km/s"))
 
     ymin = float(min(np.min(bf_result["bf_smooth"]), np.min(model)))
@@ -2025,6 +2109,9 @@ def cmd_bf(args):
                                components=args.components,
                                min_sep=args.min_sep,
                                guesses=getattr(args, "guess", None),
+                               guess_amps=getattr(args, "guess_amp", None),
+                               guess_sigmas=getattr(args, "guess_sigma",
+                                                    None),
                                profile=getattr(args, "profile", "gauss"),
                                inst_fwhm=inst_fwhm,
                                epsilon=args.epsilon,
@@ -2080,6 +2167,11 @@ def cmd_bf(args):
                          "(for information only, not applied)")
     if label_note:
         lines.append(label_note)
+    if args.components >= 2 and not getattr(args, "guess", None):
+        lines.append("Tip: inspect the smoothed BF in the figure, then "
+                     "rerun with --guess RV1 RV2 ... --guess-amp A1 A2 ... "
+                     "(optionally --guess-sigma S1 S2 ...) to start the "
+                     "fit from your visual estimates.")
     if len(comps) >= 2 and all(c["amp"] > 0 for c in comps):
         a1 = component_area(comps[0], args.epsilon)
         if a1 > 0:
@@ -2451,6 +2543,10 @@ def cmd_batch(args):
                                            min_sep=args.min_sep,
                                            guesses=getattr(args, "guess",
                                                            None),
+                                           guess_amps=getattr(
+                                               args, "guess_amp", None),
+                                           guess_sigmas=getattr(
+                                               args, "guess_sigma", None),
                                            profile=getattr(args, "profile",
                                                            "gauss"),
                                            inst_fwhm=inst_fwhm,
@@ -2715,7 +2811,8 @@ def make_args(**overrides):
                 plot=None, output=None,
                 rv_min=-200.0, rv_max=200.0, rv_step=0.5,
                 vel_range=400.0, dv=None, svd_rcond=None, smooth=None,
-                components=1, min_sep=30.0, guess=None, profile="gauss",
+                components=1, min_sep=30.0, guess=None, guess_amp=None,
+                guess_sigma=None, profile="gauss",
                 gamma=None, degrade_template=False,
                 spectrograph=None, resolution=None, vsini=None, epsilon=0.6,
                 poly_order=3, iterations=20, low_clip=1.0, high_clip=4.0,
@@ -2925,6 +3022,19 @@ def run_terminal_wizard():
             if g:
                 kw["guess"] = [float(t) for t in
                                str(g).replace(",", " ").split()]
+                ga = ask("Initial amplitudes, comma-separated (peak "
+                         "heights read off the BF plot; empty: "
+                         "automatic)", allow_empty=True)
+                if ga:
+                    kw["guess_amp"] = [float(t) for t in
+                                       str(ga).replace(",", " ").split()]
+                    gs = ask("Initial widths sigma, comma-separated "
+                             "[km/s] (empty: automatic)",
+                             allow_empty=True)
+                    if gs:
+                        kw["guess_sigma"] = [
+                            float(t) for t in
+                            str(gs).replace(",", " ").split()]
             kw["gamma"] = ask("Systemic velocity gamma [km/s] for the "
                               "phase-based identification (empty: "
                               "estimate)", allow_empty=True, cast=float)
@@ -3226,6 +3336,8 @@ def run_gui():
     ttk.Combobox(bf_frame, textvariable=comp_var, values=[1, 2, 3], width=3,
                  state="readonly").grid(row=0, column=4, padx=4)
     gamma_var = tk.StringVar()
+    guess_amp_var = tk.StringVar()
+    guess_sigma_var = tk.StringVar()
     ttk.Label(bf_frame, text="RV guesses [km/s]:").grid(row=1, column=0,
                                                         sticky="w",
                                                         pady=(4, 0))
@@ -3235,14 +3347,29 @@ def run_gui():
                              "component; fixes the C1/C2/... labels)",
               foreground="gray").grid(row=1, column=3, columnspan=3,
                                       sticky="w", pady=(4, 0))
-    ttk.Label(bf_frame, text="Systemic gamma [km/s]:").grid(row=2, column=0,
+    ttk.Label(bf_frame, text="Amp guesses:").grid(row=2, column=0,
+                                                  sticky="w", pady=(4, 0))
+    ttk.Entry(bf_frame, textvariable=guess_amp_var, width=20
+              ).grid(row=2, column=1, columnspan=2, sticky="w", pady=(4, 0))
+    ttk.Label(bf_frame, text="Sigma guesses [km/s]:").grid(row=2, column=3,
+                                                           sticky="w",
+                                                           pady=(4, 0))
+    ttk.Entry(bf_frame, textvariable=guess_sigma_var, width=14
+              ).grid(row=2, column=4, columnspan=2, sticky="w", pady=(4, 0))
+    ttk.Label(bf_frame, text="(optional, with RV guesses: run once, read "
+                             "the peak heights/widths off the BF plot, "
+                             "then rerun — the fit starts from your "
+                             "estimates)",
+              foreground="gray").grid(row=3, column=1, columnspan=5,
+                                      sticky="w")
+    ttk.Label(bf_frame, text="Systemic gamma [km/s]:").grid(row=4, column=0,
                                                             sticky="w",
                                                             pady=(4, 0))
     ttk.Entry(bf_frame, textvariable=gamma_var, width=10
-              ).grid(row=2, column=1, sticky="w", pady=(4, 0))
+              ).grid(row=4, column=1, sticky="w", pady=(4, 0))
     ttk.Label(bf_frame, text="(optional, for the phase-based component "
                              "identification)",
-              foreground="gray").grid(row=2, column=2, columnspan=4,
+              foreground="gray").grid(row=4, column=2, columnspan=4,
                                       sticky="w", pady=(4, 0))
     on_method_change()
 
@@ -3440,9 +3567,15 @@ def run_gui():
                 payload = cmd_ccf(make_args(**kw))
             else:
                 gtxt = guess_var.get().replace(",", " ").split()
+                gatxt = guess_amp_var.get().replace(",", " ").split()
+                gstxt = guess_sigma_var.get().replace(",", " ").split()
                 kw.update(vel_range=_f(vrange_var, 400.0),
                           components=int(comp_var.get()),
                           guess=[float(t) for t in gtxt] if gtxt else None,
+                          guess_amp=([float(t) for t in gatxt]
+                                     if gatxt else None),
+                          guess_sigma=([float(t) for t in gstxt]
+                                       if gstxt else None),
                           gamma=_f(gamma_var))
                 payload = cmd_bf(make_args(**kw))
         except Exception as exc:
@@ -3580,8 +3713,10 @@ def main():
     p_bf.add_argument("--vel-range", type=float, default=400.0,
                       help="BF window half-width [km/s]")
     p_bf.add_argument("--dv", type=float,
-                      help="Velocity step [km/s] (default: the median "
-                           "velocity pixel of the data)")
+                      help="Velocity step [km/s] (default: the reference "
+                           "stepV 5 km/s, or the median velocity pixel "
+                           "of the data when coarser; per-bin BF "
+                           "amplitudes scale with this step)")
     p_bf.add_argument("--svd-rcond", type=float, default=None,
                       help="Relative SVD cutoff; default: automatic - "
                            "the smallest cutoff (starting at 0, no "
@@ -3597,12 +3732,25 @@ def main():
                       help="Number of stellar components to fit: SB1=1, "
                            "SB2=2, SB3/triple=3")
     p_bf.add_argument("--min-sep", type=float, default=30.0,
-                      help="Minimum separation of the peaks [km/s]")
+                      help="Component-search scale [km/s]: the width a "
+                           "residual structure must survive to seed a "
+                           "new component (noise narrower than this is "
+                           "ignored)")
     p_bf.add_argument("--guess", type=float, nargs="+",
                       help="Initial RV guesses [km/s], one per component "
                            "(BF-rvplotter gausspars practice); also fixes "
                            "the component labels: C1 = first guess, "
                            "C2 = second, ...")
+    p_bf.add_argument("--guess-amp", type=float, nargs="+",
+                      help="Initial amplitude guesses (BF peak heights "
+                           "read off the plot), one per component, "
+                           "paired with --guess: run once without "
+                           "guesses, inspect the smoothed BF, then rerun "
+                           "with the visual estimates — the reference-"
+                           "notebook workflow")
+    p_bf.add_argument("--guess-sigma", type=float, nargs="+",
+                      help="Initial width guesses [km/s], one per "
+                           "component, paired with --guess/--guess-amp")
     p_bf.add_argument("--gamma", type=float,
                       help="Systemic velocity [km/s] for the phase-based "
                            "component identification (default: estimated "
@@ -3679,7 +3827,8 @@ def main():
                          help="BF window half-width [km/s]")
     p_batch.add_argument("--dv", type=float,
                          help="BF velocity step [km/s] (default: the "
-                              "median velocity pixel of the data)")
+                              "reference stepV 5 km/s, or the median "
+                              "velocity pixel of the data when coarser)")
     p_batch.add_argument("--svd-rcond", type=float, default=None,
                          help="BF relative SVD cutoff (default: "
                               "automatic)")
@@ -3691,10 +3840,17 @@ def main():
                          choices=[1, 2, 3],
                          help="Components to fit (default: 2)")
     p_batch.add_argument("--min-sep", type=float, default=30.0,
-                         help="Minimum peak separation [km/s]")
+                         help="Component-search scale [km/s] (see bf "
+                              "--min-sep)")
     p_batch.add_argument("--guess", type=float, nargs="+",
                          help="Initial RV guesses [km/s], one per "
                               "component; also fixes the component labels")
+    p_batch.add_argument("--guess-amp", type=float, nargs="+",
+                         help="Initial amplitude guesses, one per "
+                              "component, paired with --guess")
+    p_batch.add_argument("--guess-sigma", type=float, nargs="+",
+                         help="Initial width guesses [km/s], one per "
+                              "component, paired with --guess")
     p_batch.add_argument("--gamma", type=float,
                          help="Systemic velocity [km/s] for the "
                               "phase-based component identification")

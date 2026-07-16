@@ -13,7 +13,12 @@ with a template spectrum. Two independent methods are available:
   solved linearly via Singular Value Decomposition. Because the method is
   linear, the components of a binary (SB2) or triple (SB3) appear as separate
   sharp peaks, so each component's RV is measured independently. Recommended
-  for binary and multiple systems.
+  for binary and multiple systems. The spectra enter the SVD as line depths
+  (1 − flux), following Rucinski: the continuum then drops out of the linear
+  problem, the BF baseline sits at zero and the wings decay cleanly. The
+  velocity step defaults to the reference stepV = 5 km/s (per-bin BF
+  amplitudes scale with the step, so this keeps them on the
+  reference-implementation scale; `--dv` overrides).
 
 Several practices are adopted from the
 [saphires](https://github.com/tofflemire/saphires) package:
@@ -62,10 +67,16 @@ python rv_analysis.py
 A small window opens: resolve the target via SIMBAD (or enter RA/Dec), pick
 the normalized observed spectrum and the template, choose **CCF** or **BF**,
 and press **Run**. The fit is shown in the window with one dashed profile per
-component, labelled `C1: amp = ..., area = ..., RV = ... km/s` — `amp` is the
-peak height read off the BF axis, `area` the profile integral (proportional
-to the component's light contribution). Nothing is written to disk until you
-press **Save** next to Run.
+component, labelled `C1: amp = ..., RV = ... km/s` — `amp` is the peak height
+read off the BF axis (the profile integrals/areas and the light ratios stay
+in the text summary). Nothing is written to disk until you press **Save**
+next to Run.
+
+For multi-component fits the **Amp/Sigma guesses** fields enable the
+reference-notebook workflow: run once, read each component's approximate
+peak height (y-axis), RV (x-axis) and width off the smoothed BF, type them
+in, and rerun — the fit then converges from your visual estimates instead
+of the automatic search.
 
 Other GUI features:
 
@@ -87,9 +98,15 @@ Other GUI features:
 # CCF — single star (SB1)
 python rv_analysis.py ccf --spectrum spectrum.txt --template template.prf
 
-# BF — binary star (SB2), two components
+# BF — binary star (SB2), two components (automatic component search)
 python rv_analysis.py bf --spectrum spectrum.txt --template template.prf \
     --components 2
+
+# BF — triple system, starting from your own estimates read off the BF plot
+# (run the automatic mode first, inspect result_BF.png, then:)
+python rv_analysis.py bf --spectrum spectrum.txt --template template.prf \
+    --components 3 --guess 15 -250 0 --guess-amp 0.02 0.002 0.005 \
+    --guess-sigma 50 25 10
 
 # continuum-normalize a raw spectrum first
 python rv_analysis.py normalize --spectrum raw.fits --output spectrum_norm.txt
@@ -152,6 +169,25 @@ Two continuum models are available (`--fit-method`):
 - **bspline** — a cubic B-spline with interior knots every window
   (the saphires `cont_norm` model).
 
+### BF components: automatic search and user estimates
+
+Without guesses the components are found automatically by **iterative
+fit-and-subtract**: one Gaussian is fitted first, the next component is
+seeded on the largest coherent structure left in the residual (smoothed on
+the `--min-sep` velocity scale, so single-bin noise spikes are ignored),
+and the model is refitted at each step. This finds a faint secondary far
+from the primary — whose own shoulder wiggles would win a naive
+highest-local-maxima search — and a narrow tertiary superposed on the broad
+primary at nearly the same RV.
+
+When the automatic search is not enough, give the fit your own starting
+point (the reference-notebook workflow): run once, inspect the smoothed BF
+in `result_BF.png`, then rerun with per-component estimates —
+`--guess RV1 RV2 ...` (x-axis positions), `--guess-amp A1 A2 ...` (peak
+heights on the y-axis) and optionally `--guess-sigma S1 S2 ...` (widths in
+km/s). With amplitudes given, `curve_fit` starts directly from your
+[amp, RV, sigma] values, exactly like the reference notebook.
+
 ### BF component labels
 
 By default the fitted components are labelled by BF area: **C1 is the
@@ -165,15 +201,16 @@ overrides are available:
   listed last as the tertiary).
 
 The light ratios reported with multi-component fits come from the fitted
-profile integrals (the `area` values shown in the figure legend and the
-result summary; the `amp` values are the peak heights on the BF axis).
+profile integrals (the `area` values in the result summary; the figure
+legend shows each component's `amp` — the real peak height on the BF
+axis — and RV).
 
 ### Outputs
 
 | File | Content |
 |---|---|
 | `result_CCF.txt` / `result_BF.txt` | RVs with errors, uncorrected and barycentric-corrected, amplitudes, areas, widths, light ratios |
-| `result_CCF.png` / `result_BF.png` | Fit figure (BF: one dashed profile per component with `amp`, `area` and RV in the legend) |
+| `result_CCF.png` / `result_BF.png` | Fit figure (BF: one dashed profile per component with `amp` and RV in the legend) |
 | `result_CCF_linecheck.png` / `result_BF_linecheck.png` | Model reliability check at strong diagnostic lines |
 | `result_RV_curve.txt` / `.png` | `batch` mode: BJD, phase and per-component RVs for the whole series |
 | `result_BF_profiles.png` | `batch` mode: all BF profiles stacked by orbital phase |
