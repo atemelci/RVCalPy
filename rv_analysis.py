@@ -277,13 +277,10 @@ def read_iraf_multispec(hdu):
         return None
     data = np.asarray(hdu.data, dtype=float)
     if data.ndim == 3:
-        data = data[0]      # band 1 = the extracted spectrum
+        data = data[0]
     if data.ndim != 2:
         return None
 
-    # IRAF splits the long attribute string across WAT2_NNN cards at
-    # exactly 68 characters; shorter card values must be padded back,
-    # otherwise digits are silently glued together.
     keys = sorted((k for k in h if str(k).startswith("WAT2_")),
                   key=lambda s: int(str(s).split("_")[1]))
     wat2 = "".join(str(h[k]).ljust(68) for k in keys)
@@ -335,9 +332,6 @@ def read_iraf_multispec(hdu):
                              f"{dtype} is not supported.")
         wl = wl / (1.0 + z)
         flux = data[row]
-        # a nonlinear dispersion solution can fold back over the extreme
-        # pixels (extrapolation beyond the fitted lines); keep the
-        # longest strictly ascending run of the order
         steps = np.flatnonzero(np.diff(wl) <= 0)
         if steps.size:
             edges = np.concatenate(([0], steps + 1, [wl.size]))
@@ -482,15 +476,12 @@ def fits_header_info(path):
     info["obstime"] = h.get("DATE-OBS") or h.get("DATE_OBS")
     if info["obstime"] and ":" not in str(info["obstime"]) \
             and "T" not in str(info["obstime"]):
-        # old-standard date-only DATE-OBS ('16/10/98'): the UT time of
-        # day lives in a separate card (UTMIDDLE is already
-        # mid-exposure; plain UT is usually shutter-open)
         for key in ("UTMIDDLE", "UT", "UTC-OBS", "UT-OBS", "TIME-OBS",
                     "UTSHUT"):
             ut = h.get(key)
             if ut in (None, ""):
                 continue
-            if isinstance(ut, (int, float)):     # decimal hours
+            if isinstance(ut, (int, float)):
                 hh = int(ut) % 24
                 mm = int((ut % 1) * 60)
                 ss = ((ut % 1) * 60 % 1) * 60
@@ -498,7 +489,7 @@ def fits_header_info(path):
             if ":" in str(ut):
                 info["obstime"] = f"{info['obstime']} {ut}"
                 if key == "UTMIDDLE":
-                    info["exptime"] = 0.0    # already mid-exposure
+                    info["exptime"] = 0.0
                 break
     info["exptime"] = h.get("EXPTIME") if info["exptime"] is None \
         else info["exptime"]
@@ -710,12 +701,12 @@ def _fit_continuum_bspline(wl, flux, iterations, low_clip, high_clip,
     return cont
 
 
-def normalize_continuum(wl, flux, poly_order=3, iterations=10,
+def normalize_continuum(wl, flux, poly_order=3, iterations=20,
                         low_clip=1.0, high_clip=4.0, window=200.0,
                         method="poly"):
     """Iterative continuum normalization of a raw spectrum (FEROS-style).
 
-    The defaults (polynomial order 3, 10 clipping iterations) are tuned
+    The defaults (polynomial order 3, 20 clipping iterations) are tuned
     for the 500-550 nm region typically used for RV work: over such a
     narrow window the continuum is smooth, so a low-order polynomial
     avoids over-fitting broad features while the extra iterations let the
@@ -793,7 +784,7 @@ def normalize_continuum(wl, flux, poly_order=3, iterations=10,
     return norm, cont
 
 
-def normalize_spectrum_file(path, fmt="auto", poly_order=3, iterations=10,
+def normalize_spectrum_file(path, fmt="auto", poly_order=3, iterations=20,
                             low_clip=1.0, high_clip=4.0, window=200.0,
                             method="poly"):
     """Normalize a raw spectrum file order by order and merge.
@@ -1112,7 +1103,6 @@ SPECTROGRAPHS = [
     ("PEPSI",     120000, "LBT (standard mode)"),
     ("NARVAL",     65000, "TBL, Pic du Midi (Gaia benchmark source)"),
     ("ESPaDOnS",   68000, "CFHT (Gaia benchmark source)"),
-    ("GaiaFGK",    70000, "Gaia FGK Benchmark Stars library (homogenized)"),
     ("Whoppshel-50",  30000, "Whoppshel echelle (Shelyak Instruments), "
                              "50 micron fiber + FIGU unit"),
     ("Whoppshel-105", 15000, "Whoppshel echelle (Shelyak Instruments), "
@@ -1474,8 +1464,6 @@ def compute_bf_orders(orders, tpl_wl, tpl_flux, vel_range=400.0, dv=None,
                 n_orders=len(results))
 
 
-# Bins dropped from each edge of a BF before profile fitting; the edges
-# of the SVD solution are noisy (saphires bf.analysis fit_trim default).
 BF_FIT_TRIM = 20
 
 
@@ -1598,11 +1586,6 @@ def fit_bf_peaks(velocity, bf, components=1, min_sep=30.0, with_offset=False,
         center = guesses[0] if guesses else None
         return fit_peak_with_base(velocity, bf, with_offset=with_offset,
                                   center=center)
-    # Multi-component fits always include a shared constant baseline
-    # offset (the saphires d_gaussian_off / t_gaussian_off model): a BF
-    # computed against an observed template sits on a non-zero pedestal
-    # and an offset-free sum of profiles must inflate its widths to
-    # absorb it, biasing every amplitude and sigma.
     offset0 = float(np.median(bf))
     if guesses:
         centers = [float(g) for g in guesses]
@@ -1742,9 +1725,6 @@ def make_bf_figure(bf_result, comps, popt, bjd=None, phase=None,
     model = eval_bf_model(v, popt)
     ax.plot(v, model, "k-", lw=1.2, label="Total fit")
 
-    # per-component profiles, saphires bf_singleplot style: one dashed
-    # curve per component on the shared baseline, the profile integral
-    # ('Amp') and the RV in its legend entry
     offset = model_offset(popt["popt"])
     epsilon = popt.get("epsilon", 0.6)
     colors = ["C0", "C3", "C2"]
@@ -2018,12 +1998,6 @@ def cmd_bf(args):
     tpl_wl, tpl_flux = load_template(args)
     resolution = get_resolution(args)
     inst_fwhm = C_KMS / resolution if resolution else None
-    # In the BF flow the resolution R drives the BF smoothing (and the
-    # rot-profile instrumental convolution) ONLY — the saphires
-    # bf.analysis semantics. Degrading the template as well would count
-    # the instrumental profile twice, and is plain wrong for an
-    # observed template that already carries it; it stays available for
-    # ultra-sharp synthetic templates via --degrade-template.
     tpl_wl, tpl_flux = prepare_template(
         tpl_wl, tpl_flux,
         resolution=(resolution if getattr(args, "degrade_template", False)
@@ -2369,9 +2343,6 @@ def cmd_batch(args):
     tpl_wl, tpl_flux = load_template(args)
     resolution = get_resolution(args)
     inst_fwhm = C_KMS / resolution if resolution else None
-    # BF: R only smooths the BF (saphires semantics; --degrade-template
-    # opts in for ultra-sharp synthetic templates). CCF: the template is
-    # degraded to R as before — matched filtering, no smoothing step.
     degrade = args.method == "ccf" or getattr(args, "degrade_template",
                                               False)
     tpl_wl, tpl_flux = prepare_template(
@@ -2745,7 +2716,7 @@ def make_args(**overrides):
                 components=1, min_sep=30.0, guess=None, profile="gauss",
                 gamma=None, degrade_template=False,
                 spectrograph=None, resolution=None, vsini=None, epsilon=0.6,
-                poly_order=3, iterations=10, low_clip=1.0, high_clip=4.0,
+                poly_order=3, iterations=20, low_clip=1.0, high_clip=4.0,
                 window=20.0, fit_method="poly", no_save=False)
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -2882,7 +2853,7 @@ def _ask_common_inputs(kw):
         raw = ask("Raw spectrum file (FITS or ASCII)",
                   cast=str, validate=os.path.isfile)
         order = ask("  Continuum polynomial order", default=3, cast=int)
-        iters = ask("  Clipping iterations", default=10, cast=int)
+        iters = ask("  Clipping iterations", default=20, cast=int)
         fitm = ask("  Continuum model: [1] windowed polynomial "
                    "[2] B-spline", default="1", cast=str,
                    validate=lambda s: s in ("1", "2"))
@@ -2952,10 +2923,6 @@ def run_terminal_wizard():
             if g:
                 kw["guess"] = [float(t) for t in
                                str(g).replace(",", " ").split()]
-            prof = ask("Peak model: [1] Gaussian  [2] rotational profile "
-                       "(DDO practice, width = vsini)", default="1",
-                       cast=str, validate=lambda s: s in ("1", "2"))
-            kw["profile"] = "rot" if prof == "2" else "gauss"
             kw["gamma"] = ask("Systemic velocity gamma [km/s] for the "
                               "phase-based identification (empty: "
                               "estimate)", allow_empty=True, cast=float)
@@ -3058,7 +3025,7 @@ def run_gui():
                                                           columnspan=2,
                                                           sticky="w",
                                                           pady=(4, 0))
-    bary_var = tk.BooleanVar(value=True)
+    bary_var = tk.BooleanVar(value=False)
     ttk.Checkbutton(trow, text="Apply barycentric correction",
                     variable=bary_var).grid(row=1, column=7, sticky="w",
                                             padx=(8, 0), pady=(4, 0))
@@ -3256,12 +3223,7 @@ def run_gui():
     ttk.Label(bf_frame, text="Components").grid(row=0, column=3)
     ttk.Combobox(bf_frame, textvariable=comp_var, values=[1, 2, 3], width=3,
                  state="readonly").grid(row=0, column=4, padx=4)
-    profile_var = tk.StringVar(value="Gaussian")
     gamma_var = tk.StringVar()
-    ttk.Label(bf_frame, text="Profile").grid(row=0, column=5, padx=(12, 0))
-    ttk.Combobox(bf_frame, textvariable=profile_var,
-                 values=["Gaussian", "Rotational (vsini)"], width=16,
-                 state="readonly").grid(row=0, column=6, padx=4)
     ttk.Label(bf_frame, text="RV guesses [km/s]:").grid(row=1, column=0,
                                                         sticky="w",
                                                         pady=(4, 0))
@@ -3352,8 +3314,8 @@ def run_gui():
 
         raw_var = tk.StringVar()
         ord_var = tk.StringVar(value="3")
-        it_var = tk.StringVar(value="10")
-        fitm_var = tk.StringVar(value="Windowed polynomial")
+        it_var = tk.StringVar(value="20")
+        fitm_var = tk.StringVar(value="Polynomial")
 
         ttk.Label(frm, text="Raw spectrum (FITS/ASCII):").grid(row=0, column=0,
                                                                sticky="w")
@@ -3366,8 +3328,8 @@ def run_gui():
         prow = ttk.Frame(frm)
         prow.grid(row=1, column=0, columnspan=3, sticky="w", pady=6)
         ttk.Label(prow, text="Continuum fit").pack(side="left")
-        ttk.Combobox(prow, textvariable=fitm_var, width=19, state="readonly",
-                     values=["Windowed polynomial", "B-spline"]
+        ttk.Combobox(prow, textvariable=fitm_var, width=14, state="readonly",
+                     values=["Polynomial", "B-spline"]
                      ).pack(side="left", padx=(2, 12))
         ttk.Label(prow, text="Polynomial order").pack(side="left")
         ttk.Entry(prow, textvariable=ord_var, width=4).pack(side="left", padx=(2, 12))
@@ -3466,8 +3428,6 @@ def run_gui():
                 kw.update(vel_range=_f(vrange_var, 400.0),
                           components=int(comp_var.get()),
                           guess=[float(t) for t in gtxt] if gtxt else None,
-                          profile=("rot" if profile_var.get().startswith(
-                              "Rot") else "gauss"),
                           gamma=_f(gamma_var))
                 payload = cmd_bf(make_args(**kw))
         except Exception as exc:
@@ -3628,13 +3588,6 @@ def main():
                            "(BF-rvplotter gausspars practice); also fixes "
                            "the component labels: C1 = first guess, "
                            "C2 = second, ...")
-    p_bf.add_argument("--profile", default="gauss",
-                      choices=["gauss", "rot"],
-                      help="Peak model for multi-component fits: 'gauss' "
-                           "(default) or 'rot' - Gray (1992) rotational "
-                           "profiles, the DDO-series practice for the "
-                           "rotation-dominated components of close "
-                           "binaries (the fitted width is then vsini)")
     p_bf.add_argument("--gamma", type=float,
                       help="Systemic velocity [km/s] for the phase-based "
                            "component identification (default: estimated "
@@ -3681,7 +3634,7 @@ def main():
                          help="Continuum-normalize each raw spectrum first")
     p_batch.add_argument("--poly-order", type=int, default=3,
                          help="Continuum polynomial order (with --normalize)")
-    p_batch.add_argument("--iterations", type=int, default=10,
+    p_batch.add_argument("--iterations", type=int, default=20,
                          help="Clipping iterations (with --normalize)")
     p_batch.add_argument("--window", type=float, default=20.0,
                          help="Continuum window width [nm] (with "
@@ -3727,11 +3680,6 @@ def main():
     p_batch.add_argument("--guess", type=float, nargs="+",
                          help="Initial RV guesses [km/s], one per "
                               "component; also fixes the component labels")
-    p_batch.add_argument("--profile", default="gauss",
-                         choices=["gauss", "rot"],
-                         help="Peak model: 'gauss' (default) or 'rot' "
-                              "(Gray rotational profiles; the width is "
-                              "then vsini)")
     p_batch.add_argument("--gamma", type=float,
                          help="Systemic velocity [km/s] for the "
                               "phase-based component identification")
@@ -3780,9 +3728,8 @@ def main():
     p_norm.add_argument("--poly-order", type=int, default=3,
                         help="Continuum polynomial order (default tuned "
                              "for the 500-550 nm RV region)")
-    p_norm.add_argument("--iterations", type=int, default=10,
-                        help="Sigma-clipping iterations (default tuned "
-                             "for the 500-550 nm RV region)")
+    p_norm.add_argument("--iterations", type=int, default=20,
+                        help="Sigma-clipping iterations (default 20)")
     p_norm.add_argument("--low-clip", type=float, default=1.0,
                         help="Rejection threshold below the fit [sigma]")
     p_norm.add_argument("--high-clip", type=float, default=4.0,
