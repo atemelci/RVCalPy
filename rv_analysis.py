@@ -257,6 +257,97 @@ def read_ascii_spectrum(path):
     return wl, fx
 
 
+def read_iraf_multispec(hdu):
+    """IRAF echelle 'multispec' reader: a 2D (orders x pixels) image
+    whose wavelength solution lives in the WAT2_* header cards
+    (wtype=multispec, one spec<N> attribute per order). Supports the
+    dispersion types written by dispcor/ecreidentify: dtype 0 (linear),
+    1 (log-linear) and 2 (nonlinear) with Chebyshev (ftype 1) and
+    Legendre (ftype 2) function blocks; the Doppler factor z of each
+    order is applied as w/(1+z), so rv/dop-corrected products come out
+    in their corrected frame. Returns a list of (wavelength, flux)
+    orders, or None when the HDU is not a multispec image.
+    """
+    import re
+    h = hdu.header
+    if "multispec" not in str(h.get("WAT0_001", "")).lower() and \
+            str(h.get("CTYPE1", "")).strip().upper() != "MULTISPE":
+        return None
+    if hdu.data is None:
+        return None
+    data = np.asarray(hdu.data, dtype=float)
+    if data.ndim == 3:
+        data = data[0]      # band 1 = the extracted spectrum
+    if data.ndim != 2:
+        return None
+
+    # IRAF splits the long attribute string across WAT2_NNN cards at
+    # exactly 68 characters; shorter card values must be padded back,
+    # otherwise digits are silently glued together.
+    keys = sorted((k for k in h if str(k).startswith("WAT2_")),
+                  key=lambda s: int(str(s).split("_")[1]))
+    wat2 = "".join(str(h[k]).ljust(68) for k in keys)
+    specs = re.findall(r'spec(\d+)\s*=\s*"([^"]+)"', wat2)
+    if not specs:
+        raise ValueError("multispec FITS without spec<N> attributes in "
+                         "the WAT2 cards.")
+
+    orders = []
+    npix = data.shape[1]
+    p = np.arange(1.0, npix + 1.0)
+    for num, s in sorted(specs, key=lambda t: int(t[0])):
+        row = int(num) - 1
+        if row >= data.shape[0]:
+            continue
+        vals = s.split()
+        dtype = int(float(vals[2]))
+        w1, dw = float(vals[3]), float(vals[4])
+        z = float(vals[6])
+        if dtype in (0, -1):
+            wl = w1 + dw * (p - 1.0)
+        elif dtype == 1:
+            wl = 10.0 ** (w1 + dw * (p - 1.0))
+        elif dtype == 2:
+            wl = np.zeros(npix)
+            i = 9
+            while i + 2 < len(vals):
+                wt, w0 = float(vals[i]), float(vals[i + 1])
+                ftype = int(float(vals[i + 2]))
+                if ftype not in (1, 2):
+                    raise ValueError(
+                        f"multispec order {num}: function type {ftype} "
+                        "is not supported (only Chebyshev=1 and "
+                        "Legendre=2); re-run IRAF dispcor with a "
+                        "chebyshev/legendre solution or linearize the "
+                        "spectrum.")
+                order_n = int(float(vals[i + 3]))
+                pmin, pmax = float(vals[i + 4]), float(vals[i + 5])
+                coeffs = [float(v) for v in vals[i + 6:i + 6 + order_n]]
+                n = (2.0 * p - (pmax + pmin)) / (pmax - pmin)
+                if ftype == 1:
+                    wfun = np.polynomial.chebyshev.chebval(n, coeffs)
+                else:
+                    wfun = np.polynomial.legendre.legval(n, coeffs)
+                wl = wl + wt * (w0 + wfun)
+                i += 6 + order_n
+        else:
+            raise ValueError(f"multispec order {num}: dispersion type "
+                             f"{dtype} is not supported.")
+        wl = wl / (1.0 + z)
+        flux = data[row]
+        # a nonlinear dispersion solution can fold back over the extreme
+        # pixels (extrapolation beyond the fitted lines); keep the
+        # longest strictly ascending run of the order
+        steps = np.flatnonzero(np.diff(wl) <= 0)
+        if steps.size:
+            edges = np.concatenate(([0], steps + 1, [wl.size]))
+            a, b = max(zip(edges[:-1], edges[1:]), key=lambda r: r[1] - r[0])
+            wl, flux = wl[a:b], flux[a:b]
+        if wl.size > 10:
+            orders.append((wl, flux))
+    return orders or None
+
+
 def read_fits_spectrum(path):
     """FITS spectrum reader for the common layouts of raw/pipeline data.
 
@@ -264,6 +355,8 @@ def read_fits_spectrum(path):
       - ESPRESSO S2D (flux ext=1, wavelength ext=4, 2D echelle orders)
       - phase-3 style binary tables with WAVE/LAMBDA and FLUX columns
         (FEROS, HARPS, UVES, ...)
+      - IRAF echelle 'multispec' images (CTYPE1=MULTISPE, WAT2 cards;
+        linear, log and Chebyshev/Legendre dispersion solutions)
       - 1D image HDUs with a linear wavelength WCS (CRVAL1/CDELT1): the
         classic IRAF product, and multi-extension echelle products that
         carry one order per extension (e.g. SALT HRS pipeline files) —
@@ -294,6 +387,10 @@ def read_fits_spectrum(path):
                 fx = np.ravel(np.asarray(hdu.data[fname], dtype=float))
                 order = np.argsort(wl)
                 return [(wl[order], fx[order])]
+        for hdu in hdul:
+            ms = read_iraf_multispec(hdu)
+            if ms:
+                return ms
         wcs_orders = []
         for hdu in hdul:
             if hdu.data is None:
@@ -332,8 +429,9 @@ def read_fits_spectrum(path):
                else " (no data)")
             for i, h in enumerate(hdul))
     raise ValueError(f"{path}: unrecognized FITS layout ({layout}); "
-                     "expected S2D, a WAVE/FLUX binary table, or a 1D "
-                     "image with CRVAL1/CDELT1.")
+                     "expected S2D, a WAVE/FLUX binary table, an IRAF "
+                     "multispec image (WAT2 cards), or a 1D image with "
+                     "CRVAL1/CDELT1.")
 
 
 def read_spectrum(path, fmt="auto"):
@@ -577,8 +675,44 @@ def _fit_continuum_single(wl, flux, poly_order, iterations,
     return cont
 
 
+def _fit_continuum_bspline(wl, flux, iterations, low_clip, high_clip,
+                           window):
+    """Iterative-clipping cubic B-spline continuum fit over a whole
+    segment, interior knots every `window` Angstrom — the saphires
+    utils.cont_norm approach (bkspace = w_width). Same asymmetric
+    clipping as the polynomial fit, so the spline converges onto the
+    continuum regions; returns the continuum on every pixel."""
+    from scipy.interpolate import LSQUnivariateSpline
+
+    good = np.isfinite(wl) & np.isfinite(flux) & (flux > 0)
+    if good.sum() < 8:
+        raise ValueError("Too few valid pixels for continuum fitting.")
+    mask = good.copy()
+    cont = None
+    for _ in range(iterations):
+        x, keep_first = np.unique(wl[mask], return_index=True)
+        y = flux[mask][keep_first]
+        knots = np.arange(x.min() + window, x.max() - 0.5 * window, window)
+        knots = [t for t in knots
+                 if ((x > t - window) & (x <= t)).sum() > 4
+                 and ((x > t) & (x <= t + window)).sum() > 4]
+        spl = LSQUnivariateSpline(x, y, t=knots, k=3)
+        cont = spl(wl)
+        resid = flux - cont
+        sigma = np.std(resid[mask])
+        if sigma <= 0:
+            break
+        new_mask = good & (resid > -low_clip * sigma) \
+            & (resid < high_clip * sigma)
+        if new_mask.sum() < 8 or np.array_equal(new_mask, mask):
+            break
+        mask = new_mask
+    return cont
+
+
 def normalize_continuum(wl, flux, poly_order=3, iterations=10,
-                        low_clip=1.0, high_clip=4.0, window=200.0):
+                        low_clip=1.0, high_clip=4.0, window=200.0,
+                        method="poly"):
     """Iterative continuum normalization of a raw spectrum (FEROS-style).
 
     The defaults (polynomial order 3, 10 clipping iterations) are tuned
@@ -607,11 +741,25 @@ def normalize_continuum(wl, flux, poly_order=3, iterations=10,
         than ~300 A keep the classic single fit. None/0 forces a single
         fit regardless of width.
 
+    method : continuum model. 'poly' (default) - the windowed
+        polynomial described above; 'bspline' - a cubic B-spline with
+        interior knots every `window` Angstrom, the saphires
+        utils.cont_norm model. Both use the same iterative asymmetric
+        clipping, so the fit always references the continuum regions.
+
     Returns (normalized_flux, continuum). Pixels where the continuum is
     not positive come back as NaN.
     """
     wl = np.asarray(wl, dtype=float)
     flux = np.asarray(flux, dtype=float)
+
+    if method == "bspline":
+        cont = _fit_continuum_bspline(wl, flux, iterations,
+                                      low_clip, high_clip,
+                                      window or 200.0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            norm = np.where(cont > 0, flux / cont, np.nan)
+        return norm, cont
 
     span = np.nanmax(wl) - np.nanmin(wl)
     if window and span > 1.5 * window:
@@ -646,7 +794,8 @@ def normalize_continuum(wl, flux, poly_order=3, iterations=10,
 
 
 def normalize_spectrum_file(path, fmt="auto", poly_order=3, iterations=10,
-                            low_clip=1.0, high_clip=4.0, window=200.0):
+                            low_clip=1.0, high_clip=4.0, window=200.0,
+                            method="poly"):
     """Normalize a raw spectrum file order by order and merge.
 
     Returns (wl, norm_flux, orders_raw) where orders_raw is the list of
@@ -660,7 +809,8 @@ def normalize_spectrum_file(path, fmt="auto", poly_order=3, iterations=10,
         if wl.size < poly_order + 2:
             continue
         nf, cont = normalize_continuum(wl, fx, poly_order, iterations,
-                                       low_clip, high_clip, window=window)
+                                       low_clip, high_clip, window=window,
+                                       method=method)
         keep = np.isfinite(nf)
         normed.append((wl[keep], nf[keep]))
         diag.append((wl, fx, cont))
@@ -2058,13 +2208,16 @@ def cmd_normalize(args):
     """Normalize a raw spectrum to the continuum and write an ASCII file
     that can be fed directly into the CCF/BF analysis."""
     window_a = args.window * 10.0 if getattr(args, "window", None) else None
+    method = getattr(args, "fit_method", "poly") or "poly"
+    desc = ("cubic B-spline" if method == "bspline"
+            else f"poly order {args.poly_order}")
     print(f"Normalizing {args.spectrum} "
-          f"(poly order {args.poly_order}, {args.iterations} iterations"
+          f"({desc}, {args.iterations} iterations"
           + (f", {args.window:g} nm windows" if window_a else "") + ")...")
     wl, nf, diag = normalize_spectrum_file(
         args.spectrum, args.format, poly_order=args.poly_order,
         iterations=args.iterations, low_clip=args.low_clip,
-        high_clip=args.high_clip, window=window_a)
+        high_clip=args.high_clip, window=window_a, method=method)
 
     tpl = None
     if args.template or args.teff is not None:
@@ -2078,8 +2231,7 @@ def cmd_normalize(args):
                fmt="%.5f %.5f",
                header=f"wavelength [nm]  normalized flux; "
                       f"from {args.spectrum} "
-                      f"(poly order {args.poly_order}, "
-                      f"{args.iterations} iterations)")
+                      f"({desc}, {args.iterations} iterations)")
     print(f"Normalized spectrum written: {outfile} (wavelength in nm)")
 
     plotfile = args.plot or "result_normalization.png"
@@ -2280,7 +2432,8 @@ def cmd_batch(args):
                     path, args.format, poly_order=args.poly_order,
                     iterations=args.iterations,
                     window=(args.window * 10.0
-                            if getattr(args, "window", None) else None))
+                            if getattr(args, "window", None) else None),
+                    method=getattr(args, "fit_method", "poly") or "poly")
                 orders = [(wl, fx)]
             else:
                 orders = read_spectrum(path, args.format)
@@ -2593,7 +2746,7 @@ def make_args(**overrides):
                 gamma=None, degrade_template=False,
                 spectrograph=None, resolution=None, vsini=None, epsilon=0.6,
                 poly_order=3, iterations=10, low_clip=1.0, high_clip=4.0,
-                window=20.0, no_save=False)
+                window=20.0, fit_method="poly", no_save=False)
     base.update(overrides)
     return argparse.Namespace(**base)
 
@@ -2730,8 +2883,14 @@ def _ask_common_inputs(kw):
                   cast=str, validate=os.path.isfile)
         order = ask("  Continuum polynomial order", default=3, cast=int)
         iters = ask("  Clipping iterations", default=10, cast=int)
+        fitm = ask("  Continuum model: [1] windowed polynomial "
+                   "[2] B-spline", default="1", cast=str,
+                   validate=lambda s: s in ("1", "2"))
         payload = cmd_normalize(make_args(spectrum=raw, poly_order=order,
-                                          iterations=iters))
+                                          iterations=iters,
+                                          fit_method=("bspline"
+                                                      if fitm == "2"
+                                                      else "poly")))
         spectrum = payload["output"]
         print(f"  Using normalized spectrum: {spectrum}\n")
         hdr = fits_header_info(raw)
@@ -3194,6 +3353,7 @@ def run_gui():
         raw_var = tk.StringVar()
         ord_var = tk.StringVar(value="3")
         it_var = tk.StringVar(value="10")
+        fitm_var = tk.StringVar(value="Windowed polynomial")
 
         ttk.Label(frm, text="Raw spectrum (FITS/ASCII):").grid(row=0, column=0,
                                                                sticky="w")
@@ -3205,6 +3365,10 @@ def run_gui():
 
         prow = ttk.Frame(frm)
         prow.grid(row=1, column=0, columnspan=3, sticky="w", pady=6)
+        ttk.Label(prow, text="Continuum fit").pack(side="left")
+        ttk.Combobox(prow, textvariable=fitm_var, width=19, state="readonly",
+                     values=["Windowed polynomial", "B-spline"]
+                     ).pack(side="left", padx=(2, 12))
         ttk.Label(prow, text="Polynomial order").pack(side="left")
         ttk.Entry(prow, textvariable=ord_var, width=4).pack(side="left", padx=(2, 12))
         ttk.Label(prow, text="Iterations").pack(side="left")
@@ -3225,6 +3389,9 @@ def run_gui():
                           template=tpl_var.get().strip() or None,
                           poly_order=int(ord_var.get()),
                           iterations=int(it_var.get()),
+                          fit_method=("bspline"
+                                      if fitm_var.get().startswith("B-")
+                                      else "poly"),
                           resolution=_f(res_var), vsini=_f(vsini_var))
                 state["payload"] = cmd_normalize(make_args(**kw))
             except Exception as exc:
@@ -3520,6 +3687,10 @@ def main():
                          help="Continuum window width [nm] (with "
                               "--normalize); wide segments are normalized "
                               "piecewise (default 20 nm = 200 A)")
+    p_batch.add_argument("--fit-method", default="poly",
+                         choices=["poly", "bspline"],
+                         help="Continuum model with --normalize: windowed "
+                              "polynomial (default) or cubic B-spline")
     p_batch.add_argument("--object", help="Star name for SIMBAD coordinates")
     p_batch.add_argument("--ra", type=float, help="RA [deg]")
     p_batch.add_argument("--dec", type=float, help="Dec [deg]")
@@ -3622,7 +3793,15 @@ def main():
                              "blended overlapping windows (saphires "
                              "cont_norm w_width practice, default 20 nm = "
                              "200 A). 0 = single polynomial over the whole "
-                             "segment")
+                             "segment. For --fit-method bspline this is "
+                             "the knot spacing")
+    p_norm.add_argument("--fit-method", default="poly",
+                        choices=["poly", "bspline"],
+                        help="Continuum model: 'poly' (default) - "
+                             "windowed polynomial; 'bspline' - cubic "
+                             "B-spline with knots every --window "
+                             "(saphires cont_norm model). Both clip "
+                             "iteratively onto the continuum regions")
     p_norm.add_argument("--template",
                         help="Synthetic spectrum to overlay for comparison")
     p_norm.add_argument("--spectrograph",
