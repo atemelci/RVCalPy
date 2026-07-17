@@ -65,18 +65,26 @@ python rv_analysis.py
 ```
 
 A small window opens: resolve the target via SIMBAD (or enter RA/Dec), pick
-the normalized observed spectrum and the template, choose **CCF** or **BF**,
-and press **Run**. The fit is shown in the window with one dashed profile per
-component, labelled `C1: amp = ..., RV = ... km/s` — `amp` is the peak height
-read off the BF axis (the profile integrals/areas and the light ratios stay
-in the text summary). Nothing is written to disk until you press **Save**
-next to Run.
+the normalized observed spectrum and the template, and choose the method via
+the **Method...** button — like **Normalize raw...**, it opens a small
+sub-window offering **CCF** or **BF**. Choosing BF also brings up the number
+of components, the systemic gamma and a two-option mode:
 
-For multi-component fits the **Amp/Sigma guesses** fields enable the
-reference-notebook workflow: run once, read each component's approximate
-peak height (y-axis), RV (x-axis) and width off the smoothed BF, type them
-in, and rerun — the fit then converges from your visual estimates instead
-of the automatic search.
+- **With assumptions** — press **Show smoothed BF** to display, with one
+  click, only the smoothed BF (no Gaussians fitted yet); read each
+  component's approximate RV (x-axis), Amp (y-axis) and width off the curve
+  and type them into the **RV / Amp / Sigma assumption** fields
+  (comma-separated, one per component). The fit then starts from your
+  estimates, exactly like the reference notebook.
+- **Automatic component search** — no input needed; every assumption field
+  is disabled and the components are found by the iterative
+  fit-and-subtract search.
+
+Press **Run** in the main window: the fit is shown with one dashed profile
+per component, labelled `C1: amp = ..., RV = ... km/s` — `amp` is the peak
+height read off the BF axis (the profile integrals/areas and the light
+ratios stay in the text summary). Nothing is written to disk until you
+press **Save** next to Run.
 
 Other GUI features:
 

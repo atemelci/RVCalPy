@@ -1792,6 +1792,25 @@ def make_ccf_figure(result):
     return fig
 
 
+def make_bf_preview_figure(bf_result):
+    """Smoothed BF alone, without any component fit: the assumption step
+    of the guided workflow. A grid is drawn so the per-component peak
+    height (Amp), position (RV) and width can be read off the axes."""
+    from matplotlib.figure import Figure
+    fig = Figure(figsize=(9, 5))
+    ax = fig.subplots()
+    ax.plot(bf_result["velocity"], bf_result["bf_smooth"], color="0.35",
+            lw=2.2, label="BF (smoothed)")
+    ax.grid(True, which="both", alpha=0.3)
+    ax.set_xlabel("Radial velocity [km/s]")
+    ax.set_ylabel("Broadening Function")
+    ax.set_title("Smoothed BF preview — read Amp (y), RV (x) and width "
+                 "per component for the assumptions", fontsize=10)
+    ax.legend(fontsize=9)
+    fig.tight_layout()
+    return fig
+
+
 def make_bf_figure(bf_result, comps, popt, bjd=None, phase=None,
                    vbary=0.0, bary_applied=True):
     """BF figure in the measured (uncorrected) velocity frame: the axis
@@ -1804,7 +1823,8 @@ def make_bf_figure(bf_result, comps, popt, bjd=None, phase=None,
     v = bf_result["velocity"]
     fig = Figure(figsize=(9, 5))
     ax = fig.subplots()
-    ax.plot(v, bf_result["bf"], color="0.85", lw=0.8, label="BF (raw)")
+    ax.plot(v, bf_result["bf"], color="0.85", lw=0.8, alpha=0.25,
+            label="BF (raw)")
     ax.plot(v, bf_result["bf_smooth"], color="0.55", lw=2.5,
             label="BF (smoothed)")
     model = eval_bf_model(v, popt)
@@ -2062,7 +2082,14 @@ def cmd_ccf(args):
     return payload
 
 
-def cmd_bf(args):
+def solve_bf(args):
+    """Load the spectrum and template of a `bf` run and solve the BF via
+    the SVD. Shared by cmd_bf and the GUI's smoothed-BF preview: the
+    assumption step of the guided workflow shows exactly the profile the
+    component fit will run on, just without the fit.
+
+    Returns (bf_result, spec_wl, spec_flux, tpl_wl, tpl_flux, inst_fwhm).
+    """
     orders = read_spectrum(args.spectrum, args.format)
 
     if args.wave_min or args.wave_max:
@@ -2104,6 +2131,27 @@ def cmd_bf(args):
                                inst_fwhm=inst_fwhm)
     print(f"  velocity step dv = {bf_result['dv']:.3f} km/s, "
           f"singular values kept: {bf_result['n_kept_sv']}/{bf_result['n_sv']}")
+    return bf_result, spec_wl, spec_flux, tpl_wl, tpl_flux, inst_fwhm
+
+
+def cmd_bf_preview(args):
+    """Solve the BF and show only the smoothed profile — no component
+    fit. The assumption step of the guided workflow: the user reads each
+    component's approximate amp (y-axis), RV (x-axis) and width off this
+    curve, then runs the full fit starting from those values."""
+    bf_result = solve_bf(args)[0]
+    fig = make_bf_preview_figure(bf_result)
+    text = ("Smoothed BF preview - no components fitted yet.\n"
+            f"velocity step dv = {bf_result['dv']:.3f} km/s\n"
+            "Read the approximate peak height (Amp), position (RV) and "
+            "width (sigma)\nof each component off the curve, enter them "
+            "as the assumptions, then Run.")
+    return dict(method="BF", fig=fig, text=text, preview=True, saved=False)
+
+
+def cmd_bf(args):
+    (bf_result, spec_wl, spec_flux,
+     tpl_wl, tpl_flux, inst_fwhm) = solve_bf(args)
 
     comps, popt = fit_bf_peaks(bf_result["velocity"], bf_result["bf_smooth"],
                                components=args.components,
@@ -3056,9 +3104,13 @@ def run_gui():
     Sections, top to bottom: target (SIMBAD lookup with manual-coordinate
     fallback, for the barycentric correction), input files (with a
     'Normalize raw...' dialog for un-normalized spectra), wavelength
-    range, CCF/BF method choice, Run, result text and the embedded fit
-    plot. The analysis core is shared with the CLI (cmd_ccf/cmd_bf); the
-    result files (result_*.txt, result_*.png) are written to disk as usual.
+    range, a 'Method...' button opening a small dialog (CCF or BF; for
+    BF also the components and the mode: 'with assumptions' shows the
+    smoothed BF with one click so per-component RV/Amp/Sigma can be read
+    off and typed in, 'automatic component search' disables all
+    assumption inputs), Run, result text and the embedded fit plot. The
+    analysis core is shared with the CLI (cmd_ccf/cmd_bf); the result
+    files (result_*.txt, result_*.png) are written to disk as usual.
     """
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox
@@ -3291,87 +3343,32 @@ def run_gui():
     ttk.Label(prow, textvariable=min_vsini_var, foreground="gray"
               ).pack(side="left", padx=6)
 
+    # Method and BF-mode settings. They are edited in the small "Method..."
+    # dialog (opened like "Normalize raw..."); the gray summary label next
+    # to the button reflects the current choice.
     method_var = tk.StringVar(value="BF")
-    mrow = ttk.Frame(main)
-    mrow.grid(row=5, column=0, columnspan=3, sticky="w", pady=(6, 0))
-    ttk.Label(mrow, text="Method:").pack(side="left")
-
-    ccf_frame = ttk.Frame(main)
-    bf_frame = ttk.Frame(main)
-
-    def on_method_change():
-        if method_var.get() == "CCF":
-            bf_frame.grid_remove()
-            ccf_frame.grid(row=6, column=0, columnspan=3, sticky="w", pady=(4, 0))
-        else:
-            ccf_frame.grid_remove()
-            bf_frame.grid(row=6, column=0, columnspan=3, sticky="w", pady=(4, 0))
-
-    ttk.Radiobutton(mrow, text="CCF (single star)", variable=method_var,
-                    value="CCF", command=on_method_change
-                    ).pack(side="left", padx=8)
-    ttk.Radiobutton(mrow, text="BF (binary, SB2)", variable=method_var,
-                    value="BF", command=on_method_change
-                    ).pack(side="left", padx=8)
-
+    bf_mode_var = tk.StringVar(value="auto")  # "assume" | "auto"
     rvmin_var = tk.StringVar(value="-200")
     rvmax_var = tk.StringVar(value="200")
     rvstep_var = tk.StringVar(value="0.5")
-    for j, (lbl, var) in enumerate([("RV min", rvmin_var),
-                                    ("RV max", rvmax_var),
-                                    ("step", rvstep_var)]):
-        ttk.Label(ccf_frame, text=lbl).grid(row=0, column=2 * j, sticky="w")
-        ttk.Entry(ccf_frame, textvariable=var, width=8
-                  ).grid(row=0, column=2 * j + 1, padx=(2, 10))
-    ttk.Label(ccf_frame, text="[km/s]").grid(row=0, column=6)
-
     vrange_var = tk.StringVar(value="400")
     comp_var = tk.IntVar(value=2)
-    guess_var = tk.StringVar()
-    ttk.Label(bf_frame, text="Velocity window ±").grid(row=0, column=0, sticky="w")
-    ttk.Entry(bf_frame, textvariable=vrange_var, width=8
-              ).grid(row=0, column=1, padx=2)
-    ttk.Label(bf_frame, text="km/s").grid(row=0, column=2, padx=(0, 12))
-    ttk.Label(bf_frame, text="Components").grid(row=0, column=3)
-    ttk.Combobox(bf_frame, textvariable=comp_var, values=[1, 2, 3], width=3,
-                 state="readonly").grid(row=0, column=4, padx=4)
     gamma_var = tk.StringVar()
+    guess_var = tk.StringVar()
     guess_amp_var = tk.StringVar()
     guess_sigma_var = tk.StringVar()
-    ttk.Label(bf_frame, text="RV guesses [km/s]:").grid(row=1, column=0,
-                                                        sticky="w",
-                                                        pady=(4, 0))
-    ttk.Entry(bf_frame, textvariable=guess_var, width=20
-              ).grid(row=1, column=1, columnspan=2, sticky="w", pady=(4, 0))
-    ttk.Label(bf_frame, text="(optional, comma-separated, one per "
-                             "component; fixes the C1/C2/... labels)",
-              foreground="gray").grid(row=1, column=3, columnspan=3,
-                                      sticky="w", pady=(4, 0))
-    ttk.Label(bf_frame, text="Amp guesses:").grid(row=2, column=0,
-                                                  sticky="w", pady=(4, 0))
-    ttk.Entry(bf_frame, textvariable=guess_amp_var, width=20
-              ).grid(row=2, column=1, columnspan=2, sticky="w", pady=(4, 0))
-    ttk.Label(bf_frame, text="Sigma guesses [km/s]:").grid(row=2, column=3,
-                                                           sticky="w",
-                                                           pady=(4, 0))
-    ttk.Entry(bf_frame, textvariable=guess_sigma_var, width=14
-              ).grid(row=2, column=4, columnspan=2, sticky="w", pady=(4, 0))
-    ttk.Label(bf_frame, text="(optional, with RV guesses: run once, read "
-                             "the peak heights/widths off the BF plot, "
-                             "then rerun — the fit starts from your "
-                             "estimates)",
-              foreground="gray").grid(row=3, column=1, columnspan=5,
-                                      sticky="w")
-    ttk.Label(bf_frame, text="Systemic gamma [km/s]:").grid(row=4, column=0,
-                                                            sticky="w",
-                                                            pady=(4, 0))
-    ttk.Entry(bf_frame, textvariable=gamma_var, width=10
-              ).grid(row=4, column=1, sticky="w", pady=(4, 0))
-    ttk.Label(bf_frame, text="(optional, for the phase-based component "
-                             "identification)",
-              foreground="gray").grid(row=4, column=2, columnspan=4,
-                                      sticky="w", pady=(4, 0))
-    on_method_change()
+    method_summary_var = tk.StringVar()
+
+    def update_method_summary():
+        if method_var.get() == "CCF":
+            method_summary_var.set("CCF (single star)")
+        else:
+            mode = ("with assumptions" if bf_mode_var.get() == "assume"
+                    else "automatic component search")
+            method_summary_var.set(f"BF, {int(comp_var.get())} "
+                                   f"component(s), {mode}")
+
+    update_method_summary()
 
     result_text = tk.Text(main, height=8, width=90, state="disabled",
                           font=("Courier", 10))
@@ -3417,7 +3414,10 @@ def run_gui():
         return float(s) if s else default
 
     def show_payload(payload):
-        if payload.get("saved", True):
+        if payload.get("preview"):
+            note = ("Preview only - nothing written to disk; press Run "
+                    "for the full fit.")
+        elif payload.get("saved", True):
             note = f"Saved: {payload['output']}, {payload['plot']}"
         else:
             note = ("Results NOT saved yet - press 'Save' to write the "
@@ -3529,6 +3529,161 @@ def run_gui():
     ttk.Button(fbtns, text="Header", command=show_header
                ).pack(side="left", padx=(4, 0))
 
+    def method_dialog():
+        """Method settings in a small sub-window (like 'Normalize raw...'):
+        CCF or BF; for BF also the components and the mode — either
+        'with assumptions' (per-component RV/Amp/Sigma read off a
+        smoothed-BF preview shown with one button) or the automatic
+        component search, which disables all assumption inputs."""
+        dlg = tk.Toplevel(root)
+        dlg.title("Method")
+        dlg.transient(root)
+        frm = ttk.Frame(dlg, padding=10)
+        frm.grid(row=0, column=0)
+
+        mrow = ttk.Frame(frm)
+        mrow.grid(row=0, column=0, sticky="w")
+        ttk.Label(mrow, text="Method:").pack(side="left")
+
+        ccf_sec = ttk.LabelFrame(frm, text="CCF settings", padding=6)
+        bf_sec = ttk.LabelFrame(frm, text="BF settings", padding=6)
+
+        def refresh_method():
+            if method_var.get() == "CCF":
+                bf_sec.grid_remove()
+                ccf_sec.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+            else:
+                ccf_sec.grid_remove()
+                bf_sec.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+            update_method_summary()
+
+        ttk.Radiobutton(mrow, text="CCF (single star)", variable=method_var,
+                        value="CCF", command=refresh_method
+                        ).pack(side="left", padx=8)
+        ttk.Radiobutton(mrow, text="BF (binary/multiple)",
+                        variable=method_var, value="BF",
+                        command=refresh_method).pack(side="left", padx=8)
+
+        for j, (lbl, var) in enumerate([("RV min", rvmin_var),
+                                        ("RV max", rvmax_var),
+                                        ("step", rvstep_var)]):
+            ttk.Label(ccf_sec, text=lbl).grid(row=0, column=2 * j,
+                                              sticky="w")
+            ttk.Entry(ccf_sec, textvariable=var, width=8
+                      ).grid(row=0, column=2 * j + 1, padx=(2, 10))
+        ttk.Label(ccf_sec, text="[km/s]").grid(row=0, column=6)
+
+        top = ttk.Frame(bf_sec)
+        top.grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Label(top, text="Velocity window ±").pack(side="left")
+        ttk.Entry(top, textvariable=vrange_var, width=7).pack(side="left",
+                                                              padx=2)
+        ttk.Label(top, text="km/s").pack(side="left", padx=(0, 10))
+        ttk.Label(top, text="Components").pack(side="left")
+        comp_box = ttk.Combobox(top, textvariable=comp_var,
+                                values=[1, 2, 3], width=3,
+                                state="readonly")
+        comp_box.pack(side="left", padx=4)
+        comp_box.bind("<<ComboboxSelected>>",
+                      lambda _e: update_method_summary())
+        ttk.Label(top, text="Systemic gamma [km/s]:").pack(side="left",
+                                                           padx=(10, 2))
+        ttk.Entry(top, textvariable=gamma_var, width=7).pack(side="left")
+
+        assume_widgets = []
+
+        def refresh_mode():
+            st = "normal" if bf_mode_var.get() == "assume" else "disabled"
+            for w in assume_widgets:
+                w.configure(state=st)
+            update_method_summary()
+
+        ttk.Radiobutton(bf_sec, text="With assumptions — read the values "
+                                     "off the smoothed BF first",
+                        variable=bf_mode_var, value="assume",
+                        command=refresh_mode
+                        ).grid(row=1, column=0, columnspan=3, sticky="w",
+                               pady=(8, 0))
+
+        def show_smoothed_bf():
+            try:
+                if not spec_var.get().strip():
+                    raise ValueError("No normalized spectrum file selected "
+                                     "in the main window.")
+                if not tpl_var.get().strip():
+                    raise ValueError("No synthetic spectrum file selected "
+                                     "in the main window.")
+                kw = dict(spectrum=spec_var.get().strip(),
+                          template=tpl_var.get().strip(),
+                          wave_min=_f(wmin_var), wave_max=_f(wmax_var),
+                          resolution=_f(res_var), vsini=_f(vsini_var),
+                          vel_range=_f(vrange_var, 400.0))
+                payload = cmd_bf_preview(make_args(**kw))
+            except Exception as exc:
+                messagebox.showerror("Error", str(exc), parent=dlg)
+                return
+            show_payload(payload)
+
+        prevrow = ttk.Frame(bf_sec)
+        prevrow.grid(row=2, column=0, columnspan=3, sticky="w",
+                     padx=(18, 0))
+        preview_btn = ttk.Button(prevrow, text="Show smoothed BF",
+                                 command=show_smoothed_bf)
+        preview_btn.pack(side="left")
+        ttk.Label(prevrow, text="(one click: only the smoothed BF, no "
+                                "Gaussians — read the values, then fill "
+                                "in below)",
+                  foreground="gray").pack(side="left", padx=6)
+        assume_widgets.append(preview_btn)
+
+        arow = ttk.Frame(bf_sec)
+        arow.grid(row=3, column=0, columnspan=3, sticky="w",
+                  padx=(18, 0), pady=(4, 0))
+        ttk.Label(arow, text="RV assumption [km/s]:").grid(row=0, column=0,
+                                                           sticky="w")
+        rv_entry = ttk.Entry(arow, textvariable=guess_var, width=18)
+        rv_entry.grid(row=0, column=1, sticky="w", padx=(2, 12))
+        ttk.Label(arow, text="Amp assumption:").grid(row=1, column=0,
+                                                     sticky="w",
+                                                     pady=(4, 0))
+        amp_entry = ttk.Entry(arow, textvariable=guess_amp_var, width=18)
+        amp_entry.grid(row=1, column=1, sticky="w", padx=(2, 12),
+                       pady=(4, 0))
+        ttk.Label(arow, text="Sigma assumption [km/s]:").grid(row=1,
+                                                              column=2,
+                                                              sticky="w",
+                                                              pady=(4, 0))
+        sigma_entry = ttk.Entry(arow, textvariable=guess_sigma_var,
+                                width=14)
+        sigma_entry.grid(row=1, column=3, sticky="w", padx=2, pady=(4, 0))
+        ttk.Label(arow, text="(comma-separated, one per component; RV "
+                             "required, Amp/Sigma optional; the order "
+                             "fixes the C1/C2/... labels)",
+                  foreground="gray").grid(row=2, column=0, columnspan=4,
+                                          sticky="w", pady=(2, 0))
+        assume_widgets += [rv_entry, amp_entry, sigma_entry]
+
+        ttk.Radiobutton(bf_sec, text="Automatic component search — no "
+                                     "input needed",
+                        variable=bf_mode_var, value="auto",
+                        command=refresh_mode
+                        ).grid(row=4, column=0, columnspan=3, sticky="w",
+                               pady=(8, 0))
+
+        ttk.Button(frm, text="Use",
+                   command=lambda: (update_method_summary(), dlg.destroy())
+                   ).grid(row=2, column=0, pady=(10, 0))
+
+        refresh_method()
+        refresh_mode()
+
+    mrow_main = ttk.Frame(main)
+    mrow_main.grid(row=5, column=0, columnspan=3, sticky="w", pady=(6, 0))
+    ttk.Button(mrow_main, text="Method...", command=method_dialog
+               ).pack(side="left")
+    ttk.Label(mrow_main, textvariable=method_summary_var, foreground="gray"
+              ).pack(side="left", padx=8)
+
     run_payload = {"payload": None}
 
     def run_analysis():
@@ -3566,16 +3721,25 @@ def run_gui():
                           rv_step=_f(rvstep_var, 0.5))
                 payload = cmd_ccf(make_args(**kw))
             else:
-                gtxt = guess_var.get().replace(",", " ").split()
-                gatxt = guess_amp_var.get().replace(",", " ").split()
-                gstxt = guess_sigma_var.get().replace(",", " ").split()
+                guess = guess_amp = guess_sigma = None
+                if bf_mode_var.get() == "assume":
+                    gtxt = guess_var.get().replace(",", " ").split()
+                    gatxt = guess_amp_var.get().replace(",", " ").split()
+                    gstxt = guess_sigma_var.get().replace(",", " ").split()
+                    if not gtxt:
+                        raise ValueError(
+                            "The assumption mode needs at least the RV "
+                            "assumptions: open 'Method...', press 'Show "
+                            "smoothed BF' and read the values off the "
+                            "curve — or switch to the automatic "
+                            "component search.")
+                    guess = [float(t) for t in gtxt]
+                    guess_amp = [float(t) for t in gatxt] or None
+                    guess_sigma = [float(t) for t in gstxt] or None
                 kw.update(vel_range=_f(vrange_var, 400.0),
                           components=int(comp_var.get()),
-                          guess=[float(t) for t in gtxt] if gtxt else None,
-                          guess_amp=([float(t) for t in gatxt]
-                                     if gatxt else None),
-                          guess_sigma=([float(t) for t in gstxt]
-                                       if gstxt else None),
+                          guess=guess, guess_amp=guess_amp,
+                          guess_sigma=guess_sigma,
                           gamma=_f(gamma_var))
                 payload = cmd_bf(make_args(**kw))
         except Exception as exc:
