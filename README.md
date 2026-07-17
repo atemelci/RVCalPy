@@ -73,9 +73,10 @@ of components, the systemic gamma and a two-option mode:
 - **With assumptions** — press **Show smoothed BF** to display, with one
   click, only the smoothed BF (no Gaussians fitted yet); read each
   component's approximate RV (x-axis), Amp (y-axis) and width off the curve
-  and type them into the **RV / Amp / Sigma assumption** fields
-  (comma-separated, one per component). The fit then starts from your
-  estimates, exactly like the reference notebook.
+  and type them into the **RV / Amp / Sigma assumption** fields. Write one
+  value per component, **largest Gaussian first, smallest last** — this
+  order sets the C1/C2/... labels. The fit then starts from your estimates,
+  exactly like the reference notebook.
 - **Automatic component search** — no input needed; every assumption field
   is disabled and the components are found by the iterative
   fit-and-subtract search.
@@ -193,8 +194,10 @@ point (the reference-notebook workflow): run once, inspect the smoothed BF
 in `result_BF.png`, then rerun with per-component estimates —
 `--guess RV1 RV2 ...` (x-axis positions), `--guess-amp A1 A2 ...` (peak
 heights on the y-axis) and optionally `--guess-sigma S1 S2 ...` (widths in
-km/s). With amplitudes given, `curve_fit` starts directly from your
-[amp, RV, sigma] values, exactly like the reference notebook.
+km/s). Give one value per component, largest Gaussian first and smallest
+last — the order sets the C1/C2/... labels. With amplitudes given,
+`curve_fit` starts directly from your [amp, RV, sigma] values, exactly
+like the reference notebook.
 
 ### BF component labels
 

@@ -1215,7 +1215,7 @@ def prepare_template(tpl_wl, tpl_flux, resolution=None, vsini=None,
 
 
 def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
-               vel_range=400.0, dv=None, svd_rcond=None, smooth_kms=None,
+               vel_range=500.0, dv=None, svd_rcond=None, smooth_kms=None,
                inst_fwhm=None, verbose=True):
     """Broadening Function following the reference implementation
     (BF_main.txt; Rucinski 1999 via PyAstronomy's pyasl.SVD).
@@ -1417,7 +1417,7 @@ def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
                 n_kept_sv=n_kept, n_sv=n_sv)
 
 
-def compute_bf_orders(orders, tpl_wl, tpl_flux, vel_range=400.0, dv=None,
+def compute_bf_orders(orders, tpl_wl, tpl_flux, vel_range=500.0, dv=None,
                       svd_rcond=None, smooth_kms=None, inst_fwhm=None,
                       std_perc=0.1):
     """Multi-order BF following saphires bf.compute + bf.weight_combine:
@@ -2858,7 +2858,7 @@ def make_args(**overrides):
                 t0=None, period=None, varastro=False, t0_to_bjd=False,
                 plot=None, output=None,
                 rv_min=-200.0, rv_max=200.0, rv_step=0.5,
-                vel_range=400.0, dv=None, svd_rcond=None, smooth=None,
+                vel_range=500.0, dv=None, svd_rcond=None, smooth=None,
                 components=1, min_sep=30.0, guess=None, guess_amp=None,
                 guess_sigma=None, profile="gauss",
                 gamma=None, degrade_template=False,
@@ -3059,7 +3059,7 @@ def run_terminal_wizard():
         cmd_ccf(make_args(**kw))
     else:
         kw["vel_range"] = ask("BF window half-width [km/s]",
-                              default=400.0, cast=float)
+                              default=500.0, cast=float)
         kw["components"] = ask("Number of components (SB1=1, SB2=2, SB3=3)",
                                default=2, cast=int,
                                validate=lambda n: n in (1, 2, 3))
@@ -3184,7 +3184,8 @@ def run_gui():
                                                           columnspan=2,
                                                           sticky="w",
                                                           pady=(4, 0))
-    ttk.Label(trow, text="Site:").grid(row=1, column=4, sticky="e", pady=(4, 0))
+    ttk.Label(trow, text="Observatory:").grid(row=1, column=4, sticky="e",
+                                              pady=(4, 0))
     ttk.Entry(trow, textvariable=site_var, width=10).grid(row=1, column=5,
                                                           columnspan=2,
                                                           sticky="w",
@@ -3264,11 +3265,6 @@ def run_gui():
                ).grid(row=2, column=6, sticky="w", padx=(6, 0), pady=(4, 0))
     ttk.Button(trow, text="HJD -> BJD", command=convert_t0_to_bjd
                ).grid(row=2, column=7, sticky="w", padx=(4, 0), pady=(4, 0))
-    ttk.Label(trow, text="HJD in VarAstro-style minima databases is assumed "
-                         "to be UTC-based; if your source uses TT/TDB, "
-                         "change it with the scale argument.",
-              foreground="gray"
-              ).grid(row=3, column=0, columnspan=8, sticky="w", pady=(2, 0))
 
     spec_var = tk.StringVar()
     tpl_var = tk.StringVar()
@@ -3351,7 +3347,7 @@ def run_gui():
     rvmin_var = tk.StringVar(value="-200")
     rvmax_var = tk.StringVar(value="200")
     rvstep_var = tk.StringVar(value="0.5")
-    vrange_var = tk.StringVar(value="400")
+    vrange_var = tk.StringVar(value="500")
     comp_var = tk.IntVar(value=2)
     gamma_var = tk.StringVar()
     guess_var = tk.StringVar()
@@ -3617,7 +3613,7 @@ def run_gui():
                           template=tpl_var.get().strip(),
                           wave_min=_f(wmin_var), wave_max=_f(wmax_var),
                           resolution=_f(res_var), vsini=_f(vsini_var),
-                          vel_range=_f(vrange_var, 400.0))
+                          vel_range=_f(vrange_var, 500.0))
                 payload = cmd_bf_preview(make_args(**kw))
             except Exception as exc:
                 messagebox.showerror("Error", str(exc), parent=dlg)
@@ -3630,9 +3626,7 @@ def run_gui():
         preview_btn = ttk.Button(prevrow, text="Show smoothed BF",
                                  command=show_smoothed_bf)
         preview_btn.pack(side="left")
-        ttk.Label(prevrow, text="(one click: only the smoothed BF, no "
-                                "Gaussians — read the values, then fill "
-                                "in below)",
+        ttk.Label(prevrow, text="— read the values, fill in the blanks",
                   foreground="gray").pack(side="left", padx=6)
         assume_widgets.append(preview_btn)
 
@@ -3656,9 +3650,9 @@ def run_gui():
         sigma_entry = ttk.Entry(arow, textvariable=guess_sigma_var,
                                 width=14)
         sigma_entry.grid(row=1, column=3, sticky="w", padx=2, pady=(4, 0))
-        ttk.Label(arow, text="(comma-separated, one per component; RV "
-                             "required, Amp/Sigma optional; the order "
-                             "fixes the C1/C2/... labels)",
+        ttk.Label(arow, text="One value per component, comma-separated — "
+                             "largest Gaussian first, smallest last "
+                             "(sets C1, C2, ...).",
                   foreground="gray").grid(row=2, column=0, columnspan=4,
                                           sticky="w", pady=(2, 0))
         assume_widgets += [rv_entry, amp_entry, sigma_entry]
@@ -3736,7 +3730,7 @@ def run_gui():
                     guess = [float(t) for t in gtxt]
                     guess_amp = [float(t) for t in gatxt] or None
                     guess_sigma = [float(t) for t in gstxt] or None
-                kw.update(vel_range=_f(vrange_var, 400.0),
+                kw.update(vel_range=_f(vrange_var, 500.0),
                           components=int(comp_var.get()),
                           guess=guess, guess_amp=guess_amp,
                           guess_sigma=guess_sigma,
@@ -3874,7 +3868,7 @@ def main():
 
     p_bf = sub.add_parser("bf", help="Broadening Function (thesis method, SVD)")
     add_common_args(p_bf)
-    p_bf.add_argument("--vel-range", type=float, default=400.0,
+    p_bf.add_argument("--vel-range", type=float, default=500.0,
                       help="BF window half-width [km/s]")
     p_bf.add_argument("--dv", type=float,
                       help="Velocity step [km/s] (default: the reference "
@@ -3987,7 +3981,7 @@ def main():
                          help="Compute the barycentric correction but do "
                               "NOT apply it to the RVs: the value is kept "
                               "in the RV curve file for information only")
-    p_batch.add_argument("--vel-range", type=float, default=400.0,
+    p_batch.add_argument("--vel-range", type=float, default=500.0,
                          help="BF window half-width [km/s]")
     p_batch.add_argument("--dv", type=float,
                          help="BF velocity step [km/s] (default: the "
