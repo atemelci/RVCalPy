@@ -4,10 +4,19 @@ RVCalPy is a single-file Python tool, [`rv_analysis.py`](rv_analysis.py), that
 measures the radial velocity (RV) of a star by comparing an observed spectrum
 with a template spectrum. Two independent methods are available:
 
-- **CCF (Cross-Correlation Function)** — the template is Doppler-shifted over
-  a grid of trial velocities and cross-correlated with the observed spectrum;
-  a Gaussian fit to the correlation peak gives the RV. Fast and robust for
-  single stars (SB1).
+- **CCF (Cross-Correlation Function)** — a **weighted line-mask CCF**
+  (Baranne et al. 1996; Pepe et al. 2002; the construction applied by
+  Pino et al. 2018, A&A 619, A3): the mask holds the line cores of the
+  template weighted by their depths, and the CCF is the weight-averaged
+  observed line depth over the trial-velocity grid. The continuum and the
+  pressure-broadened hydrogen wings drop out of the correlation, and the
+  hydrogen Balmer/Paschen series is excluded from the mask by default
+  (`--keep-balmer` restores it) — this is what makes the CCF reliable for
+  **very hot (OBA) stars**, where a full-spectrum correlation is dominated
+  by the Balmer wings and biased by emission-filled H cores. The peak is
+  measured with a Gaussian on a linear baseline over a ±2 FWHM window
+  (the contrast fit of Pino et al. 2018). The previous full-spectrum
+  cross-covariance is kept as `--ccf-mode template`.
 - **BF (Broadening Function, Rucinski 1992/2002)** — the observed spectrum is
   modelled as the convolution of the template with a velocity-space profile,
   solved linearly via Singular Value Decomposition. Because the method is
@@ -81,6 +90,10 @@ of components, the systemic gamma and a two-option mode:
   is disabled and the components are found by the iterative
   fit-and-subtract search.
 
+Choosing CCF instead brings up the RV grid, the correlation mode (**Line
+mask** — the hot-star-safe default — or **Full template**) and the
+hydrogen-line exclusion checkbox.
+
 Press **Run** in the main window: the fit is shown with one dashed profile
 per component, labelled `C1: amp = ..., RV = ... km/s` — `amp` is the peak
 height read off the BF axis (the profile integrals/areas and the light
@@ -104,8 +117,15 @@ Other GUI features:
 ### Command line
 
 ```bash
-# CCF — single star (SB1)
+# CCF — single star (SB1); weighted line-mask CCF by default
 python rv_analysis.py ccf --spectrum spectrum.txt --template template.prf
+
+# CCF — hot star with strong rotation: widen the RV grid; the hydrogen
+# lines are already excluded from the mask (use --keep-balmer to undo,
+# --mask-depth to change the line-selection threshold,
+# --ccf-mode template for the old full-spectrum correlation)
+python rv_analysis.py ccf --spectrum hotstar.txt --template template.prf \
+    --rv-min -400 --rv-max 400 --vsini 150
 
 # BF — binary star (SB2), two components (automatic component search)
 python rv_analysis.py bf --spectrum spectrum.txt --template template.prf \

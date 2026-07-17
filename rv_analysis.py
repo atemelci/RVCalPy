@@ -6,10 +6,18 @@ rv_analysis.py — Radial Velocity (RV) measurement from stellar spectra
 Two independent methods in one tool:
 
 1. CCF  (Cross-Correlation Function)
-   Between the Lines 2024 workshop (E. Sedaghati) approach: the observed
-   spectrum is cross-correlated with a Doppler-shifted template over an RV
-   grid; a Gaussian fit to the CCF peak gives the RV. Fast and robust for
-   single stars (SB1).
+   Weighted line-mask CCF (Baranne et al. 1996; Pepe et al. 2002; the
+   construction applied by Pino et al. 2018, A&A 619, A3): mask entries
+   are the line cores of the template, weighted by line depth, and the
+   CCF is the weight-averaged observed line depth over the RV grid. The
+   continuum and the pressure-broadened hydrogen wings drop out of the
+   correlation — the hydrogen series is excluded from the mask by
+   default — which is what makes the method reliable for very hot (OBA)
+   stars, where a full-spectrum correlation is dominated by the Balmer
+   wings and biased by emission-filled H cores. The peak is measured
+   with a Gaussian on a linear baseline over a +-2 FWHM window. The
+   previous full-spectrum cross-covariance (Between the Lines 2024
+   workshop, E. Sedaghati) remains available as --ccf-mode template.
 
 2. BF   (Broadening Function, Rucinski 1992, 2002)
    The observed spectrum is modelled as the convolution of the template
@@ -129,6 +137,15 @@ def two_gauss_no(x, amp1, mu1, sig1, amp2, mu2, sig2):
     return gauss1 + gauss2
 
 
+def gauss_lin(x, amp, mu, sig, slope, offset):
+    """Gaussian on a linear baseline — the CCF peak model of Pino et al.
+    (2018), f(v) = C + B v + A exp(-(v-v0)^2 / 2 sigma^2): the linear
+    term absorbs the local slope left by broad features so the fitted
+    centre is not pulled."""
+    return (amp * np.exp(-((x - mu) ** 2) / (2.0 * sig ** 2))
+            + slope * x + offset)
+
+
 def multi_gauss_no(x, *params):
     """Sum of N Gaussians; params = (amp, mu, sigma) per component, so
     len(params) = 3N. A trailing (3N+1)-th parameter, when present, is a
@@ -205,13 +222,16 @@ def component_area(comp, epsilon=0.6):
 
 def eval_bf_model(x, model):
     """Evaluate a fitted profile model descriptor as returned by
-    fit_bf_peaks / fit_peak_with_base: dict(kind, popt, epsilon,
-    inst_sigma_pix). kind 'rot' uses rotational profiles, anything else
-    the Gaussian models."""
+    fit_bf_peaks / fit_peak_with_base / fit_ccf_peak: dict(kind, popt,
+    epsilon, inst_sigma_pix). kind 'rot' uses rotational profiles,
+    'gauss_lin' the Gaussian-on-linear-baseline CCF model, anything
+    else the Gaussian models."""
     if model.get("kind") == "rot":
         return multi_rot_profile(x, model["popt"],
                                  epsilon=model.get("epsilon", 0.6),
                                  inst_sigma_pix=model.get("inst_sigma_pix"))
+    if model.get("kind") == "gauss_lin":
+        return gauss_lin(x, *model["popt"])
     return eval_gauss_model(x, model["popt"])
 
 
@@ -1049,12 +1069,203 @@ def calculate_ccf(spec_wl, spec_flux, tpl_wl, tpl_flux, rv_grid):
     return ccf
 
 
-def run_ccf(spectrum_orders, tpl_wl, tpl_flux, rv_min, rv_max, rv_step):
-    """Run the CCF over all echelle orders, sum, and fit a Gaussian.
+# Hydrogen Balmer and strong Paschen lines [A]. In hot (OBA) stars these
+# pressure-broadened wings dominate a full-spectrum correlation while
+# their cores are often filled by emission, so the CCF line mask skips
+# them by default and the RV comes from the He/metal line cores.
+HYDROGEN_WL = [6562.797, 4861.325, 4340.472, 4101.734, 3970.075,
+               3889.064, 3835.397, 3797.909, 3770.633, 3750.151,
+               8598.392, 8750.472, 8862.783, 9014.910, 9229.014,
+               9545.969]
 
-    Returns: dict(rv, rv_err, rv_grid, ccf_total, ccf_orders, popt)
+
+def build_ccf_mask(tpl_wl, tpl_flux, min_depth=0.05, exclude_balmer=True,
+                   balmer_half=15.0):
+    """Weighted CCF line mask derived from the template (Baranne et al.
+    1996; Pepe et al. 2002 — the CCF construction followed by Pino et
+    al. 2018, A&A 619, A3): the mask entries are the local minima of the
+    continuum-normalized template deeper than `min_depth`, each refined
+    to sub-pixel precision with a parabola through the three lowest
+    points and weighted by its line depth, so deep lines contribute more
+    RV information.
+
+    exclude_balmer drops every mask line within `balmer_half` [A] of the
+    hydrogen series (HYDROGEN_WL) — the hot-star practice: RVs come from
+    the He/metal lines, not from the broad H wings or their frequently
+    emission-filled cores. A clearly un-normalized template (e.g. a raw
+    PHOENIX flux spectrum) is normalized first with a coarse
+    upper-envelope continuum so the depths stay meaningful.
+
+    Returns (line_wl, line_weight) arrays sorted in wavelength.
+    """
+    good = np.isfinite(tpl_wl) & np.isfinite(tpl_flux)
+    wl, fx = np.asarray(tpl_wl)[good], np.asarray(tpl_flux)[good]
+
+    med = float(np.median(fx))
+    if not 0.5 <= med <= 1.5:
+        nbin = max(wl.size // 200, 10)
+        edges = np.linspace(wl.min(), wl.max(), nbin + 1)
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        env = np.array([np.percentile(fx[(wl >= a) & (wl < b)], 95)
+                        if ((wl >= a) & (wl < b)).sum() > 5 else np.nan
+                        for a, b in zip(edges[:-1], edges[1:])])
+        ok = np.isfinite(env) & (env > 0)
+        fx = fx / np.interp(wl, centers[ok], env[ok])
+
+    imin = np.flatnonzero((fx[1:-1] < fx[:-2]) & (fx[1:-1] <= fx[2:])) + 1
+    depth = 1.0 - fx[imin]
+    keep = depth >= min_depth
+    imin, depth = imin[keep], depth[keep]
+
+    line_wl = wl[imin].astype(float)
+    for j, i in enumerate(imin):
+        y0, y1, y2 = fx[i - 1], fx[i], fx[i + 1]
+        den = y0 - 2.0 * y1 + y2
+        if den > 0:
+            off = 0.5 * (y0 - y2) / den
+            if abs(off) < 1.0:
+                line_wl[j] = wl[i] + off * 0.5 * (wl[i + 1] - wl[i - 1])
+
+    if exclude_balmer and line_wl.size:
+        far = np.ones(line_wl.size, dtype=bool)
+        for h in HYDROGEN_WL:
+            far &= np.abs(line_wl - h) > balmer_half
+        line_wl, depth = line_wl[far], depth[far]
+
+    if line_wl.size == 0:
+        raise ValueError("No usable mask line in the template (check the "
+                         "normalization, or lower --mask-depth).")
+    return line_wl, depth
+
+
+def calculate_ccf_mask(spec_wl, spec_flux, line_wl, line_w, rv_grid):
+    """Weighted line-mask CCF contributions of one spectrum/order:
+    CCF(v) = sum_i w_i d(lambda_i (1+v/c)) with d = 1 - flux, so the
+    profile peaks where the observed line cores align with the mask.
+    Only mask lines whose shifted position stays inside the data for
+    every velocity of the grid are used — the line set is then identical
+    across the grid and the CCF has no edge steps.
+
+    Returns (weighted_depth_sum[v], weight_sum) for combining orders.
+    """
+    lo = spec_wl.min() / (1.0 + rv_grid.min() / C_KMS)
+    hi = spec_wl.max() / (1.0 + rv_grid.max() / C_KMS)
+    use = (line_wl >= lo) & (line_wl <= hi)
+    if not use.any():
+        return None, 0.0
+    lwl, w = line_wl[use], line_w[use]
+    depth = 1.0 - spec_flux
+    num = np.empty(rv_grid.size)
+    for i, rv in enumerate(rv_grid):
+        num[i] = np.dot(w, np.interp(doppler_shift(lwl, rv),
+                                     spec_wl, depth))
+    return num, float(w.sum())
+
+
+def fit_ccf_peak(rv_grid, ccf):
+    """CCF peak measurement following Pino et al. (2018): a Gaussian on
+    a linear baseline, f(v) = C + B v + A exp(-(v-v0)^2/2 sigma^2),
+    fitted over a window of +-2 FWHM around the maximum. The local
+    linear term and the restricted window keep slopes from residual
+    broad features (hot-star H wings) from pulling the centre.
+
+    Returns ([component dict], model descriptor) like fit_peak_with_base.
+    """
+    rv_grid = np.asarray(rv_grid, dtype=float)
+    ccf = np.asarray(ccf, dtype=float)
+    step = float(np.median(np.diff(rv_grid)))
+    i0 = int(np.nanargmax(ccf))
+    base = float(np.nanmedian(ccf))
+    half = base + 0.5 * (ccf[i0] - base)
+    j = i0
+    while j + 1 < ccf.size and ccf[j + 1] > half:
+        j += 1
+    k = i0
+    while k - 1 >= 0 and ccf[k - 1] > half:
+        k -= 1
+    w50 = max(rv_grid[j] - rv_grid[k], 3.0 * step)
+
+    sel = np.abs(rv_grid - rv_grid[i0]) <= max(2.0 * w50, 7.5 * step)
+    p0 = [ccf[i0] - base, rv_grid[i0], max(w50 / 2.35482, step), 0.0, base]
+    popt, pcov = curve_fit(gauss_lin, rv_grid[sel], ccf[sel], p0=p0,
+                           maxfev=20000)
+    err = np.sqrt(np.diag(pcov))
+    comp = dict(rv=float(popt[1]), rv_err=float(err[1]),
+                amp=float(popt[0]), sigma=abs(float(popt[2])),
+                kind="gauss_lin")
+    return [comp], dict(kind="gauss_lin", popt=popt)
+
+
+def run_ccf(spectrum_orders, tpl_wl, tpl_flux, rv_min, rv_max, rv_step,
+            mode="mask", mask_depth=0.05, keep_balmer=False):
+    """Run the CCF over all echelle orders, combine, and fit the peak.
+
+    mode 'mask' (default): weighted line-mask CCF — the construction of
+    Baranne et al. (1996) / Pepe et al. (2002) as applied by Pino et al.
+    (2018, A&A 619, A3). The template only provides the line positions
+    and depth weights; the correlation samples the observed line cores,
+    so the continuum and the broad hydrogen wings drop out of the
+    problem. This is what makes the CCF reliable for very hot (OBA)
+    stars, where the full-spectrum correlation is dominated by the
+    pressure-broadened Balmer wings and biased by emission-filled H
+    cores; the hydrogen series is excluded from the mask unless
+    keep_balmer=True. The combined CCF is the weight-averaged line
+    depth, and the peak is measured with a Gaussian on a linear
+    baseline over a +-2 FWHM window (fit_ccf_peak).
+
+    mode 'template': the previous full-spectrum cross-covariance (the
+    workshop approach), kept for line-rich cool stars and comparison.
+
+    Unphysical pixels (normalized flux > 1.2 or < 0: cosmics, emission
+    spikes) are interpolated over first, as before the BF SVD.
+
+    Returns: dict(rv, rv_err, amp, sigma, rv_grid, ccf_total,
+    ccf_orders, popt, mode[, n_lines])
     """
     rv_grid = np.arange(rv_min, rv_max + rv_step, rv_step)
+
+    if mode == "mask":
+        line_wl, line_w = build_ccf_mask(tpl_wl, tpl_flux,
+                                         min_depth=mask_depth,
+                                         exclude_balmer=not keep_balmer)
+        print(f"CCF line mask: {line_wl.size} template lines "
+              f"(depth >= {mask_depth:g}"
+              + (", hydrogen series excluded" if not keep_balmer
+                 else ", hydrogen series kept") + ")")
+        ccf_orders, num_total, w_total = [], np.zeros(rv_grid.size), 0.0
+        n_used = 0
+        for k, (wl, fx) in enumerate(spectrum_orders):
+            good = np.isfinite(wl) & np.isfinite(fx)
+            wl, fx = wl[good], fx[good]
+            if wl.size < 10:
+                continue
+            bad = (fx > 1.2) | (fx < 0.0)
+            if 0 < bad.sum() < 0.5 * fx.size:
+                fx = fx.copy()
+                fx[bad] = np.interp(wl[bad], wl[~bad], fx[~bad])
+            num, wsum = calculate_ccf_mask(wl, fx, line_wl, line_w,
+                                           rv_grid)
+            if num is None or wsum <= 0:
+                continue
+            ccf_orders.append(num / wsum)
+            num_total += num
+            w_total += wsum
+            n_used += 1
+            print(f"  order {k + 1}/{len(spectrum_orders)} done", end="\r")
+        print()
+        if w_total <= 0:
+            raise RuntimeError(
+                "No mask line falls inside the data for the whole RV "
+                "grid; narrow --rv-min/--rv-max or check the wavelength "
+                "overlap with the template.")
+        ccf_total = num_total / w_total
+        comps, popt = fit_ccf_peak(rv_grid, ccf_total)
+        return dict(rv=comps[0]["rv"], rv_err=comps[0]["rv_err"],
+                    amp=comps[0]["amp"], sigma=comps[0]["sigma"],
+                    rv_grid=rv_grid, ccf_total=ccf_total,
+                    ccf_orders=np.array(ccf_orders), popt=popt,
+                    mode="mask", n_lines=int(line_wl.size))
+
     tpl_norm = tpl_flux / np.nanmax(tpl_flux)
 
     max_shift = max(abs(rv_min), abs(rv_max)) / C_KMS
@@ -1087,7 +1298,8 @@ def run_ccf(spectrum_orders, tpl_wl, tpl_flux, rv_min, rv_max, rv_step):
 
     return dict(rv=rv, rv_err=rv_err, amp=comps[0]["amp"],
                 sigma=comps[0]["sigma"], rv_grid=rv_grid,
-                ccf_total=ccf_total, ccf_orders=np.array(ccf_orders), popt=popt)
+                ccf_total=ccf_total, ccf_orders=np.array(ccf_orders),
+                popt=popt, mode="template")
 
 
 def log_wave_grid(wl_min, wl_max, dv_kms):
@@ -1777,16 +1989,21 @@ def make_ccf_figure(result):
         ax0.plot(result["rv_grid"], ccf, lw=0.6, alpha=0.5)
     ax0.set_ylabel("CCF (per order)")
 
+    mask_mode = result.get("mode") == "mask"
+    total_label = ("Total CCF (mean line depth)" if mask_mode
+                   else "Total CCF (normalized)")
+    fit_name = ("Gaussian + linear baseline" if mask_mode
+                else "Gaussian fit")
     ax1.plot(result["rv_grid"], result["ccf_total"], "k-", lw=1.2,
-             label="Total CCF (normalized)")
+             label=total_label)
     ax1.plot(result["rv_grid"],
              eval_bf_model(result["rv_grid"], result["popt"]),
              "r-", lw=2, alpha=0.7,
-             label=f"Gaussian fit: RV = {result['rv']:.3f} "
+             label=f"{fit_name}: RV = {result['rv']:.3f} "
                    f"± {result['rv_err']:.3f} km/s")
     ax1.axvline(result["rv"], color="r", ls=":", lw=1)
     ax1.set_xlabel("RV [km/s]")
-    ax1.set_ylabel("Normalized CCF")
+    ax1.set_ylabel("CCF")
     ax1.legend()
     fig.tight_layout()
     return fig
@@ -2005,7 +2222,11 @@ def cmd_ccf(args):
                                         epsilon=args.epsilon)
 
     print(f"Computing the CCF over {len(orders)} order(s)/segment(s)...")
-    result = run_ccf(orders, tpl_wl, tpl_flux, args.rv_min, args.rv_max, args.rv_step)
+    result = run_ccf(orders, tpl_wl, tpl_flux, args.rv_min, args.rv_max,
+                     args.rv_step,
+                     mode=getattr(args, "ccf_mode", "mask"),
+                     mask_depth=getattr(args, "mask_depth", 0.05),
+                     keep_balmer=getattr(args, "keep_balmer", False))
 
     ctx = get_target_context(args)
     vbary, bjd, phase = ctx["vbary"], ctx["bjd"], ctx["phase"]
@@ -2014,9 +2235,18 @@ def cmd_ccf(args):
     rv_raw, rv_err = result["rv"], result["rv_err"]
     rv = apply_barycentric(rv_raw, vbary)
     tpl_name = args.template or f"PHOENIX T={args.teff}K"
+    if result["mode"] == "mask":
+        method_note = (f"weighted line mask, {result['n_lines']} lines "
+                       "(Baranne 1996; Pepe 2002; Pino et al. 2018), "
+                       "hydrogen series "
+                       + ("kept" if getattr(args, "keep_balmer", False)
+                          else "excluded"))
+    else:
+        method_note = "full-template cross-covariance"
     lines = ["================ CCF RESULT ================",
              f"Normalized spectrum : {args.spectrum}",
-             f"Synthetic template  : {tpl_name}"]
+             f"Synthetic template  : {tpl_name}",
+             f"CCF method          : {method_note}"]
     if bjd is not None:
         lines.append(f"BJD = {bjd:.6f}"
                      + (f"   phase = {phase:.4f}" if phase is not None else ""))
@@ -2602,7 +2832,12 @@ def cmd_batch(args):
                                            fit_trim=BF_FIT_TRIM)
             else:
                 result = run_ccf([(wl, fx)], tpl_wl, tpl_flux,
-                                 args.rv_min, args.rv_max, args.rv_step)
+                                 args.rv_min, args.rv_max, args.rv_step,
+                                 mode=getattr(args, "ccf_mode", "mask"),
+                                 mask_depth=getattr(args, "mask_depth",
+                                                    0.05),
+                                 keep_balmer=getattr(args, "keep_balmer",
+                                                     False))
                 comps = [dict(rv=result["rv"], rv_err=result["rv_err"])]
 
             vbary, bjd = 0.0, np.nan
@@ -2858,6 +3093,7 @@ def make_args(**overrides):
                 t0=None, period=None, varastro=False, t0_to_bjd=False,
                 plot=None, output=None,
                 rv_min=-200.0, rv_max=200.0, rv_step=0.5,
+                ccf_mode="mask", mask_depth=0.05, keep_balmer=False,
                 vel_range=500.0, dv=None, svd_rcond=None, smooth=None,
                 components=1, min_sep=30.0, guess=None, guess_amp=None,
                 guess_sigma=None, profile="gauss",
@@ -3347,6 +3583,8 @@ def run_gui():
     rvmin_var = tk.StringVar(value="-200")
     rvmax_var = tk.StringVar(value="200")
     rvstep_var = tk.StringVar(value="0.5")
+    ccf_mode_var = tk.StringVar(value="Line mask")
+    exclude_h_var = tk.BooleanVar(value=True)
     vrange_var = tk.StringVar(value="500")
     comp_var = tk.IntVar(value=2)
     gamma_var = tk.StringVar()
@@ -3568,6 +3806,17 @@ def run_gui():
             ttk.Entry(ccf_sec, textvariable=var, width=8
                       ).grid(row=0, column=2 * j + 1, padx=(2, 10))
         ttk.Label(ccf_sec, text="[km/s]").grid(row=0, column=6)
+        ttk.Label(ccf_sec, text="Mode:").grid(row=1, column=0, sticky="w",
+                                              pady=(6, 0))
+        ttk.Combobox(ccf_sec, textvariable=ccf_mode_var, width=14,
+                     state="readonly",
+                     values=["Line mask", "Full template"]
+                     ).grid(row=1, column=1, columnspan=2, sticky="w",
+                            padx=2, pady=(6, 0))
+        ttk.Checkbutton(ccf_sec, text="Exclude hydrogen lines (hot stars)",
+                        variable=exclude_h_var
+                        ).grid(row=1, column=3, columnspan=4, sticky="w",
+                               pady=(6, 0))
 
         top = ttk.Frame(bf_sec)
         top.grid(row=0, column=0, columnspan=3, sticky="w")
@@ -3712,7 +3961,11 @@ def run_gui():
             if method_var.get() == "CCF":
                 kw.update(rv_min=_f(rvmin_var, -200.0),
                           rv_max=_f(rvmax_var, 200.0),
-                          rv_step=_f(rvstep_var, 0.5))
+                          rv_step=_f(rvstep_var, 0.5),
+                          ccf_mode=("mask"
+                                    if ccf_mode_var.get() == "Line mask"
+                                    else "template"),
+                          keep_balmer=not exclude_h_var.get())
                 payload = cmd_ccf(make_args(**kw))
             else:
                 guess = guess_amp = guess_sigma = None
@@ -3857,13 +4110,28 @@ def main():
     p_gui = sub.add_parser("gui", help="Open the widget (same as no arguments)")
     p_gui.set_defaults(func=lambda a: run_interactive())
 
-    p_ccf = sub.add_parser("ccf", help="Cross-correlation (workshop method)")
+    p_ccf = sub.add_parser("ccf", help="Cross-correlation (weighted line "
+                                       "mask; Baranne 1996 / Pepe 2002 / "
+                                       "Pino et al. 2018)")
     add_common_args(p_ccf)
     p_ccf.add_argument("--rv-min", type=float, default=-200.0,
                        help="RV scan lower limit [km/s]")
     p_ccf.add_argument("--rv-max", type=float, default=200.0,
                        help="RV scan upper limit [km/s]")
     p_ccf.add_argument("--rv-step", type=float, default=0.5, help="RV step [km/s]")
+    p_ccf.add_argument("--ccf-mode", choices=["mask", "template"],
+                       default="mask",
+                       help="'mask' (default): weighted line-mask CCF — "
+                            "reliable for hot (OBA) stars because the "
+                            "broad hydrogen wings drop out; 'template': "
+                            "the previous full-spectrum cross-covariance")
+    p_ccf.add_argument("--mask-depth", type=float, default=0.05,
+                       help="Minimum template line depth for a mask entry "
+                            "(mask mode)")
+    p_ccf.add_argument("--keep-balmer", action="store_true",
+                       help="Keep the hydrogen Balmer/Paschen lines in "
+                            "the mask (default: excluded — hot-star "
+                            "practice)")
     p_ccf.set_defaults(func=cmd_ccf)
 
     p_bf = sub.add_parser("bf", help="Broadening Function (thesis method, SVD)")
@@ -4022,6 +4290,14 @@ def main():
                          help="CCF scan upper limit [km/s]")
     p_batch.add_argument("--rv-step", type=float, default=0.5,
                          help="CCF step [km/s]")
+    p_batch.add_argument("--ccf-mode", choices=["mask", "template"],
+                         default="mask",
+                         help="CCF construction (see ccf --ccf-mode)")
+    p_batch.add_argument("--mask-depth", type=float, default=0.05,
+                         help="Minimum template line depth for a mask "
+                              "entry (mask mode)")
+    p_batch.add_argument("--keep-balmer", action="store_true",
+                         help="Keep the hydrogen lines in the CCF mask")
     p_batch.add_argument("--t0", type=float,
                          help="Ephemeris T0 [BJD] for phase-folding the plot")
     p_batch.add_argument("--period", type=float,
