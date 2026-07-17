@@ -1196,6 +1196,33 @@ def fit_ccf_peak(rv_grid, ccf):
     return [comp], dict(kind="gauss_lin", popt=popt)
 
 
+def profile_peak_snr(x, profile, comps):
+    """Significance of a fitted peak: component amplitude over the robust
+    (MAD) scatter of the profile away from every fitted component. A low
+    value (< ~4) means the 'peak' is not distinguishable from the noise
+    floor — the fit found something, but not a meaningful RV."""
+    x = np.asarray(x, dtype=float)
+    profile = np.asarray(profile, dtype=float)
+    away = np.ones(x.size, dtype=bool)
+    for c in comps:
+        away &= np.abs(x - c["rv"]) > 3.0 * max(c.get("sigma", 0.0), 1.0)
+    if away.sum() < 10:
+        return np.inf
+    wing = profile[away]
+    noise = 1.4826 * np.median(np.abs(wing - np.median(wing)))
+    peak = max(abs(float(c["amp"])) for c in comps)
+    return peak / max(noise, 1e-12)
+
+
+LOW_SNR_WARNING = (
+    "WARNING: the fitted peak is only {snr:.1f}x the profile noise - "
+    "this result is probably NOT meaningful. Check that the template "
+    "wavelength range overlaps a CLEAN part of the observed spectrum "
+    "(real lines visible, no merge/normalization artifacts) and matches "
+    "the star's spectral type; restrict --wave-min/--wave-max to such a "
+    "region if needed.")
+
+
 def run_ccf(spectrum_orders, tpl_wl, tpl_flux, rv_min, rv_max, rv_step,
             mode="mask", mask_depth=0.05, keep_balmer=False):
     """Run the CCF over all echelle orders, combine, and fit the peak.
@@ -1264,7 +1291,9 @@ def run_ccf(spectrum_orders, tpl_wl, tpl_flux, rv_min, rv_max, rv_step,
                     amp=comps[0]["amp"], sigma=comps[0]["sigma"],
                     rv_grid=rv_grid, ccf_total=ccf_total,
                     ccf_orders=np.array(ccf_orders), popt=popt,
-                    mode="mask", n_lines=int(line_wl.size))
+                    mode="mask", n_lines=int(line_wl.size),
+                    peak_snr=float(profile_peak_snr(rv_grid, ccf_total,
+                                                    comps)))
 
     tpl_norm = tpl_flux / np.nanmax(tpl_flux)
 
@@ -1299,7 +1328,9 @@ def run_ccf(spectrum_orders, tpl_wl, tpl_flux, rv_min, rv_max, rv_step,
     return dict(rv=rv, rv_err=rv_err, amp=comps[0]["amp"],
                 sigma=comps[0]["sigma"], rv_grid=rv_grid,
                 ccf_total=ccf_total, ccf_orders=np.array(ccf_orders),
-                popt=popt, mode="template")
+                popt=popt, mode="template",
+                peak_snr=float(profile_peak_snr(rv_grid, ccf_total,
+                                                comps)))
 
 
 def log_wave_grid(wl_min, wl_max, dv_kms):
@@ -2261,6 +2292,9 @@ def cmd_ccf(args):
         if vbary:
             lines.append(f"v_bary = {vbary:+.4f} km/s "
                          "(for information only, not applied)")
+    low_snr = result.get("peak_snr", np.inf) < 4.0
+    if low_snr:
+        lines.append(LOW_SNR_WARNING.format(snr=result["peak_snr"]))
     lines.append("============================================")
     summary = "\n".join(lines)
     print("\n" + summary)
@@ -2284,6 +2318,9 @@ def cmd_ccf(args):
         flines.append(f"CCF  {bjd if bjd is not None else 'nan'}  "
                       f"{f'{phase:.5f}' if phase is not None else 'nan'}  "
                       f"{rv_raw:.5f}  {rv_err:.5f}\n")
+    if low_snr:
+        flines.append("# " + LOW_SNR_WARNING.format(snr=result["peak_snr"])
+                      + "\n")
 
     plotfile = args.plot or "result_CCF.png"
     fig = make_ccf_figure(result)
@@ -2450,6 +2487,10 @@ def cmd_bf(args):
                      "rerun with --guess RV1 RV2 ... --guess-amp A1 A2 ... "
                      "(optionally --guess-sigma S1 S2 ...) to start the "
                      "fit from your visual estimates.")
+    bf_snr = profile_peak_snr(bf_result["velocity"], bf_result["bf_smooth"],
+                              comps)
+    if bf_snr < 4.0:
+        lines.append(LOW_SNR_WARNING.format(snr=bf_snr))
     if len(comps) >= 2 and all(c["amp"] > 0 for c in comps):
         a1 = component_area(comps[0], args.epsilon)
         if a1 > 0:
@@ -2491,6 +2532,8 @@ def cmd_bf(args):
         for i, c in enumerate(comps, 1):
             flines.append(f"{i}  {c['rv']:.5f}  {c['rv_err']:.5f}  "
                           f"{c['amp']:.5f}  {c['sigma']:.5f}\n")
+    if bf_snr < 4.0:
+        flines.append("# " + LOW_SNR_WARNING.format(snr=bf_snr) + "\n")
 
     plotfile = args.plot or "result_BF.png"
     fig = make_bf_figure(bf_result, comps, popt,
