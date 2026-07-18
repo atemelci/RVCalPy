@@ -48,7 +48,10 @@ Several practices are adopted from the
 - unphysical pixels (normalized flux > 1.2 or < 0) are interpolated over
   before the SVD;
 - the barycentric correction is applied with the relativistic cross term,
-  `RV = RV_measured + v_bary + RV_measured·v_bary/c` (Wright & Eastman 2014).
+  `RV = RV_measured + v_bary + RV_measured·v_bary/c` (Wright & Eastman 2014),
+  from the observatory's geodetic coordinates (so the diurnal Earth-rotation
+  term is included), the way the MIDAS `comp/bary` command uses the site
+  longitude and latitude.
 
 ## Installation
 
@@ -115,6 +118,16 @@ Other GUI features:
   fields.
 - **VarAstro / HJD → BJD** — fetch the eclipsing-binary ephemeris (T0, P)
   from var.astro.cz and convert T0 to BJD_TDB for the orbital phase.
+- **Observatory** — a dropdown of built-in sites (ESO VLT/La Silla/NTT/ALMA/
+  ELT, OHP, CTIO, Las Campanas, SOAR, Gemini, CFHT, Keck, LBT, TBL, TNG, TUG,
+  Kreiken, …) that auto-fills the **lon/lat/alt** fields; the coordinates
+  stay editable, so an observatory not in the list can be entered by hand
+  (pick *Custom* and type lon [°E], lat [°], alt [m]). These coordinates
+  drive the barycentric correction — including the diurnal (Earth-rotation)
+  term — the way the MIDAS `comp/bary` command takes the observatory
+  longitude and latitude explicitly.
+- **RA / Dec** accept decimal degrees or sexagesimal (`12:50:39.7`,
+  `-03:07:49.8`, or the MIDAS comma style `12,50,39.7`).
 - The barycentric correction is **opt-in**: v_bary is always computed and
   reported, but only added to the RVs when the checkbox is ticked.
 
@@ -190,6 +203,25 @@ Run `python rv_analysis.py <command> --help` for the full list of options
   SOPHIE/HARPS-style `s1d` products are already in the barycentric frame —
   do not apply the correction twice.
 
+### Instruments and observatories
+
+- **Spectrograph** — `--spectrograph NAME` (or the GUI dropdown) sets the
+  resolving power R automatically. The built-in list covers the common
+  optical/NIR échelle, mid- and low-resolution instruments (HARPS, ESPRESSO,
+  UVES, FEROS, SOPHIE, CORALIE, PEPSI, NARVAL, ESPaDOnS, MIKE, PFS, GHOST,
+  STELES, CHIRON, CRIRES+, NIRPS, WINERED, FLAMES-GIRAFFE, X-shooter, MagE,
+  M2FS, IFUM, GMOS, SOXS, FIRE, FORS2, MUSE, LDSS3, EFOSC2, KMOS,
+  Flamingos-2, TripleSpec, …) plus the **Gaia RVS** (R = 11 500). Print the
+  full table with `python rv_analysis.py --list-spectrographs`, or set R
+  directly with `--resolution`.
+- **Observatory** — `--site` accepts a built-in observatory name
+  (`paranal`, `lasilla`, `ctio`, `ohp`, `tug`, `kreiken`, `lco`, `soar`,
+  `tng`, …), a `lonE,lat,alt` string in degrees/metres for a site not in the
+  list, or an astropy `of_site` name. The coordinates (longitude
+  East-positive) drive the barycentric correction, including the diurnal
+  term, matching the MIDAS `comp/bary` convention. List the built-in sites
+  with `python rv_analysis.py --list-observatories`.
+
 ### Normalization
 
 `normalize` (and `batch --normalize`) fits the continuum with iterative
@@ -201,6 +233,12 @@ Two continuum models are available (`--fit-method`):
   triangular weights;
 - **bspline** — a cubic B-spline with interior knots every window
   (the saphires `cont_norm` model).
+
+`normalize` copies the target metadata (OBJECT, DATE-OBS, RA, Dec) from the
+raw FITS header — or from `--object/--ra/--dec/--obstime` — into the comment
+header of the output `*_norm.txt`, so a later `ccf`/`bf` run reads the
+coordinates straight from the normalized file and can compute the
+barycentric correction without re-entering them.
 
 ### BF components: automatic search and user estimates
 
@@ -246,6 +284,6 @@ axis — and RV).
 |---|---|
 | `result_CCF.txt` / `result_BF.txt` | RVs with errors, uncorrected and barycentric-corrected, amplitudes, areas, widths, light ratios, the continuum S/N of the spectrum; low-S/N and low-significance results carry explicit warnings (low S/N is the dominant source of spurious RVs — Katz et al. 2025) |
 | `result_CCF.png` / `result_BF.png` | Fit figure (BF: one dashed profile per component with `amp` and RV in the legend) |
-| `result_CCF_linecheck.png` / `result_BF_linecheck.png` | Model reliability check at strong diagnostic lines |
+| `result_CCF_linecheck.png` / `result_BF_linecheck.png` | Model reliability check at strong diagnostic lines (Fe I 5269.54, Ti II 4501.27, Cr II 4558.65, Sc II 4246.82 — the ionized species stay strong in warm/hot stars where Fe I weakens) |
 | `result_RV_curve.txt` / `.png` | `batch` mode: BJD, phase and per-component RVs for the whole series; components varying by more than 3 km/s peak-to-peak between epochs are flagged as binarity/variability candidates (Katz et al. 2025) |
 | `result_BF_profiles.png` | `batch` mode: all BF profiles stacked by orbital phase |

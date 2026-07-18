@@ -537,6 +537,90 @@ def fits_header_info(path):
     return info
 
 
+def parse_coord(ra, dec):
+    """RA/Dec (each) to degrees. Accepts decimal degrees (number or
+    string) or sexagesimal 'hh:mm:ss' / 'dd:mm:ss' with ':', space or
+    comma separators — the MIDAS comp/bary style '12,50,39.7' (RA in
+    hours) and '-03,07,49.8' (Dec in degrees). Returns (ra_deg, dec_deg);
+    a None input stays None. astropy is imported only when a sexagesimal
+    string actually needs parsing (decimal/None inputs need no astropy)."""
+    def one(val, is_ra):
+        if val is None:
+            return None
+        if isinstance(val, (int, float)):
+            return float(val)
+        s = str(val).strip()
+        if s == "":
+            return None
+        try:
+            return float(s)          # already decimal degrees
+        except ValueError:
+            pass
+        from astropy.coordinates import Angle
+        import astropy.units as u
+        s = s.replace(",", ":").replace(" ", ":")
+        while "::" in s:
+            s = s.replace("::", ":")
+        return Angle(s, unit=(u.hourangle if is_ra else u.deg)).deg
+
+    return one(ra, True), one(dec, False)
+
+
+def ascii_header_info(path):
+    """Read OBJECT / DATE-OBS / RA / DEC / EXPTIME from the comment header
+    of an ASCII spectrum — lines such as '# RA = 192.66' or
+    '# RA = 12:50:39.7' as written by the normalize step. RA/Dec are
+    parsed to degrees (sexagesimal accepted). Returns the same dict shape
+    as fits_header_info (values None when absent)."""
+    info = {"object": None, "obstime": None, "ra": None, "dec": None,
+            "exptime": None, "rv_cards": []}
+    ra_s = dec_s = None
+    try:
+        with open(path, "r", errors="ignore") as fh:
+            for raw in fh:
+                s = raw.strip()
+                if not s:
+                    continue
+                if s[0] not in "#;!%":
+                    break                    # header ends at the first data row
+                body = s.lstrip("#;!% \t")
+                if "=" not in body:
+                    continue
+                key, _, val = body.partition("=")
+                key = "".join(ch for ch in key.lower() if ch.isalnum())
+                val = val.strip()
+                if key == "ra":
+                    ra_s = val
+                elif key in ("dec", "de"):
+                    dec_s = val
+                elif key in ("dateobs", "obstime", "date", "mjd", "jd", "bjd"):
+                    info["obstime"] = val
+                elif key == "object":
+                    info["object"] = val
+                elif key == "exptime":
+                    try:
+                        info["exptime"] = float(val)
+                    except ValueError:
+                        pass
+    except OSError:
+        return info
+    if ra_s is not None or dec_s is not None:
+        try:
+            info["ra"], info["dec"] = parse_coord(ra_s, dec_s)
+        except Exception:
+            pass
+    return info
+
+
+def header_info(path):
+    """OBJECT/DATE-OBS/RA/DEC/EXPTIME from a spectrum file, dispatching on
+    the extension: FITS headers for .fits/.fit(.gz), else the ASCII
+    comment header written by the normalize step."""
+    if str(path).lower().endswith((".fits", ".fit", ".fits.gz")):
+        return fits_header_info(path)
+    return ascii_header_info(path)
+
+
 def resolve_target(name):
     """Resolve a target name to ICRS coordinates [deg] via SIMBAD (Sesame).
 
@@ -923,10 +1007,10 @@ def barycentric_correction(ra_deg, dec_deg, obstime, site):
     """Barycentric velocity correction [km/s]; combine it with the
     measured RV via apply_barycentric. `obstime` may be an ISOT string
     or a JD/BJD number."""
-    from astropy.coordinates import SkyCoord, EarthLocation
+    from astropy.coordinates import SkyCoord
     import astropy.units as u
 
-    loc = EarthLocation.of_site(site)
+    loc = earth_location(site)
     coord = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg)
     t, _ = parse_time_input(obstime)
     return coord.radial_velocity_correction(obstime=t, location=loc).to(u.km / u.s).value
@@ -957,7 +1041,7 @@ def get_target_context(args):
     mid-exposure BJD_TDB. The orbital phase is computed when an ephemeris
     (--t0, --period) is available.
     """
-    ra, dec = args.ra, args.dec
+    ra, dec = parse_coord(args.ra, args.dec)
     obstime = args.obstime
     exptime = None
 
@@ -976,16 +1060,17 @@ def get_target_context(args):
             print(f"Warning: {exc}\n  -> give coordinates manually "
                   "with --ra/--dec.")
 
-    if (ra is None or obstime is None) and \
-            str(args.spectrum).lower().endswith((".fits", ".fit", ".fits.gz")):
-        hdr = fits_header_info(args.spectrum)
+    if ra is None or obstime is None:
+        hdr = header_info(args.spectrum)
+        src = ("FITS header" if str(args.spectrum).lower().endswith(
+            (".fits", ".fit", ".fits.gz")) else "file header")
         exptime = hdr["exptime"]
         if ra is None and hdr["ra"] is not None:
             ra, dec = hdr["ra"], hdr["dec"]
-            print(f"FITS header: RA = {ra:.5f} deg, Dec = {dec:.5f} deg")
+            print(f"{src}: RA = {ra:.5f} deg, Dec = {dec:.5f} deg")
         if obstime is None and hdr["obstime"]:
             obstime = hdr["obstime"]
-            print(f"FITS header: DATE-OBS = {obstime}")
+            print(f"{src}: DATE-OBS = {obstime}")
 
     bjd = None
     if obstime is not None:
@@ -1433,21 +1518,168 @@ def log_wave_grid(wl_min, wl_max, dv_kms):
     return wl_min * np.exp(step * np.arange(n))
 
 
+# Representative resolving powers R = lambda/dlambda. Many instruments
+# have several modes; the value is the one most useful for RV work
+# (highest common resolution), with the range noted. R only sets the
+# instrumental broadening c/R used to smooth/degrade, so a representative
+# value is sufficient.
 SPECTROGRAPHS = [
+    # --- high-resolution optical echelle ---
     ("HARPS",     115000, "ESO 3.6 m, La Silla"),
+    ("HARPS-N",   115000, "TNG 3.58 m, La Palma"),
+    ("ESPRESSO",  140000, "ESO VLT 8.2 m, Paranal (HR; up to 190000 UHR)"),
+    ("UVES",       80000, "ESO VLT 8.2 m, Paranal (up to 110000)"),
     ("FEROS",      48000, "MPG/ESO 2.2 m, La Silla"),
-    ("ESPRESSO",  140000, "VLT, Paranal (HR mode)"),
     ("SOPHIE",     75000, "OHP 1.93 m (HR mode)"),
-    ("UVES",       80000, "VLT, Paranal (narrow-slit high-res)"),
-    ("CRIRES+",   100000, "VLT, Paranal (0.2\" slit)"),
-    ("PEPSI",     120000, "LBT (standard mode)"),
-    ("NARVAL",     65000, "TBL, Pic du Midi (Gaia benchmark source)"),
-    ("ESPaDOnS",   68000, "CFHT (Gaia benchmark source)"),
+    ("CORALIE",    60000, "Euler 1.2 m, La Silla"),
+    ("PEPSI",     120000, "LBT 2x8.4 m, Mount Graham"),
+    ("NARVAL",     65000, "TBL 2 m, Pic du Midi"),
+    ("ESPaDOnS",   68000, "CFHT 3.6 m, Mauna Kea"),
+    ("MIKE",       40000, "Magellan 6.5 m, Las Campanas (up to 83000)"),
+    ("PFS",        80000, "Magellan 6.5 m (Planet Finder; up to 130000)"),
+    ("GHOST",      56000, "Gemini South 8.1 m (standard; 76000 high-res)"),
+    ("STELES",     50000, "SOAR 4.1 m, Cerro Pachon"),
+    ("CHIRON",     80000, "CTIO/SMARTS 1.5 m (slicer; up to 136000)"),
+    # --- near-IR high-resolution ---
+    ("CRIRES+",   100000, "ESO VLT 8.2 m, Paranal (0.2\" slit)"),
+    ("NIRPS",      90000, "ESO 3.6 m, La Silla (HA 100000, HE 80000)"),
+    ("WINERED",    28000, "Magellan-class (WIDE; up to 100000 HIRES)"),
+    # --- mid-resolution ---
+    ("FLAMES-GIRAFFE", 25000, "ESO VLT 8.2 m, Paranal (R 6000-30000)"),
+    ("X-shooter",   8900, "ESO VLT 8.2 m, Paranal (VIS; UVB 5400, NIR 5600)"),
+    ("MagE",        4100, "Magellan 6.5 m (Echellette, 1\" slit)"),
+    ("M2FS",       18000, "Magellan 6.5 m (fiber; R 1000-40000)"),
+    ("IFUM",        4000, "Magellan 6.5 m IFUs feeding M2FS"),
+    ("GMOS",        4400, "Gemini 8.1 m (R831 grating; R 600-4400)"),
+    ("SOXS",        4500, "ESO NTT 3.58 m, La Silla (UV-VIS 4500, NIR 5000)"),
+    ("FIRE",        6000, "Magellan 6.5 m (echelle; up to 8000)"),
+    # --- low-resolution ---
+    ("FORS2",       2600, "ESO VLT 8.2 m, Paranal (highest-res grism)"),
+    ("MUSE",        3000, "ESO VLT 8.2 m, Paranal (R 1770-3590)"),
+    ("LDSS3",       1800, "Magellan 6.5 m, Las Campanas"),
+    ("EFOSC2",      2200, "ESO NTT 3.58 m, La Silla (grism-dependent)"),
+    ("KMOS",        4000, "ESO VLT 8.2 m, Paranal (R 2000-4200)"),
+    ("Flamingos-2", 3000, "Gemini South 8.1 m (R up to ~3000)"),
+    ("TripleSpec",  3500, "4 m-class NIR (TSpec; R 2700-3500)"),
+    # --- space ---
+    ("Gaia-RVS",   11500, "Gaia satellite, Radial Velocity Spectrometer "
+                          "(Ca II triplet 845-872 nm)"),
+    # --- amateur / education echelle ---
     ("Whoppshel-50",  30000, "Whoppshel echelle (Shelyak Instruments), "
                              "50 micron fiber + FIGU unit"),
     ("Whoppshel-105", 15000, "Whoppshel echelle (Shelyak Instruments), "
                              "105 micron fiber + FIGU unit"),
 ]
+
+
+# Observatory geodetic coordinates (longitude East-positive [deg],
+# latitude [deg], altitude [m]) plus lookup aliases. Kept in-tool so the
+# barycentric correction — which needs the observer's position on Earth,
+# including the diurnal term (MIDAS comp/bary takes the observatory
+# longitude and latitude explicitly) — works without astropy's online
+# site registry. Users can add their own site via the manual lon/lat/alt
+# fields (GUI) or a "lon,lat,alt" string (--site).
+OBSERVATORIES = [
+    ("ESO VLT (Paranal)", -70.4045, -24.6272, 2635.0,
+     ("paranal", "vlt", "esoparanal"),
+     "UVES, ESPRESSO, X-shooter, FLAMES, FORS2, MUSE, KMOS, CRIRES+"),
+    ("ESO La Silla", -70.7377, -29.2543, 2400.0,
+     ("lasilla", "esolasilla"),
+     "HARPS, FEROS, NIRPS, CORALIE (Euler)"),
+    ("ESO NTT (La Silla)", -70.7317, -29.2584, 2375.0,
+     ("ntt", "esontt"),
+     "EFOSC2, SOXS"),
+    ("ESO ALMA (Chajnantor)", -67.7549, -23.0229, 5058.7,
+     ("alma", "chajnantor"),
+     "ALMA array, Llano de Chajnantor"),
+    ("ESO ELT (Cerro Armazones)", -70.1922, -24.5892, 3046.0,
+     ("elt", "cerroarmazones", "armazones"),
+     "Extremely Large Telescope (under construction)"),
+    ("OHP", 5.7133, 43.9308, 650.0,
+     ("ohp", "hauteprovence"),
+     "Observatoire de Haute-Provence — SOPHIE"),
+    ("TUG (Bakirlitepe)", 30.3353, 36.8250, 2500.0,
+     ("tug", "tubitak", "rtt150", "bakirlitepe"),
+     "TUBITAK National Observatory, Turkey"),
+    ("Kreiken (Ankara)", 32.7772, 39.8436, 1256.0,
+     ("kreiken", "ankara", "ahlatlibel"),
+     "Ankara University Kreiken Observatory"),
+    ("CTIO (Cerro Tololo)", -70.8065, -30.1652, 2207.0,
+     ("ctio", "cerrotololo", "smarts"),
+     "CHIRON (SMARTS 1.5 m)"),
+    ("Las Campanas (Magellan)", -70.6926, -29.0146, 2380.0,
+     ("lco", "lascampanas", "magellan", "clay", "baade"),
+     "MIKE, PFS, MagE, M2FS, IFUM, FIRE, LDSS3, WINERED"),
+    ("SOAR (Cerro Pachon)", -70.7337, -30.2380, 2713.0,
+     ("soar", "cerropachon"),
+     "STELES"),
+    ("Gemini South (Cerro Pachon)", -70.7367, -30.2408, 2722.0,
+     ("geminisouth", "geminis"),
+     "GHOST, GMOS-S, Flamingos-2"),
+    ("Gemini North (Mauna Kea)", -155.4690, 19.8238, 4213.0,
+     ("gemininorth", "geminin"),
+     "GMOS-N"),
+    ("CFHT (Mauna Kea)", -155.4685, 19.8253, 4204.0,
+     ("cfht", "canadafrancehawaii"),
+     "ESPaDOnS"),
+    ("Keck (Mauna Kea)", -155.4747, 19.8260, 4145.0,
+     ("keck", "wmkeck"),
+     "HIRES"),
+    ("LBT (Mount Graham)", -109.8892, 32.7016, 3221.0,
+     ("lbt", "mountgraham", "largebinocular"),
+     "PEPSI"),
+    ("TBL (Pic du Midi)", 0.1425, 42.9367, 2877.0,
+     ("tbl", "picdumidi", "bernardlyot"),
+     "NARVAL"),
+    ("TNG (La Palma)", -17.8892, 28.7542, 2387.0,
+     ("tng", "galileo"),
+     "HARPS-N"),
+    ("Roque de los Muchachos (La Palma)", -17.8850, 28.7606, 2326.0,
+     ("orm", "roque", "lapalma"),
+     "La Palma observatory"),
+]
+
+
+def observatory_coords(name):
+    """(lon_East_deg, lat_deg, alt_m) of a built-in observatory by
+    (case-insensitive, punctuation-insensitive) name or alias; None when
+    unknown."""
+    if not name:
+        return None
+    key = "".join(ch for ch in str(name).lower() if ch.isalnum())
+    for oname, lon, lat, alt, aliases, _note in OBSERVATORIES:
+        keys = ["".join(ch for ch in s.lower() if ch.isalnum())
+                for s in (oname,) + tuple(aliases)]
+        if key in keys:
+            return lon, lat, alt
+    return None
+
+
+def earth_location(site):
+    """astropy EarthLocation for a barycentric/BJD computation.
+
+    `site` may be (1) a built-in OBSERVATORIES name or alias, (2) a
+    "lon,lat[,alt]" string in decimal degrees / metres (longitude
+    East-positive — the observatory longitude and latitude the MIDAS
+    comp/bary command takes explicitly), or (3) any astropy of_site()
+    name (needs the online registry).
+    """
+    from astropy.coordinates import EarthLocation
+    import astropy.units as u
+
+    coords = observatory_coords(site)
+    if coords is None and isinstance(site, str) and "," in site:
+        try:
+            vals = [float(p) for p in site.split(",") if p.strip() != ""]
+            if len(vals) >= 2:
+                coords = (vals[0], vals[1], vals[2] if len(vals) > 2 else 0.0)
+        except ValueError:
+            coords = None
+    if coords is not None:
+        lon, lat, alt = coords
+        return EarthLocation.from_geodetic(lon * u.deg, lat * u.deg,
+                                           alt * u.m)
+    return EarthLocation.of_site(site)
 
 
 def spectrograph_resolution(name):
@@ -2215,11 +2447,15 @@ def save_figure(fig, outfile):
     print(f"Figure saved: {outfile}")
 
 
+# Diagnostic lines for the RV reliability check: one strong neutral-iron
+# line plus three ionized-metal lines (Ti II, Cr II, Sc II). The ionized
+# species stay strong in warm/hot (A/B) stars where Fe I weakens, so the
+# check remains meaningful across spectral types. Air wavelengths [A].
 DIAGNOSTIC_LINES = [
     ("Fe I 5269.54", 5269.541),
-    ("Fe I 5328.04", 5328.039),
-    ("Fe I 5371.49", 5371.489),
-    ("Fe I 5405.77", 5405.775),
+    ("Ti II 4501.27", 4501.270),
+    ("Cr II 4558.65", 4558.650),
+    ("Sc II 4246.82", 4246.822),
 ]
 
 
@@ -2243,11 +2479,13 @@ def build_rv_model(spec_wl, tpl_wl, tpl_flux, comps):
 
 def line_check(spec_wl, spec_flux, tpl_wl, tpl_flux, comps,
                window=6.0, method="BF"):
-    """Reliability check of the RV solution against real Fe I lines: the
-    observed normalized spectrum is compared with the model (template
-    shifted by the measured RVs) in windows around the strongest Fe I
-    lines of the 500-550 nm region, led by Fe I 5269.54 A (526.954 nm),
-    the strongest of them. Each window is centered on the Doppler-shifted
+    """Reliability check of the RV solution against real diagnostic
+    lines: the observed normalized spectrum is compared with the model
+    (template shifted by the measured RVs) in windows around a set of
+    strong lines — Fe I 5269.54 A plus the ionized-metal lines Ti II
+    4501.27, Cr II 4558.65 and Sc II 4246.82 A, which stay strong in
+    warm/hot stars where Fe I weakens. Each window is centered on the
+    Doppler-shifted
     position of the line for the primary component, so the comparison
     tracks the line wherever the measured RV puts it. For every line the
     residual RMS, the Pearson correlation and the line-depth ratio
@@ -2368,7 +2606,6 @@ def cmd_ccf(args):
              f"Normalized spectrum : {args.spectrum}",
              f"Synthetic template  : {tpl_name}",
              f"CCF method          : {method_note}",
-             f"RV search           : {result['search']}",
              f"Continuum S/N       : ~{snr_note} per pixel"]
     if bjd is not None:
         lines.append(f"BJD = {bjd:.6f}"
@@ -2397,7 +2634,6 @@ def cmd_ccf(args):
     flines = [f"# Normalized spectrum : {args.spectrum}\n",
               f"# Synthetic template  : {tpl_name}\n",
               f"# CCF method : {method_note}\n",
-              f"# RV search  : {result['search']}\n",
               f"# continuum S/N ~ {snr_note} per pixel\n",
               "# barycentric correction applied: "
               + ("yes" if apply_bary else "no") + "\n"]
@@ -2720,14 +2956,38 @@ def cmd_normalize(args):
                                resolution=get_resolution(args),
                                vsini=args.vsini, epsilon=args.epsilon)
 
+    # Carry the target metadata into the output header so the later
+    # CCF/BF run reads RA/Dec/DATE-OBS straight from the normalized file
+    # (ascii_header_info) and can compute the barycentric correction.
+    src = header_info(args.spectrum)
+    ra_u, dec_u = parse_coord(getattr(args, "ra", None),
+                              getattr(args, "dec", None))
+    meta = {"object": getattr(args, "object", None) or src["object"],
+            "obstime": getattr(args, "obstime", None) or src["obstime"],
+            "ra": ra_u if ra_u is not None else src["ra"],
+            "dec": dec_u if dec_u is not None else src["dec"],
+            "exptime": src["exptime"]}
+    hdr_lines = [f"wavelength [nm]  normalized flux; from {args.spectrum} "
+                 f"({desc}, {args.iterations} iterations)"]
+    if meta["object"]:
+        hdr_lines.append(f"OBJECT = {meta['object']}")
+    if meta["obstime"]:
+        hdr_lines.append(f"DATE-OBS = {meta['obstime']}")
+    if meta["exptime"] is not None:
+        hdr_lines.append(f"EXPTIME = {meta['exptime']}")
+    if meta["ra"] is not None:
+        hdr_lines.append(f"RA = {meta['ra']:.6f}")
+    if meta["dec"] is not None:
+        hdr_lines.append(f"DEC = {meta['dec']:.6f}")
+
     outfile = args.output or \
         os.path.splitext(os.path.basename(args.spectrum))[0] + "_norm.txt"
     np.savetxt(outfile, np.column_stack([wl / 10.0, nf]),
-               fmt="%.5f %.5f",
-               header=f"wavelength [nm]  normalized flux; "
-                      f"from {args.spectrum} "
-                      f"({desc}, {args.iterations} iterations)")
+               fmt="%.5f %.5f", header="\n".join(hdr_lines))
     print(f"Normalized spectrum written: {outfile} (wavelength in nm)")
+    if meta["ra"] is not None or meta["obstime"]:
+        print("  target metadata (RA/Dec/DATE-OBS) copied into the header "
+              "for the barycentric correction.")
 
     plotfile = args.plot or "result_normalization.png"
     fig = make_norm_figure(diag, wl, nf, tpl)
@@ -2754,7 +3014,7 @@ def compute_bjd(obstime, ra_deg, dec_deg, site, exptime=None):
     returned unchanged — the data are then assumed to be in BJD already,
     as in the reference document.
     """
-    from astropy.coordinates import SkyCoord, EarthLocation
+    from astropy.coordinates import SkyCoord
     import astropy.units as u
 
     t, is_jd = parse_time_input(obstime)
@@ -2762,7 +3022,7 @@ def compute_bjd(obstime, ra_deg, dec_deg, site, exptime=None):
         return float(str(obstime).strip())
     if exptime:
         t = t + (float(exptime) / 2.0) * u.s
-    loc = EarthLocation.of_site(site)
+    loc = earth_location(site)
     coord = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg)
     ltt = t.light_travel_time(coord, kind="barycentric", location=loc)
     return float((t.tdb + ltt).jd)
@@ -2872,7 +3132,7 @@ def cmd_batch(args):
         resolution=(resolution if degrade else None),
         vsini=args.vsini, epsilon=args.epsilon)
 
-    ra, dec = args.ra, args.dec
+    ra, dec = parse_coord(args.ra, args.dec)
     if ra is None and args.object:
         try:
             sim = query_simbad(args.object)
@@ -2943,7 +3203,7 @@ def cmd_batch(args):
             srt = np.argsort(wl)
             wl, fx = wl[srt], fx[srt]
 
-            hdr = fits_header_info(path)
+            hdr = header_info(path)
             obstime = (args.bjd[i_file] if args.bjd
                        else args.obstime or hdr["obstime"])
             ra_i = ra if ra is not None else hdr["ra"]
@@ -3325,13 +3585,14 @@ def _ask_target(kw):
         manual = ask("Enter coordinates manually? (y/n)", default="n",
                      cast=str, validate=lambda s: s.lower() in ("y", "n"))
         if manual.lower() == "y":
-            kw["ra"] = ask("  RA [deg]", cast=float)
-            kw["dec"] = ask("  Dec [deg]", cast=float)
+            kw["ra"] = ask("  RA (deg or sexagesimal hh:mm:ss)")
+            kw["dec"] = ask("  Dec (deg or sexagesimal dd:mm:ss)")
     if kw.get("ra") is not None:
         kw["obstime"] = ask("Observation time (ISOT, BJD number or "
                             "DD/MM/YY; empty: read from FITS header)",
                             allow_empty=True)
-        kw["site"] = ask("Observatory (astropy site name: tug, paranal, ...)",
+        kw["site"] = ask("Observatory (built-in name paranal/lasilla/ctio/"
+                         "ohp/tug/kreiken/lco/... or 'lonE,lat,alt')",
                          default="tug")
         apply = ask("Apply the barycentric correction to the reported RVs? "
                     "(n: v_bary is computed and kept in the result file "
@@ -3550,7 +3811,10 @@ def run_gui():
 
     target_var = tk.StringVar()
     ra_var, dec_var = tk.StringVar(), tk.StringVar()
-    time_var, site_var = tk.StringVar(), tk.StringVar(value="paranal")
+    time_var = tk.StringVar()
+    site_var = tk.StringVar(value=OBSERVATORIES[0][0])
+    lon_var, lat_var, alt_var = (tk.StringVar(), tk.StringVar(),
+                                 tk.StringVar())
 
     trow = ttk.LabelFrame(main, text="Target (optional, for barycentric "
                                      "correction)", padding=6)
@@ -3585,10 +3849,10 @@ def run_gui():
 
     ttk.Button(trow, text="SIMBAD", command=simbad_lookup).grid(row=0, column=2,
                                                                 padx=(2, 12))
-    ttk.Label(trow, text="RA [deg]:").grid(row=0, column=3)
-    ttk.Entry(trow, textvariable=ra_var, width=10).grid(row=0, column=4, padx=2)
-    ttk.Label(trow, text="Dec [deg]:").grid(row=0, column=5)
-    ttk.Entry(trow, textvariable=dec_var, width=10).grid(row=0, column=6, padx=2)
+    ttk.Label(trow, text="RA:").grid(row=0, column=3)
+    ttk.Entry(trow, textvariable=ra_var, width=12).grid(row=0, column=4, padx=2)
+    ttk.Label(trow, text="Dec:").grid(row=0, column=5)
+    ttk.Entry(trow, textvariable=dec_var, width=12).grid(row=0, column=6, padx=2)
     ttk.Label(trow, textvariable=siminfo_var, foreground="gray"
               ).grid(row=0, column=7, sticky="w", padx=(8, 0))
 
@@ -3600,14 +3864,53 @@ def run_gui():
                                                           pady=(4, 0))
     ttk.Label(trow, text="Observatory:").grid(row=1, column=4, sticky="e",
                                               pady=(4, 0))
-    ttk.Entry(trow, textvariable=site_var, width=10).grid(row=1, column=5,
-                                                          columnspan=2,
-                                                          sticky="w",
-                                                          pady=(4, 0))
+    obs_choices = [o[0] for o in OBSERVATORIES] + ["Custom (enter below)"]
+
+    def on_observatory_selected(_e=None):
+        coords = observatory_coords(site_var.get())
+        if coords:
+            lon_var.set(f"{coords[0]:.4f}")
+            lat_var.set(f"{coords[1]:.4f}")
+            alt_var.set(f"{coords[2]:.0f}")
+        else:                                   # "Custom": let the user type
+            lon_var.set("")
+            lat_var.set("")
+            alt_var.set("")
+
+    obs_box = ttk.Combobox(trow, textvariable=site_var, values=obs_choices,
+                           width=22, state="readonly")
+    obs_box.grid(row=1, column=5, columnspan=2, sticky="w", pady=(4, 0))
+    obs_box.bind("<<ComboboxSelected>>", on_observatory_selected)
     bary_var = tk.BooleanVar(value=False)
     ttk.Checkbutton(trow, text="Apply barycentric correction",
                     variable=bary_var).grid(row=1, column=7, sticky="w",
                                             padx=(8, 0), pady=(4, 0))
+
+    ttk.Label(trow, text="lon/lat/alt [°E, °, m]:").grid(
+        row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
+    ttk.Entry(trow, textvariable=lon_var, width=10).grid(row=3, column=2,
+                                                         sticky="w",
+                                                         pady=(4, 0))
+    ttk.Entry(trow, textvariable=lat_var, width=10).grid(row=3, column=3,
+                                                         sticky="w",
+                                                         pady=(4, 0))
+    ttk.Entry(trow, textvariable=alt_var, width=8).grid(row=3, column=4,
+                                                        sticky="w",
+                                                        pady=(4, 0))
+    ttk.Label(trow, text="(auto-filled from the observatory; editable for "
+                         "a custom site)", foreground="gray"
+              ).grid(row=3, column=5, columnspan=3, sticky="w", pady=(4, 0))
+    on_observatory_selected()
+
+    def resolve_site():
+        """Observatory string for the analysis: explicit lon/lat/alt when
+        both lon and lat are filled (custom or edited site), else the
+        selected observatory name."""
+        lo, la = lon_var.get().strip(), lat_var.get().strip()
+        if lo and la:
+            return f"{lo},{la},{alt_var.get().strip() or 0}"
+        name = site_var.get().strip()
+        return name if observatory_coords(name) else "paranal"
 
     t0_var, per_var = tk.StringVar(), tk.StringVar()
     t0_unit_var = tk.StringVar(value="BJD")
@@ -3761,7 +4064,7 @@ def run_gui():
     rvmin_var = tk.StringVar()
     rvmax_var = tk.StringVar()
     rvstep_var = tk.StringVar(value="0.5")
-    ccf_mode_var = tk.StringVar(value="Line mask")
+    ccf_mode_var = tk.StringVar(value="Full template")
     exclude_h_var = tk.BooleanVar(value=True)
     vrange_var = tk.StringVar(value="500")
     comp_var = tk.IntVar(value=2)
@@ -3806,8 +4109,7 @@ def run_gui():
             return
         try:
             payload = cmd_header(make_args(spectrum=path,
-                                           site=site_var.get().strip()
-                                           or "paranal"))
+                                           site=resolve_site()))
         except Exception as exc:
             messagebox.showerror("Error", str(exc))
             return
@@ -4130,9 +4432,10 @@ def run_gui():
                       template=tpl_var.get().strip(),
                       wave_min=_f(wmin_var), wave_max=_f(wmax_var),
                       object=target_var.get().strip() or None,
-                      ra=_f(ra_var), dec=_f(dec_var),
+                      ra=ra_var.get().strip() or None,
+                      dec=dec_var.get().strip() or None,
                       obstime=time_var.get().strip() or None,
-                      site=site_var.get().strip() or "paranal",
+                      site=resolve_site(),
                       no_bary=not bary_var.get(),
                       t0=_f(t0_var), period=_f(per_var),
                       resolution=_f(res_var), vsini=_f(vsini_var),
@@ -4240,15 +4543,22 @@ def add_common_args(p):
                         "rotational profile (default 0.6)")
     p.add_argument("--object", help="Star name; coordinates are resolved via "
                                     "SIMBAD for the barycentric correction")
-    p.add_argument("--ra", type=float, help="RA [deg] for barycentric correction")
-    p.add_argument("--dec", type=float, help="Dec [deg] for barycentric correction")
+    p.add_argument("--ra", help="RA for the barycentric correction: decimal "
+                                "degrees or sexagesimal hours "
+                                "(12:50:39.7 / '12 50 39.7')")
+    p.add_argument("--dec", help="Dec for the barycentric correction: "
+                                 "decimal degrees or sexagesimal "
+                                 "(-03:07:49.8 / '-03 07 49.8')")
     p.add_argument("--obstime", help="Observation time: ISOT "
                                      "(2024-12-03T02:30:00), BJD number "
                                      "(2453254.847090365) or old FITS "
                                      "date DD/MM/YY (16/10/98, optionally "
                                      "+ UT time)")
     p.add_argument("--site", default="paranal",
-                   help="Observatory (astropy site name, e.g. paranal, tug)")
+                   help="Observatory: a built-in name (paranal, lasilla, "
+                        "ctio, ohp, tug, kreiken, lco, soar, ... — see "
+                        "--list-observatories), a 'lonE,lat,alt' string "
+                        "in degrees/metres, or an astropy site name")
     p.add_argument("--no-bary", action="store_true",
                    help="Compute the barycentric correction but do NOT "
                         "apply it to the RVs: the value is kept in the "
@@ -4275,15 +4585,43 @@ def add_common_args(p):
                                     "(default: result_CCF.txt / result_BF.txt)")
 
 
+def print_observatories():
+    print("Built-in observatories (longitude East-positive):")
+    print(f"  {'name':<34} {'lon[deg]':>10} {'lat[deg]':>9} {'alt[m]':>7}  "
+          "instruments / note")
+    for oname, lon, lat, alt, _aliases, note in OBSERVATORIES:
+        print(f"  {oname:<34} {lon:10.4f} {lat:9.4f} {alt:7.0f}  {note}")
+    print("\nGive any of these to --site (or a 'lonE,lat,alt' string, or an "
+          "astropy site name).")
+
+
+def print_spectrographs():
+    print("Built-in spectrographs (representative resolving power R):")
+    for name, r, note in SPECTROGRAPHS:
+        print(f"  {name:<16} R = {r:>7}   {note}")
+    print("\nGive any of these to --spectrograph, or set R with "
+          "--resolution.")
+
+
 def main():
     if len(sys.argv) == 1:
         run_interactive()
+        return
+    if "--list-observatories" in sys.argv:
+        print_observatories()
+        return
+    if "--list-spectrographs" in sys.argv:
+        print_spectrographs()
         return
 
     parser = argparse.ArgumentParser(
         description="Radial velocity from spectra: CCF and BF methods. "
                     "Run without arguments for the interactive mode.",
         formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--list-observatories", action="store_true",
+                        help="Print the built-in observatory list and exit")
+    parser.add_argument("--list-spectrographs", action="store_true",
+                        help="Print the built-in spectrograph list and exit")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_gui = sub.add_parser("gui", help="Open the widget (same as no arguments)")
@@ -4418,8 +4756,8 @@ def main():
                          help="Continuum model with --normalize: windowed "
                               "polynomial (default) or cubic B-spline")
     p_batch.add_argument("--object", help="Star name for SIMBAD coordinates")
-    p_batch.add_argument("--ra", type=float, help="RA [deg]")
-    p_batch.add_argument("--dec", type=float, help="Dec [deg]")
+    p_batch.add_argument("--ra", help="RA [deg or sexagesimal hours]")
+    p_batch.add_argument("--dec", help="Dec [deg or sexagesimal]")
     p_batch.add_argument("--obstime",
                          help="Observation time override, ISOT or BJD "
                               "(default: per-file FITS header DATE-OBS)")
@@ -4428,7 +4766,9 @@ def main():
                               "sorted order (as the bjd list of the "
                               "reference document)")
     p_batch.add_argument("--site", default="paranal",
-                         help="Observatory (astropy site name)")
+                         help="Observatory: built-in name, 'lonE,lat,alt' "
+                              "string, or astropy site name "
+                              "(see ccf --site)")
     p_batch.add_argument("--no-bary", action="store_true",
                          help="Compute the barycentric correction but do "
                               "NOT apply it to the RVs: the value is kept "
@@ -4555,6 +4895,16 @@ def main():
     p_norm.add_argument("--teff", type=float, help="Template T_eff [K] (expecto)")
     p_norm.add_argument("--logg", type=float, default=4.5, help="Template log g")
     p_norm.add_argument("--feh", type=float, default=0.0, help="Template [Fe/H]")
+    p_norm.add_argument("--object", help="Star name, written into the "
+                                         "output header")
+    p_norm.add_argument("--ra", help="RA (deg or sexagesimal hours), "
+                                     "written into the output header for "
+                                     "the later barycentric correction")
+    p_norm.add_argument("--dec", help="Dec (deg or sexagesimal), written "
+                                      "into the output header")
+    p_norm.add_argument("--obstime", help="Observation time (ISOT/BJD/"
+                                          "DD-MM-YY), written into the "
+                                          "output header")
     p_norm.add_argument("--output", help="Output ASCII file "
                                          "(default: <input>_norm.txt)")
     p_norm.add_argument("--plot", help="Figure PNG file name "
