@@ -1222,10 +1222,51 @@ LOW_SNR_WARNING = (
     "the star's spectral type; restrict --wave-min/--wave-max to such a "
     "region if needed.")
 
+LOW_DATA_SNR_NOTE = (
+    "Note: continuum S/N ~ {snr:.0f} is low. Katz et al. (2025) find "
+    "low-S/N spectra to be the dominant source of spurious RVs - treat "
+    "this result with care.")
 
-def run_ccf(spectrum_orders, tpl_wl, tpl_flux, rv_min, rv_max, rv_step,
-            mode="mask", mask_depth=0.05, keep_balmer=False):
+
+def estimate_snr(flux):
+    """Robust per-pixel continuum S/N of a normalized spectrum. The MAD
+    of second differences over runs of near-continuum pixels
+    (|flux - 1| < 0.05) measures only the high-frequency noise — lines
+    and slow slopes cancel out of a second difference — and sqrt(6)
+    converts it to a per-pixel sigma. Reported with the results because
+    low S/N is the dominant source of spurious RV measurements (Katz et
+    al. 2025, A&A 704, A294). Returns inf for noise-free input."""
+    f = np.asarray(flux, dtype=float)
+    f = f[np.isfinite(f)]
+    if f.size < 30:
+        return np.inf
+    near = np.abs(f - 1.0) < 0.05
+    ok = near[:-2] & near[1:-1] & near[2:]
+    d2 = np.diff(f, 2)
+    d2 = d2[ok] if ok.sum() >= 30 else d2
+    sigma = 1.4826 * np.median(np.abs(d2 - np.median(d2))) / np.sqrt(6.0)
+    return float(1.0 / sigma) if sigma > 1e-9 else np.inf
+
+
+# Coarse stage of the automatic RV search (Katz et al. 2025, A&A 704,
+# A294, SOPHIE procedure): scan +-900 km/s in 10 km/s steps to locate
+# the peak, then lay the fine grid around it. A fixed narrow default
+# window would silently miss genuinely fast-moving stars.
+CCF_SEARCH_HALF = 900.0
+CCF_SEARCH_STEP = 10.0
+
+
+def run_ccf(spectrum_orders, tpl_wl, tpl_flux, rv_min=None, rv_max=None,
+            rv_step=0.5, mode="mask", mask_depth=0.05, keep_balmer=False):
     """Run the CCF over all echelle orders, combine, and fit the peak.
+
+    RV search: when rv_min/rv_max are not given, the search is
+    two-stage, following the SOPHIE off-line procedure of Katz et al.
+    (2025, A&A 704, A294): a coarse scan over +-900 km/s in 10 km/s
+    steps locates the peak — so genuinely fast-moving stars are never
+    outside the window — and the fine rv_step grid is then laid over
+    peak +- 2.5 FWHM (at least +-25 km/s) for the actual fit. Explicit
+    limits are used as-is in a single fine pass.
 
     mode 'mask' (default): weighted line-mask CCF — the construction of
     Baranne et al. (1996) / Pepe et al. (2002) as applied by Pino et al.
@@ -1247,9 +1288,10 @@ def run_ccf(spectrum_orders, tpl_wl, tpl_flux, rv_min, rv_max, rv_step,
     spikes) are interpolated over first, as before the BF SVD.
 
     Returns: dict(rv, rv_err, amp, sigma, rv_grid, ccf_total,
-    ccf_orders, popt, mode[, n_lines])
+    ccf_orders, popt, mode, peak_snr, search[, n_lines])
     """
-    rv_grid = np.arange(rv_min, rv_max + rv_step, rv_step)
+    auto = rv_min is None or rv_max is None
+    span = CCF_SEARCH_HALF if auto else max(abs(rv_min), abs(rv_max))
 
     if mode == "mask":
         line_wl, line_w = build_ccf_mask(tpl_wl, tpl_flux,
@@ -1259,9 +1301,8 @@ def run_ccf(spectrum_orders, tpl_wl, tpl_flux, rv_min, rv_max, rv_step,
               f"(depth >= {mask_depth:g}"
               + (", hydrogen series excluded" if not keep_balmer
                  else ", hydrogen series kept") + ")")
-        ccf_orders, num_total, w_total = [], np.zeros(rv_grid.size), 0.0
-        n_used = 0
-        for k, (wl, fx) in enumerate(spectrum_orders):
+        orders_clean = []
+        for wl, fx in spectrum_orders:
             good = np.isfinite(wl) & np.isfinite(fx)
             wl, fx = wl[good], fx[good]
             if wl.size < 10:
@@ -1270,67 +1311,114 @@ def run_ccf(spectrum_orders, tpl_wl, tpl_flux, rv_min, rv_max, rv_step,
             if 0 < bad.sum() < 0.5 * fx.size:
                 fx = fx.copy()
                 fx[bad] = np.interp(wl[bad], wl[~bad], fx[~bad])
-            num, wsum = calculate_ccf_mask(wl, fx, line_wl, line_w,
-                                           rv_grid)
-            if num is None or wsum <= 0:
+            orders_clean.append((wl, fx))
+
+        def ccf_on(grid):
+            per_order, num_total, w_total = [], np.zeros(grid.size), 0.0
+            for k, (wl, fx) in enumerate(orders_clean):
+                num, wsum = calculate_ccf_mask(wl, fx, line_wl, line_w,
+                                               grid)
+                if num is None or wsum <= 0:
+                    continue
+                per_order.append(num / wsum)
+                num_total += num
+                w_total += wsum
+                print(f"  order {k + 1}/{len(orders_clean)} done",
+                      end="\r")
+            print()
+            if w_total <= 0:
+                raise RuntimeError(
+                    "No mask line falls inside the data for the whole "
+                    "RV grid; narrow --rv-min/--rv-max or check the "
+                    "wavelength overlap with the template.")
+            return num_total / w_total, per_order
+    else:
+        tpl_norm = tpl_flux / np.nanmax(tpl_flux)
+        max_shift = span / C_KMS
+        lo_wl = tpl_wl.min() * (1.0 + max_shift)
+        hi_wl = tpl_wl.max() * (1.0 - max_shift)
+        orders_clean = []
+        for wl, fx in spectrum_orders:
+            good = np.isfinite(wl) & np.isfinite(fx)
+            wl, fx = wl[good], fx[good]
+            sel = (wl >= lo_wl) & (wl <= hi_wl)
+            wl, fx = wl[sel], fx[sel]
+            if wl.size < 10 or np.nanmax(fx) <= 0:
                 continue
-            ccf_orders.append(num / wsum)
-            num_total += num
-            w_total += wsum
-            n_used += 1
-            print(f"  order {k + 1}/{len(spectrum_orders)} done", end="\r")
-        print()
-        if w_total <= 0:
+            orders_clean.append((wl, fx / np.nanmax(fx)))
+
+        def ccf_on(grid):
+            per_order = []
+            for k, (wl, fx) in enumerate(orders_clean):
+                per_order.append(calculate_ccf(wl, fx, tpl_wl, tpl_norm,
+                                               grid))
+                print(f"  order {k + 1}/{len(orders_clean)} done",
+                      end="\r")
+            print()
+            if not per_order:
+                raise RuntimeError(
+                    "No CCF could be computed for any order (check the "
+                    "wavelength overlap with the template).")
+            total = np.sum(per_order, axis=0)
+            return total / np.nanmax(total), per_order
+
+    search = "single pass over the given RV window"
+    if auto:
+        coarse = None
+        for half in (CCF_SEARCH_HALF, 450.0, 200.0):
+            grid_c = np.arange(-half, half + CCF_SEARCH_STEP,
+                               CCF_SEARCH_STEP)
+            try:
+                cc, _ = ccf_on(grid_c)
+            except RuntimeError:
+                continue
+            coarse = (grid_c, cc, half)
+            break
+        if coarse is None:
             raise RuntimeError(
-                "No mask line falls inside the data for the whole RV "
-                "grid; narrow --rv-min/--rv-max or check the wavelength "
-                "overlap with the template.")
-        ccf_total = num_total / w_total
+                "The coarse RV scan failed for every search width; "
+                "check the wavelength overlap with the template.")
+        grid_c, cc, half = coarse
+        i0 = int(np.nanargmax(cc))
+        base = float(np.nanmedian(cc))
+        level = base + 0.5 * (cc[i0] - base)
+        j = i0
+        while j + 1 < cc.size and cc[j + 1] > level:
+            j += 1
+        k = i0
+        while k - 1 >= 0 and cc[k - 1] > level:
+            k -= 1
+        fwhm = max(grid_c[j] - grid_c[k], 2.0 * CCF_SEARCH_STEP)
+        v0 = float(grid_c[i0])
+        fine_half = min(max(2.5 * fwhm, 25.0), 450.0)
+        lo = max(v0 - fine_half, -half)
+        hi = min(v0 + fine_half, half)
+        search = (f"two-stage (Katz et al. 2025): coarse +-{half:g} km/s "
+                  f"@ {CCF_SEARCH_STEP:g} km/s -> peak near "
+                  f"{v0:+.0f} km/s, refined over [{lo:.0f}, {hi:.0f}] "
+                  f"@ {rv_step:g} km/s")
+        print("RV search: " + search)
+        rv_grid = np.arange(lo, hi + rv_step, rv_step)
+    else:
+        rv_grid = np.arange(rv_min, rv_max + rv_step, rv_step)
+
+    ccf_total, ccf_orders = ccf_on(rv_grid)
+
+    if mode == "mask":
         comps, popt = fit_ccf_peak(rv_grid, ccf_total)
-        return dict(rv=comps[0]["rv"], rv_err=comps[0]["rv_err"],
-                    amp=comps[0]["amp"], sigma=comps[0]["sigma"],
-                    rv_grid=rv_grid, ccf_total=ccf_total,
-                    ccf_orders=np.array(ccf_orders), popt=popt,
-                    mode="mask", n_lines=int(line_wl.size),
-                    peak_snr=float(profile_peak_snr(rv_grid, ccf_total,
-                                                    comps)))
-
-    tpl_norm = tpl_flux / np.nanmax(tpl_flux)
-
-    max_shift = max(abs(rv_min), abs(rv_max)) / C_KMS
-    lo = tpl_wl.min() * (1.0 + max_shift)
-    hi = tpl_wl.max() * (1.0 - max_shift)
-
-    ccf_orders = []
-    for k, (wl, fx) in enumerate(spectrum_orders):
-        good = np.isfinite(wl) & np.isfinite(fx)
-        wl, fx = wl[good], fx[good]
-        sel = (wl >= lo) & (wl <= hi)
-        wl, fx = wl[sel], fx[sel]
-        if wl.size < 10:
-            continue
-        peak = np.nanmax(fx)
-        if peak <= 0:
-            continue
-        ccf_orders.append(calculate_ccf(wl, fx / peak, tpl_wl, tpl_norm, rv_grid))
-        print(f"  order {k + 1}/{len(spectrum_orders)} done", end="\r")
-    print()
-    if not ccf_orders:
-        raise RuntimeError("No CCF could be computed for any order "
-                           "(check the wavelength overlap with the template).")
-
-    ccf_total = np.sum(ccf_orders, axis=0)
-    ccf_total = ccf_total / np.nanmax(ccf_total)
-
-    comps, popt = fit_peak_with_base(rv_grid, ccf_total, with_offset=True)
-    rv, rv_err = comps[0]["rv"], comps[0]["rv_err"]
-
-    return dict(rv=rv, rv_err=rv_err, amp=comps[0]["amp"],
-                sigma=comps[0]["sigma"], rv_grid=rv_grid,
-                ccf_total=ccf_total, ccf_orders=np.array(ccf_orders),
-                popt=popt, mode="template",
-                peak_snr=float(profile_peak_snr(rv_grid, ccf_total,
-                                                comps)))
+    else:
+        comps, popt = fit_peak_with_base(rv_grid, ccf_total,
+                                         with_offset=True)
+    result = dict(rv=comps[0]["rv"], rv_err=comps[0]["rv_err"],
+                  amp=comps[0]["amp"], sigma=comps[0]["sigma"],
+                  rv_grid=rv_grid, ccf_total=ccf_total,
+                  ccf_orders=np.array(ccf_orders), popt=popt, mode=mode,
+                  search=search,
+                  peak_snr=float(profile_peak_snr(rv_grid, ccf_total,
+                                                  comps)))
+    if mode == "mask":
+        result["n_lines"] = int(line_wl.size)
+    return result
 
 
 def log_wave_grid(wl_min, wl_max, dv_kms):
@@ -2274,10 +2362,14 @@ def cmd_ccf(args):
                           else "excluded"))
     else:
         method_note = "full-template cross-covariance"
+    data_snr = estimate_snr(np.concatenate([f for _, f in orders]))
+    snr_note = ("inf" if not np.isfinite(data_snr) else f"{data_snr:.0f}")
     lines = ["================ CCF RESULT ================",
              f"Normalized spectrum : {args.spectrum}",
              f"Synthetic template  : {tpl_name}",
-             f"CCF method          : {method_note}"]
+             f"CCF method          : {method_note}",
+             f"RV search           : {result['search']}",
+             f"Continuum S/N       : ~{snr_note} per pixel"]
     if bjd is not None:
         lines.append(f"BJD = {bjd:.6f}"
                      + (f"   phase = {phase:.4f}" if phase is not None else ""))
@@ -2292,6 +2384,8 @@ def cmd_ccf(args):
         if vbary:
             lines.append(f"v_bary = {vbary:+.4f} km/s "
                          "(for information only, not applied)")
+    if data_snr < 7.0:
+        lines.append(LOW_DATA_SNR_NOTE.format(snr=data_snr))
     low_snr = result.get("peak_snr", np.inf) < 4.0
     if low_snr:
         lines.append(LOW_SNR_WARNING.format(snr=result["peak_snr"]))
@@ -2302,8 +2396,13 @@ def cmd_ccf(args):
     outfile = args.output or "result_CCF.txt"
     flines = [f"# Normalized spectrum : {args.spectrum}\n",
               f"# Synthetic template  : {tpl_name}\n",
+              f"# CCF method : {method_note}\n",
+              f"# RV search  : {result['search']}\n",
+              f"# continuum S/N ~ {snr_note} per pixel\n",
               "# barycentric correction applied: "
               + ("yes" if apply_bary else "no") + "\n"]
+    if data_snr < 7.0:
+        flines.append("# " + LOW_DATA_SNR_NOTE.format(snr=data_snr) + "\n")
     if apply_bary:
         flines.append("# method  BJD  phase  RV_raw[km/s]  RV_raw_err[km/s]  "
                       "RV_bary[km/s]  RV_bary_err[km/s]  bary_corr[km/s]\n")
@@ -2452,9 +2551,12 @@ def cmd_bf(args):
                           "ephemeris (phase) to fix the identities.")
 
     tpl_name = args.template or f"PHOENIX T={args.teff}K"
+    data_snr = estimate_snr(spec_flux)
+    snr_note = ("inf" if not np.isfinite(data_snr) else f"{data_snr:.0f}")
     lines = ["================ BF RESULT =================",
              f"Normalized spectrum : {args.spectrum}",
-             f"Synthetic template  : {tpl_name}"]
+             f"Synthetic template  : {tpl_name}",
+             f"Continuum S/N       : ~{snr_note} per pixel"]
     if bjd is not None:
         lines.append(f"BJD = {bjd:.6f}"
                      + (f"   phase = {phase:.4f}" if phase is not None else ""))
@@ -2487,6 +2589,8 @@ def cmd_bf(args):
                      "rerun with --guess RV1 RV2 ... --guess-amp A1 A2 ... "
                      "(optionally --guess-sigma S1 S2 ...) to start the "
                      "fit from your visual estimates.")
+    if data_snr < 7.0:
+        lines.append(LOW_DATA_SNR_NOTE.format(snr=data_snr))
     bf_snr = profile_peak_snr(bf_result["velocity"], bf_result["bf_smooth"],
                               comps)
     if bf_snr < 4.0:
@@ -2503,7 +2607,10 @@ def cmd_bf(args):
 
     outfile = args.output or "result_BF.txt"
     flines = [f"# Normalized spectrum : {args.spectrum}\n",
-              f"# Synthetic template  : {tpl_name}\n"]
+              f"# Synthetic template  : {tpl_name}\n",
+              f"# continuum S/N ~ {snr_note} per pixel\n"]
+    if data_snr < 7.0:
+        flines.append("# " + LOW_DATA_SNR_NOTE.format(snr=data_snr) + "\n")
     if bjd is not None:
         flines.append(f"# BJD = {bjd:.6f}"
                       + (f"   phase = {phase:.5f}" if phase is not None
@@ -2932,12 +3039,35 @@ def cmd_batch(args):
     if not rows:
         sys.exit("No spectrum could be processed.")
 
+    # Epoch-to-epoch variability flag (Katz et al. 2025, A&A 704, A294:
+    # stars varying by more than 3 km/s between observations are flagged
+    # as binary/variable candidates).
+    variability_notes = []
+    for j in range(ncomp):
+        vals = np.array([r["rv"][j] for r in rows
+                         if j < len(r["rv"]) and np.isfinite(r["rv"][j])])
+        errs = np.array([r["rv_err"][j] for r in rows
+                         if j < len(r["rv_err"])
+                         and np.isfinite(r["rv_err"][j])])
+        if vals.size < 2:
+            continue
+        ptp = float(vals.max() - vals.min())
+        med_err = float(np.median(errs)) if errs.size else 0.0
+        if ptp > max(3.0, 3.0 * med_err):
+            variability_notes.append(
+                f"C{j + 1}: peak-to-peak RV variation = {ptp:.2f} km/s "
+                f"over {vals.size} epochs (median error {med_err:.2f} "
+                "km/s) - above the 3 km/s level Katz et al. (2025) flag "
+                "as binarity/variability.")
+
     outfile = args.output or "result_RV_curve.txt"
     with open(outfile, "w") as f:
         f.write(f"# RV curve, method = {args.method.upper()}, "
                 f"template = {args.template or f'PHOENIX T={args.teff}K'}\n")
         f.write("# barycentric correction applied: "
                 + ("yes" if apply_bary else "no") + "\n")
+        for note in variability_notes:
+            f.write("# " + note + "\n")
         if apply_bary:
             cols = "  ".join(f"RV{j + 1}_raw[km/s]  RV{j + 1}_raw_err  "
                              f"RV{j + 1}_bary[km/s]  RV{j + 1}_bary_err"
@@ -2964,6 +3094,8 @@ def cmd_batch(args):
             f.write(f"{r['file']}  {r['bjd']:.6f}  {ph}  {vals}  "
                     f"{r['vbary']:.5f}\n")
     print(f"\nRV curve written: {outfile}")
+    for note in variability_notes:
+        print(note)
 
     plotfile = args.plot or "result_RV_curve.png"
     fig = make_rv_curve_figure(rows, ncomp, t0=args.t0, period=args.period)
@@ -3135,7 +3267,7 @@ def make_args(**overrides):
                 no_bary=False,
                 t0=None, period=None, varastro=False, t0_to_bjd=False,
                 plot=None, output=None,
-                rv_min=-200.0, rv_max=200.0, rv_step=0.5,
+                rv_min=None, rv_max=None, rv_step=0.5,
                 ccf_mode="mask", mask_depth=0.05, keep_balmer=False,
                 vel_range=500.0, dv=None, svd_rcond=None, smooth=None,
                 components=1, min_sep=30.0, guess=None, guess_amp=None,
@@ -3331,9 +3463,12 @@ def run_terminal_wizard():
                  validate=lambda s: s in ("1", "2"))
 
     if choice == "1":
-        kw["rv_min"] = ask("RV scan lower limit [km/s]", default=-200.0, cast=float)
-        kw["rv_max"] = ask("RV scan upper limit [km/s]", default=200.0, cast=float)
-        kw["rv_step"] = ask("RV step [km/s]", default=0.5, cast=float)
+        kw["rv_min"] = ask("RV scan lower limit [km/s] (empty: automatic "
+                           "two-stage +-900 km/s search)",
+                           allow_empty=True, cast=float)
+        kw["rv_max"] = ask("RV scan upper limit [km/s] (empty: automatic)",
+                           allow_empty=True, cast=float)
+        kw["rv_step"] = ask("Fine RV step [km/s]", default=0.5, cast=float)
         print()
         cmd_ccf(make_args(**kw))
     else:
@@ -3623,8 +3758,8 @@ def run_gui():
     # to the button reflects the current choice.
     method_var = tk.StringVar(value="BF")
     bf_mode_var = tk.StringVar(value="auto")  # "assume" | "auto"
-    rvmin_var = tk.StringVar(value="-200")
-    rvmax_var = tk.StringVar(value="200")
+    rvmin_var = tk.StringVar()
+    rvmax_var = tk.StringVar()
     rvstep_var = tk.StringVar(value="0.5")
     ccf_mode_var = tk.StringVar(value="Line mask")
     exclude_h_var = tk.BooleanVar(value=True)
@@ -3848,7 +3983,8 @@ def run_gui():
                                               sticky="w")
             ttk.Entry(ccf_sec, textvariable=var, width=8
                       ).grid(row=0, column=2 * j + 1, padx=(2, 10))
-        ttk.Label(ccf_sec, text="[km/s]").grid(row=0, column=6)
+        ttk.Label(ccf_sec, text="[km/s]  (empty: auto wide search)",
+                  foreground="gray").grid(row=0, column=6, sticky="w")
         ttk.Label(ccf_sec, text="Mode:").grid(row=1, column=0, sticky="w",
                                               pady=(6, 0))
         ttk.Combobox(ccf_sec, textvariable=ccf_mode_var, width=14,
@@ -4002,8 +4138,8 @@ def run_gui():
                       resolution=_f(res_var), vsini=_f(vsini_var),
                       no_save=True)
             if method_var.get() == "CCF":
-                kw.update(rv_min=_f(rvmin_var, -200.0),
-                          rv_max=_f(rvmax_var, 200.0),
+                kw.update(rv_min=_f(rvmin_var),
+                          rv_max=_f(rvmax_var),
                           rv_step=_f(rvstep_var, 0.5),
                           ccf_mode=("mask"
                                     if ccf_mode_var.get() == "Line mask"
@@ -4157,11 +4293,16 @@ def main():
                                        "mask; Baranne 1996 / Pepe 2002 / "
                                        "Pino et al. 2018)")
     add_common_args(p_ccf)
-    p_ccf.add_argument("--rv-min", type=float, default=-200.0,
-                       help="RV scan lower limit [km/s]")
-    p_ccf.add_argument("--rv-max", type=float, default=200.0,
-                       help="RV scan upper limit [km/s]")
-    p_ccf.add_argument("--rv-step", type=float, default=0.5, help="RV step [km/s]")
+    p_ccf.add_argument("--rv-min", type=float, default=None,
+                       help="RV scan lower limit [km/s] (default: "
+                            "automatic two-stage search — coarse "
+                            "+-900 km/s at 10 km/s, then refined around "
+                            "the peak; Katz et al. 2025 SOPHIE practice)")
+    p_ccf.add_argument("--rv-max", type=float, default=None,
+                       help="RV scan upper limit [km/s] (default: "
+                            "automatic two-stage search)")
+    p_ccf.add_argument("--rv-step", type=float, default=0.5,
+                       help="Fine RV step [km/s]")
     p_ccf.add_argument("--ccf-mode", choices=["mask", "template"],
                        default="mask",
                        help="'mask' (default): weighted line-mask CCF — "
@@ -4327,12 +4468,15 @@ def main():
                          help="Also degrade the template to R before the "
                               "BF (synthetic templates only; in BF mode R "
                               "normally only sets the BF smoothing)")
-    p_batch.add_argument("--rv-min", type=float, default=-200.0,
-                         help="CCF scan lower limit [km/s]")
-    p_batch.add_argument("--rv-max", type=float, default=200.0,
-                         help="CCF scan upper limit [km/s]")
+    p_batch.add_argument("--rv-min", type=float, default=None,
+                         help="CCF scan lower limit [km/s] (default: "
+                              "automatic two-stage search, see ccf "
+                              "--rv-min)")
+    p_batch.add_argument("--rv-max", type=float, default=None,
+                         help="CCF scan upper limit [km/s] (default: "
+                              "automatic two-stage search)")
     p_batch.add_argument("--rv-step", type=float, default=0.5,
-                         help="CCF step [km/s]")
+                         help="Fine CCF step [km/s]")
     p_batch.add_argument("--ccf-mode", choices=["mask", "template"],
                          default="mask",
                          help="CCF construction (see ccf --ccf-mode)")

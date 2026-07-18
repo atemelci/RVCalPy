@@ -16,7 +16,11 @@ with a template spectrum. Two independent methods are available:
   by the Balmer wings and biased by emission-filled H cores. The peak is
   measured with a Gaussian on a linear baseline over a ±2 FWHM window
   (the contrast fit of Pino et al. 2018). The previous full-spectrum
-  cross-covariance is kept as `--ccf-mode template`.
+  cross-covariance is kept as `--ccf-mode template`. Unless `--rv-min/
+  --rv-max` are given, the RV search is **two-stage** (Katz et al. 2025,
+  A&A 704, A294, SOPHIE practice): a coarse ±900 km/s scan in 10 km/s
+  steps locates the peak — genuinely fast-moving stars are never outside
+  the window — and the fine `--rv-step` grid is then laid around it.
 - **BF (Broadening Function, Rucinski 1992/2002)** — the observed spectrum is
   modelled as the convolution of the template with a velocity-space profile,
   solved linearly via Singular Value Decomposition. Because the method is
@@ -240,8 +244,8 @@ axis — and RV).
 
 | File | Content |
 |---|---|
-| `result_CCF.txt` / `result_BF.txt` | RVs with errors, uncorrected and barycentric-corrected, amplitudes, areas, widths, light ratios |
+| `result_CCF.txt` / `result_BF.txt` | RVs with errors, uncorrected and barycentric-corrected, amplitudes, areas, widths, light ratios, the continuum S/N of the spectrum; low-S/N and low-significance results carry explicit warnings (low S/N is the dominant source of spurious RVs — Katz et al. 2025) |
 | `result_CCF.png` / `result_BF.png` | Fit figure (BF: one dashed profile per component with `amp` and RV in the legend) |
 | `result_CCF_linecheck.png` / `result_BF_linecheck.png` | Model reliability check at strong diagnostic lines |
-| `result_RV_curve.txt` / `.png` | `batch` mode: BJD, phase and per-component RVs for the whole series |
+| `result_RV_curve.txt` / `.png` | `batch` mode: BJD, phase and per-component RVs for the whole series; components varying by more than 3 km/s peak-to-peak between epochs are flagged as binarity/variability candidates (Katz et al. 2025) |
 | `result_BF_profiles.png` | `batch` mode: all BF profiles stacked by orbital phase |
