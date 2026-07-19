@@ -2332,10 +2332,11 @@ def identify_components(comps, phase, gamma=None):
 
 
 def make_ccf_figure(result, vbary=0.0, bary_applied=False):
-    """CCF figure. As in make_bf_figure, the velocity axis stays in the
-    measured frame; when the barycentric correction is applied, the RV
-    quoted in the legend is the corrected value (marked, with v_bary in
-    the title)."""
+    """CCF figure in the measured velocity frame. The legend quotes the
+    RV of the Gaussian fit exactly as measured, with v_bary on the line
+    right below it when the barycentric correction is applied to the
+    results (the fit itself is never altered on the figure); the result
+    text file carries raw RV, corrected RV and v_bary in full."""
     from matplotlib.figure import Figure
     fig = Figure(figsize=(9, 6))
     ax0, ax1 = fig.subplots(2, 1, sharex=True)
@@ -2345,8 +2346,6 @@ def make_ccf_figure(result, vbary=0.0, bary_applied=False):
     ax0.set_ylabel("CCF (per order)")
 
     show_bary = bool(vbary) and bary_applied
-    rv_shown = (apply_barycentric(result["rv"], vbary) if show_bary
-                else result["rv"])
     mask_mode = result.get("mode") == "mask"
     total_label = ("Total CCF (mean line depth)" if mask_mode
                    else "Total CCF (normalized)")
@@ -2357,14 +2356,12 @@ def make_ccf_figure(result, vbary=0.0, bary_applied=False):
     ax1.plot(result["rv_grid"],
              eval_bf_model(result["rv_grid"], result["popt"]),
              "r-", lw=2, alpha=0.7,
-             label=(f"{fit_name}: RV = {rv_shown:.3f} "
-                    f"± {result['rv_err']:.3f} km/s"
-                    + (" (bary corrected)" if show_bary else "")))
+             label=(f"{fit_name}: RV = {result['rv']:.3f} "
+                    f"± {result['rv_err']:.3f} km/s"))
     if show_bary:
-        ax0.set_title(f"v_bary = {vbary:+.3f} km/s (applied)", fontsize=10)
+        ax1.plot([], [], " ", label=f"v_bary = {vbary:+.3f} km/s")
     ax1.axvline(result["rv"], color="r", ls=":", lw=1)
-    ax1.set_xlabel("RV [km/s]"
-                   + ("  (axis: uncorrected frame)" if show_bary else ""))
+    ax1.set_xlabel("RV [km/s]")
     ax1.set_ylabel("CCF")
     ax1.legend()
     fig.tight_layout()
@@ -2392,14 +2389,12 @@ def make_bf_preview_figure(bf_result):
 
 def make_bf_figure(bf_result, comps, popt, bjd=None, phase=None,
                    vbary=0.0, bary_applied=True):
-    """BF figure. The velocity axis is always the measured (uncorrected)
-    frame — that is where the profiles physically sit. When the
-    barycentric correction is applied to the results, the RV values
-    shown in the legend and the annotations are the corrected ones
-    (marked 'bary corrected'; the v_bary value is in the title). When it
-    is not applied, the raw RVs are shown and no v_bary information
-    appears on the figure. The result text file always carries the raw
-    RV, the corrected RV and v_bary regardless."""
+    """BF figure in the measured velocity frame. The legend and the
+    annotations quote the RVs of the Gaussian fit exactly as measured;
+    when the barycentric correction is applied to the results, v_bary is
+    listed as an extra legend line right below the fitted RVs (the fit
+    and its numbers are never altered on the figure). The result text
+    file carries the raw RV, the corrected RV and v_bary in full."""
     from matplotlib.figure import Figure
     v = bf_result["velocity"]
     fig = Figure(figsize=(9, 5))
@@ -2410,11 +2405,6 @@ def make_bf_figure(bf_result, comps, popt, bjd=None, phase=None,
             label="BF (smoothed)")
     model = eval_bf_model(v, popt)
     ax.plot(v, model, "k-", lw=1.2, label="Total fit")
-
-    show_bary = bool(vbary) and bary_applied
-
-    def shown_rv(c):
-        return apply_barycentric(c["rv"], vbary) if show_bary else c["rv"]
 
     offset = model_offset(popt["popt"])
     epsilon = popt.get("epsilon", 0.6)
@@ -2429,8 +2419,11 @@ def make_bf_figure(bf_result, comps, popt, bjd=None, phase=None,
             curve = gauss_no(v, c["amp"], c["rv"], c["sigma"]) + offset
         ax.plot(v, curve, "--", color=colors[(i - 1) % len(colors)], lw=1.8,
                 label=(f"C{i}: amp = {c['amp']:.4f}, "
-                       f"RV = {shown_rv(c):.2f} km/s"
-                       + (" (bary corrected)" if show_bary else "")))
+                       f"RV = {c['rv']:.2f} km/s"))
+
+    show_bary = bool(vbary) and bary_applied
+    if show_bary:
+        ax.plot([], [], " ", label=f"v_bary = {vbary:+.3f} km/s")
 
     ymin = float(min(np.min(bf_result["bf_smooth"]), np.min(model)))
     ymax = float(max(np.max(bf_result["bf_smooth"]), np.max(model)))
@@ -2441,17 +2434,14 @@ def make_bf_figure(bf_result, comps, popt, bjd=None, phase=None,
         title.append(f"BJD {bjd:.6f}")
     if phase is not None:
         title.append(f"phase {phase:.4f}")
-    if show_bary:
-        title.append(f"v_bary = {vbary:+.3f} km/s (applied)")
     if title:
         ax.set_title("  |  ".join(title), fontsize=10)
     for i, c in enumerate(comps, 1):
         ax.axvline(c["rv"], color="r", ls=":", lw=1)
-        ax.annotate(f"C{i}: {shown_rv(c):.2f} km/s",
+        ax.annotate(f"C{i}: {c['rv']:.2f} km/s",
                     (c["rv"], c["amp"] + offset),
                     textcoords="offset points", xytext=(6, 6), color="r")
-    ax.set_xlabel("Radial velocity [km/s]"
-                  + ("  (axis: uncorrected frame)" if show_bary else ""))
+    ax.set_xlabel("Radial velocity [km/s]")
     ax.set_ylabel("Broadening Function")
     ax.legend(fontsize=9)
     fig.tight_layout()

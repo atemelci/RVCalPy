@@ -130,10 +130,10 @@ Other GUI features:
 - **RA / Dec** accept decimal degrees or sexagesimal (`12:50:39.7`,
   `-03:07:49.8`, or the MIDAS comma style `12,50,39.7`).
 - The barycentric correction is **opt-in**: v_bary is always computed and
-  reported, but only added to the RVs when the checkbox is ticked. With the
-  checkbox on, the figure quotes the **barycentric-corrected RV** (marked
-  "bary corrected", v_bary in the title; the velocity axis itself stays in
-  the measured frame, where the profiles sit); the result text file always
+  reported, but only added to the RVs when the checkbox is ticked. The
+  figure always quotes the RV of the Gaussian fit exactly as measured —
+  the fit is never altered — and, with the checkbox on, lists **v_bary on
+  the legend line right below the fitted RVs**; the result text file
   contains the raw RV, the corrected RV and v_bary side by side.
 
 ### Command line
