@@ -119,17 +119,22 @@ Other GUI features:
 - **VarAstro / HJD → BJD** — fetch the eclipsing-binary ephemeris (T0, P)
   from var.astro.cz and convert T0 to BJD_TDB for the orbital phase.
 - **Observatory** — a dropdown of built-in sites (ESO VLT/La Silla/NTT/ALMA/
-  ELT, OHP, CTIO, Las Campanas, SOAR, Gemini, CFHT, Keck, LBT, TBL, TNG, TUG,
-  Kreiken, …) that auto-fills the **lon/lat/alt** fields; the coordinates
-  stay editable, so an observatory not in the list can be entered by hand
-  (pick *Custom* and type lon [°E], lat [°], alt [m]). These coordinates
-  drive the barycentric correction — including the diurnal (Earth-rotation)
-  term — the way the MIDAS `comp/bary` command takes the observatory
-  longitude and latitude explicitly.
+  ELT, OHP (Saint-Michel), CTIO, Las Campanas, SOAR, Gemini, CFHT, Keck,
+  LBT, TBL, TNG, TUG, Kreiken, …). The site coordinates stay stored behind
+  the selection (not shown on the widget); an observatory not in the list is
+  entered through the **Custom...** button, which opens a small window for
+  lon [°E], lat [°] and alt [m]. These coordinates drive the barycentric
+  correction — including the diurnal (Earth-rotation) term — the way the
+  MIDAS `comp/bary` command takes the observatory longitude and latitude
+  explicitly.
 - **RA / Dec** accept decimal degrees or sexagesimal (`12:50:39.7`,
   `-03:07:49.8`, or the MIDAS comma style `12,50,39.7`).
 - The barycentric correction is **opt-in**: v_bary is always computed and
-  reported, but only added to the RVs when the checkbox is ticked.
+  reported, but only added to the RVs when the checkbox is ticked. With the
+  checkbox on, the figure quotes the **barycentric-corrected RV** (marked
+  "bary corrected", v_bary in the title; the velocity axis itself stays in
+  the measured frame, where the profiles sit); the result text file always
+  contains the raw RV, the corrected RV and v_bary side by side.
 
 ### Command line
 
@@ -284,6 +289,6 @@ axis — and RV).
 |---|---|
 | `result_CCF.txt` / `result_BF.txt` | RVs with errors, uncorrected and barycentric-corrected, amplitudes, areas, widths, light ratios, the continuum S/N of the spectrum; low-S/N and low-significance results carry explicit warnings (low S/N is the dominant source of spurious RVs — Katz et al. 2025) |
 | `result_CCF.png` / `result_BF.png` | Fit figure (BF: one dashed profile per component with `amp` and RV in the legend) |
-| `result_CCF_linecheck.png` / `result_BF_linecheck.png` | Model reliability check at strong diagnostic lines (Fe I 5269.54, Ti II 4501.27, Cr II 4558.65, Sc II 4246.82 — the ionized species stay strong in warm/hot stars where Fe I weakens) |
+| `result_CCF_linecheck.png` / `result_BF_linecheck.png` | Model reliability check at two strong diagnostic lines per 50-nm band over 400–700 nm (Ca I 4226/Fe I 4383, Ba II 4554/Fe II 4583, Fe I 5269/5328, Fe I 5572/Ca I 5588, Ca I 6122/Fe I 6302, Fe I 6663/Ca I 6717); only the lines inside the analyzed range are used |
 | `result_RV_curve.txt` / `.png` | `batch` mode: BJD, phase and per-component RVs for the whole series; components varying by more than 3 km/s peak-to-peak between epochs are flagged as binarity/variability candidates (Katz et al. 2025) |
 | `result_BF_profiles.png` | `batch` mode: all BF profiles stacked by orbital phase |

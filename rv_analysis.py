@@ -1595,8 +1595,8 @@ OBSERVATORIES = [
     ("ESO ELT (Cerro Armazones)", -70.1922, -24.5892, 3046.0,
      ("elt", "cerroarmazones", "armazones"),
      "Extremely Large Telescope (under construction)"),
-    ("OHP", 5.7133, 43.9308, 650.0,
-     ("ohp", "hauteprovence"),
+    ("OHP (Saint-Michel)", 5.7133, 43.9308, 650.0,
+     ("ohp", "hauteprovence", "saintmichel"),
      "Observatoire de Haute-Provence — SOPHIE"),
     ("TUG (Bakirlitepe)", 30.3353, 36.8250, 2500.0,
      ("tug", "tubitak", "rtt150", "bakirlitepe"),
@@ -2331,7 +2331,11 @@ def identify_components(comps, phase, gamma=None):
     return ordered, note
 
 
-def make_ccf_figure(result):
+def make_ccf_figure(result, vbary=0.0, bary_applied=False):
+    """CCF figure. As in make_bf_figure, the velocity axis stays in the
+    measured frame; when the barycentric correction is applied, the RV
+    quoted in the legend is the corrected value (marked, with v_bary in
+    the title)."""
     from matplotlib.figure import Figure
     fig = Figure(figsize=(9, 6))
     ax0, ax1 = fig.subplots(2, 1, sharex=True)
@@ -2340,6 +2344,9 @@ def make_ccf_figure(result):
         ax0.plot(result["rv_grid"], ccf, lw=0.6, alpha=0.5)
     ax0.set_ylabel("CCF (per order)")
 
+    show_bary = bool(vbary) and bary_applied
+    rv_shown = (apply_barycentric(result["rv"], vbary) if show_bary
+                else result["rv"])
     mask_mode = result.get("mode") == "mask"
     total_label = ("Total CCF (mean line depth)" if mask_mode
                    else "Total CCF (normalized)")
@@ -2350,10 +2357,14 @@ def make_ccf_figure(result):
     ax1.plot(result["rv_grid"],
              eval_bf_model(result["rv_grid"], result["popt"]),
              "r-", lw=2, alpha=0.7,
-             label=f"{fit_name}: RV = {result['rv']:.3f} "
-                   f"± {result['rv_err']:.3f} km/s")
+             label=(f"{fit_name}: RV = {rv_shown:.3f} "
+                    f"± {result['rv_err']:.3f} km/s"
+                    + (" (bary corrected)" if show_bary else "")))
+    if show_bary:
+        ax0.set_title(f"v_bary = {vbary:+.3f} km/s (applied)", fontsize=10)
     ax1.axvline(result["rv"], color="r", ls=":", lw=1)
-    ax1.set_xlabel("RV [km/s]")
+    ax1.set_xlabel("RV [km/s]"
+                   + ("  (axis: uncorrected frame)" if show_bary else ""))
     ax1.set_ylabel("CCF")
     ax1.legend()
     fig.tight_layout()
@@ -2381,12 +2392,14 @@ def make_bf_preview_figure(bf_result):
 
 def make_bf_figure(bf_result, comps, popt, bjd=None, phase=None,
                    vbary=0.0, bary_applied=True):
-    """BF figure in the measured (uncorrected) velocity frame: the axis
-    and the annotated RVs are the raw measurements. When the barycentric
-    correction is applied to the reported results, the corrected RV is
-    annotated alongside and the v_bary value is shown in the title; when
-    it is not applied, no v_bary information appears on the figure at
-    all."""
+    """BF figure. The velocity axis is always the measured (uncorrected)
+    frame — that is where the profiles physically sit. When the
+    barycentric correction is applied to the results, the RV values
+    shown in the legend and the annotations are the corrected ones
+    (marked 'bary corrected'; the v_bary value is in the title). When it
+    is not applied, the raw RVs are shown and no v_bary information
+    appears on the figure. The result text file always carries the raw
+    RV, the corrected RV and v_bary regardless."""
     from matplotlib.figure import Figure
     v = bf_result["velocity"]
     fig = Figure(figsize=(9, 5))
@@ -2397,6 +2410,11 @@ def make_bf_figure(bf_result, comps, popt, bjd=None, phase=None,
             label="BF (smoothed)")
     model = eval_bf_model(v, popt)
     ax.plot(v, model, "k-", lw=1.2, label="Total fit")
+
+    show_bary = bool(vbary) and bary_applied
+
+    def shown_rv(c):
+        return apply_barycentric(c["rv"], vbary) if show_bary else c["rv"]
 
     offset = model_offset(popt["popt"])
     epsilon = popt.get("epsilon", 0.6)
@@ -2411,31 +2429,29 @@ def make_bf_figure(bf_result, comps, popt, bjd=None, phase=None,
             curve = gauss_no(v, c["amp"], c["rv"], c["sigma"]) + offset
         ax.plot(v, curve, "--", color=colors[(i - 1) % len(colors)], lw=1.8,
                 label=(f"C{i}: amp = {c['amp']:.4f}, "
-                       f"RV = {c['rv']:.2f} km/s"))
+                       f"RV = {shown_rv(c):.2f} km/s"
+                       + (" (bary corrected)" if show_bary else "")))
 
     ymin = float(min(np.min(bf_result["bf_smooth"]), np.min(model)))
     ymax = float(max(np.max(bf_result["bf_smooth"]), np.max(model)))
     span = max(ymax - ymin, 1e-12)
     ax.set_ylim(ymin - 0.15 * span, ymax + 0.35 * span)
-    show_bary = bool(vbary) and bary_applied
     title = []
     if bjd is not None:
         title.append(f"BJD {bjd:.6f}")
     if phase is not None:
         title.append(f"phase {phase:.4f}")
     if show_bary:
-        title.append(f"v_bary = {vbary:+.3f} km/s (applied in results)")
+        title.append(f"v_bary = {vbary:+.3f} km/s (applied)")
     if title:
         ax.set_title("  |  ".join(title), fontsize=10)
     for i, c in enumerate(comps, 1):
-        label = f"C{i}: {c['rv']:.2f} km/s"
-        if show_bary:
-            label += f"  ({apply_barycentric(c['rv'], vbary):.2f} bary)"
         ax.axvline(c["rv"], color="r", ls=":", lw=1)
-        ax.annotate(label, (c["rv"], c["amp"] + offset),
+        ax.annotate(f"C{i}: {shown_rv(c):.2f} km/s",
+                    (c["rv"], c["amp"] + offset),
                     textcoords="offset points", xytext=(6, 6), color="r")
     ax.set_xlabel("Radial velocity [km/s]"
-                  + ("  (uncorrected)" if show_bary else ""))
+                  + ("  (axis: uncorrected frame)" if show_bary else ""))
     ax.set_ylabel("Broadening Function")
     ax.legend(fontsize=9)
     fig.tight_layout()
@@ -2447,15 +2463,30 @@ def save_figure(fig, outfile):
     print(f"Figure saved: {outfile}")
 
 
-# Diagnostic lines for the RV reliability check: one strong neutral-iron
-# line plus three ionized-metal lines (Ti II, Cr II, Sc II). The ionized
-# species stay strong in warm/hot (A/B) stars where Fe I weakens, so the
-# check remains meaningful across spectral types. Air wavelengths [A].
+# Diagnostic lines for the RV reliability check: two strong lines per
+# 50-nm band over 400-700 nm, so whatever wavelength window the analysis
+# used, the check has strong features to compare. Air wavelengths [A].
+# (The 4583.84 A line is Fe II, not Fe I: the strong feature at that
+# wavelength belongs to ionized iron, multiplet 38.)
 DIAGNOSTIC_LINES = [
+    # 400-450 nm
+    ("Ca I 4226.73", 4226.728),
+    ("Fe I 4383.55", 4383.545),
+    # 450-500 nm
+    ("Ba II 4554.03", 4554.029),
+    ("Fe II 4583.84", 4583.837),
+    # 500-550 nm
     ("Fe I 5269.54", 5269.541),
-    ("Ti II 4501.27", 4501.270),
-    ("Cr II 4558.65", 4558.650),
-    ("Sc II 4246.82", 4246.822),
+    ("Fe I 5328.04", 5328.039),
+    # 550-600 nm
+    ("Fe I 5572.84", 5572.842),
+    ("Ca I 5588.75", 5588.749),
+    # 600-650 nm
+    ("Ca I 6122.22", 6122.217),
+    ("Fe I 6302.49", 6302.494),
+    # 650-700 nm
+    ("Fe I 6663.44", 6663.441),
+    ("Ca I 6717.68", 6717.681),
 ]
 
 
@@ -2481,11 +2512,12 @@ def line_check(spec_wl, spec_flux, tpl_wl, tpl_flux, comps,
                window=6.0, method="BF"):
     """Reliability check of the RV solution against real diagnostic
     lines: the observed normalized spectrum is compared with the model
-    (template shifted by the measured RVs) in windows around a set of
-    strong lines — Fe I 5269.54 A plus the ionized-metal lines Ti II
-    4501.27, Cr II 4558.65 and Sc II 4246.82 A, which stay strong in
-    warm/hot stars where Fe I weakens. Each window is centered on the
-    Doppler-shifted
+    (template shifted by the measured RVs) in windows around two strong
+    lines per 50-nm band over 400-700 nm (DIAGNOSTIC_LINES: Ca I 4226 /
+    Fe I 4383, Ba II 4554 / Fe II 4583, Fe I 5269 / 5328, Fe I 5572 /
+    Ca I 5588, Ca I 6122 / Fe I 6302, Fe I 6663 / Ca I 6717) — only the
+    lines inside the analyzed wavelength range are used. Each window is
+    centered on the Doppler-shifted
     position of the line for the primary component, so the comparison
     tracks the line wherever the measured RV puts it. For every line the
     residual RMS, the Pearson correlation and the line-depth ratio
@@ -2658,7 +2690,7 @@ def cmd_ccf(args):
                       + "\n")
 
     plotfile = args.plot or "result_CCF.png"
-    fig = make_ccf_figure(result)
+    fig = make_ccf_figure(result, vbary=vbary, bary_applied=apply_bary)
 
     mwl = np.concatenate([w for w, _ in orders])
     mfx = np.concatenate([f for _, f in orders])
@@ -3813,8 +3845,7 @@ def run_gui():
     ra_var, dec_var = tk.StringVar(), tk.StringVar()
     time_var = tk.StringVar()
     site_var = tk.StringVar(value=OBSERVATORIES[0][0])
-    lon_var, lat_var, alt_var = (tk.StringVar(), tk.StringVar(),
-                                 tk.StringVar())
+    custom_site = {"coords": None}   # (lonE, lat, alt) entered by the user
 
     trow = ttk.LabelFrame(main, text="Target (optional, for barycentric "
                                      "correction)", padding=6)
@@ -3864,51 +3895,71 @@ def run_gui():
                                                           pady=(4, 0))
     ttk.Label(trow, text="Observatory:").grid(row=1, column=4, sticky="e",
                                               pady=(4, 0))
-    obs_choices = [o[0] for o in OBSERVATORIES] + ["Custom (enter below)"]
+    obs_choices = [o[0] for o in OBSERVATORIES]
 
     def on_observatory_selected(_e=None):
-        coords = observatory_coords(site_var.get())
-        if coords:
-            lon_var.set(f"{coords[0]:.4f}")
-            lat_var.set(f"{coords[1]:.4f}")
-            alt_var.set(f"{coords[2]:.0f}")
-        else:                                   # "Custom": let the user type
-            lon_var.set("")
-            lat_var.set("")
-            alt_var.set("")
+        custom_site["coords"] = None      # a built-in choice replaces custom
 
     obs_box = ttk.Combobox(trow, textvariable=site_var, values=obs_choices,
-                           width=22, state="readonly")
-    obs_box.grid(row=1, column=5, columnspan=2, sticky="w", pady=(4, 0))
+                           width=20, state="readonly")
+    obs_box.grid(row=1, column=5, sticky="w", pady=(4, 0))
     obs_box.bind("<<ComboboxSelected>>", on_observatory_selected)
+
+    def custom_site_dialog():
+        """Coordinates of an observatory not in the list, in a small
+        sub-window: lon [deg East], lat [deg], alt [m]. The values stay
+        stored behind the Observatory field."""
+        dlg = tk.Toplevel(root)
+        dlg.title("Custom observatory")
+        dlg.transient(root)
+        frm = ttk.Frame(dlg, padding=10)
+        frm.grid(row=0, column=0)
+        lo_v, la_v, al_v = tk.StringVar(), tk.StringVar(), tk.StringVar()
+        cur = custom_site["coords"] or observatory_coords(site_var.get())
+        if cur:
+            lo_v.set(f"{cur[0]:.4f}")
+            la_v.set(f"{cur[1]:.4f}")
+            al_v.set(f"{cur[2]:.0f}")
+        for r, (lbl, var) in enumerate([("Longitude [deg East]:", lo_v),
+                                        ("Latitude [deg]:", la_v),
+                                        ("Altitude [m]:", al_v)]):
+            ttk.Label(frm, text=lbl).grid(row=r, column=0, sticky="w",
+                                          pady=2)
+            ttk.Entry(frm, textvariable=var, width=12).grid(row=r, column=1,
+                                                            padx=4, pady=2)
+
+        def do_use():
+            try:
+                lon = float(lo_v.get())
+                lat = float(la_v.get())
+                alt = float(al_v.get() or 0.0)
+            except ValueError:
+                messagebox.showerror("Custom observatory",
+                                     "Enter numeric longitude/latitude "
+                                     "(and altitude).", parent=dlg)
+                return
+            custom_site["coords"] = (lon, lat, alt)
+            site_var.set(f"Custom ({lon:.4f}E, {lat:.4f}, {alt:.0f} m)")
+            dlg.destroy()
+
+        ttk.Button(frm, text="Use", command=do_use).grid(row=3, column=0,
+                                                         columnspan=2,
+                                                         pady=(8, 0))
+
+    ttk.Button(trow, text="Custom...", command=custom_site_dialog
+               ).grid(row=1, column=6, sticky="w", padx=(4, 0), pady=(4, 0))
     bary_var = tk.BooleanVar(value=False)
     ttk.Checkbutton(trow, text="Apply barycentric correction",
                     variable=bary_var).grid(row=1, column=7, sticky="w",
                                             padx=(8, 0), pady=(4, 0))
 
-    ttk.Label(trow, text="lon/lat/alt [°E, °, m]:").grid(
-        row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
-    ttk.Entry(trow, textvariable=lon_var, width=10).grid(row=3, column=2,
-                                                         sticky="w",
-                                                         pady=(4, 0))
-    ttk.Entry(trow, textvariable=lat_var, width=10).grid(row=3, column=3,
-                                                         sticky="w",
-                                                         pady=(4, 0))
-    ttk.Entry(trow, textvariable=alt_var, width=8).grid(row=3, column=4,
-                                                        sticky="w",
-                                                        pady=(4, 0))
-    ttk.Label(trow, text="(auto-filled from the observatory; editable for "
-                         "a custom site)", foreground="gray"
-              ).grid(row=3, column=5, columnspan=3, sticky="w", pady=(4, 0))
-    on_observatory_selected()
-
     def resolve_site():
-        """Observatory string for the analysis: explicit lon/lat/alt when
-        both lon and lat are filled (custom or edited site), else the
-        selected observatory name."""
-        lo, la = lon_var.get().strip(), lat_var.get().strip()
-        if lo and la:
-            return f"{lo},{la},{alt_var.get().strip() or 0}"
+        """Observatory string for the analysis: the stored custom
+        coordinates when a custom site was entered, else the selected
+        built-in observatory name."""
+        if custom_site["coords"] and site_var.get().startswith("Custom"):
+            lon, lat, alt = custom_site["coords"]
+            return f"{lon},{lat},{alt}"
         name = site_var.get().strip()
         return name if observatory_coords(name) else "paranal"
 
