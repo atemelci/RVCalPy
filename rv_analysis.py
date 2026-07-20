@@ -2333,10 +2333,11 @@ def identify_components(comps, phase, gamma=None):
 
 def make_ccf_figure(result, vbary=0.0, bary_applied=False):
     """CCF figure in the measured velocity frame. The legend quotes the
-    RV of the Gaussian fit exactly as measured, with v_bary on the line
-    right below it when the barycentric correction is applied to the
-    results (the fit itself is never altered on the figure); the result
-    text file carries raw RV, corrected RV and v_bary in full."""
+    RV of the Gaussian fit exactly as measured; when the barycentric
+    correction is applied to the results, v_bary and the corrected value
+    (RV + v_bary) follow on the lines right below it — the fit itself is
+    never altered. The result text file carries raw RV, corrected RV and
+    v_bary in full."""
     from matplotlib.figure import Figure
     fig = Figure(figsize=(9, 6))
     ax0, ax1 = fig.subplots(2, 1, sharex=True)
@@ -2360,6 +2361,10 @@ def make_ccf_figure(result, vbary=0.0, bary_applied=False):
                     f"± {result['rv_err']:.3f} km/s"))
     if show_bary:
         ax1.plot([], [], " ", label=f"v_bary = {vbary:+.3f} km/s")
+        ax1.plot([], [], " ",
+                 label=(f"RV + v_bary = "
+                        f"{apply_barycentric(result['rv'], vbary):.3f} "
+                        "km/s"))
     ax1.axvline(result["rv"], color="r", ls=":", lw=1)
     ax1.set_xlabel("RV [km/s]")
     ax1.set_ylabel("CCF")
@@ -2390,11 +2395,12 @@ def make_bf_preview_figure(bf_result):
 def make_bf_figure(bf_result, comps, popt, bjd=None, phase=None,
                    vbary=0.0, bary_applied=True):
     """BF figure in the measured velocity frame. The legend and the
-    annotations quote the RVs of the Gaussian fit exactly as measured;
-    when the barycentric correction is applied to the results, v_bary is
-    listed as an extra legend line right below the fitted RVs (the fit
-    and its numbers are never altered on the figure). The result text
-    file carries the raw RV, the corrected RV and v_bary in full."""
+    annotations quote the RVs of the fit exactly as measured; when the
+    barycentric correction is applied to the results, v_bary and the
+    corrected values (C_i + v_bary) are listed as extra legend lines
+    right below the fitted RVs — the fit and its numbers are never
+    altered. The result text file carries the raw RV, the corrected RV
+    and v_bary in full."""
     from matplotlib.figure import Figure
     v = bf_result["velocity"]
     fig = Figure(figsize=(9, 5))
@@ -2424,6 +2430,10 @@ def make_bf_figure(bf_result, comps, popt, bjd=None, phase=None,
     show_bary = bool(vbary) and bary_applied
     if show_bary:
         ax.plot([], [], " ", label=f"v_bary = {vbary:+.3f} km/s")
+        for i, c in enumerate(comps, 1):
+            ax.plot([], [], " ",
+                    label=(f"C{i} + v_bary = "
+                           f"{apply_barycentric(c['rv'], vbary):.2f} km/s"))
 
     ymin = float(min(np.min(bf_result["bf_smooth"]), np.min(model)))
     ymax = float(max(np.max(bf_result["bf_smooth"]), np.max(model)))
@@ -4110,6 +4120,7 @@ def run_gui():
     vrange_var = tk.StringVar(value="500")
     comp_var = tk.IntVar(value=2)
     gamma_var = tk.StringVar()
+    bf_profile_var = tk.StringVar(value="Gaussian")
     guess_var = tk.StringVar()
     guess_amp_var = tk.StringVar()
     guess_sigma_var = tk.StringVar()
@@ -4356,6 +4367,11 @@ def run_gui():
         ttk.Label(top, text="Systemic gamma [km/s]:").pack(side="left",
                                                            padx=(10, 2))
         ttk.Entry(top, textvariable=gamma_var, width=7).pack(side="left")
+        ttk.Label(top, text="Fit profile:").pack(side="left", padx=(10, 2))
+        ttk.Combobox(top, textvariable=bf_profile_var, width=15,
+                     state="readonly",
+                     values=["Gaussian", "Rotational (Gray)"]
+                     ).pack(side="left")
 
         assume_widgets = []
 
@@ -4510,7 +4526,9 @@ def run_gui():
                           components=int(comp_var.get()),
                           guess=guess, guess_amp=guess_amp,
                           guess_sigma=guess_sigma,
-                          gamma=_f(gamma_var))
+                          gamma=_f(gamma_var),
+                          profile=("rot" if bf_profile_var.get().startswith(
+                              "Rot") else "gauss"))
                 payload = cmd_bf(make_args(**kw))
         except Exception as exc:
             messagebox.showerror("Error", str(exc))
@@ -4725,6 +4743,16 @@ def main():
                            "residual structure must survive to seed a "
                            "new component (noise narrower than this is "
                            "ignored)")
+    p_bf.add_argument("--profile", choices=["gauss", "rot"],
+                      default="gauss",
+                      help="Component profile fitted to the BF: 'gauss' "
+                           "(default) or 'rot' — Gray (1992) rotational "
+                           "profiles convolved with the instrumental "
+                           "Gaussian (give --resolution), the DDO-series "
+                           "practice for contact binaries; the width is "
+                           "then vsini and blended nearly-touching "
+                           "profiles are fit without the Gaussian's "
+                           "blending bias")
     p_bf.add_argument("--guess", type=float, nargs="+",
                       help="Initial RV guesses [km/s], one per component "
                            "(BF-rvplotter gausspars practice); also fixes "
@@ -4833,6 +4861,9 @@ def main():
     p_batch.add_argument("--min-sep", type=float, default=30.0,
                          help="Component-search scale [km/s] (see bf "
                               "--min-sep)")
+    p_batch.add_argument("--profile", choices=["gauss", "rot"],
+                         default="gauss",
+                         help="BF component profile (see bf --profile)")
     p_batch.add_argument("--guess", type=float, nargs="+",
                          help="Initial RV guesses [km/s], one per "
                               "component; also fixes the component labels")

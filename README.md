@@ -167,14 +167,24 @@ python rv_analysis.py batch --spectra 'data/*.fits' --normalize \
     --template template.prf --components 2 --object "KX Aqr" --varastro
 ```
 
-Try it with the bundled example data (true values: RV1 = −70 km/s,
-RV2 = +90 km/s):
+Try it with the bundled example data: the overcontact (W UMa-type) binary
+**V563 Lyrae** at quadrature, simulated in the 500–550 nm region from its
+published spectroscopic orbit (Alvarez et al. 2022, RMxAA 58, 223:
+Vγ = +22.5, K1 = 147.4, K2 = 247.2 km/s, q = 0.596). The synchronously
+rotating components (vsini = 191 and 155 km/s) produce the classic
+nearly-touching contact-binary BF; true values at this phase are
+RV1 = −124.9 km/s and RV2 = +269.7 km/s:
 
 ```bash
 python rv_analysis.py bf --spectrum examples/example_observed.obs \
     --template examples/example_synthetic.prf \
-    --vel-range 300 --components 2 --smooth 10 --svd-rcond 5e-4
+    --components 2 --resolution 15000 --profile rot
 ```
+
+The rotational-profile fit (`--profile rot`, the DDO-series practice)
+recovers −125.5/+270.1 km/s with vsini 189/154; a plain Gaussian fit on
+such blended, nearly-touching profiles carries a few km/s of blending
+bias (−128.0/+276.7).
 
 A self-test on synthetic data (no input files needed):
 
