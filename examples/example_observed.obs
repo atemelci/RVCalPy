@@ -8,7 +8,15 @@
 # light ratio L2/L1 = 0.59 (V band; the paper's third light is
 # ignored). Instrumental resolution R = 15000. The broadened
 # profiles nearly touch in the BF - the classic contact-binary case.
+# Coordinates from SIMBAD; DATE-OBS chosen for orbital phase 0.25 from
+# DAO with the VarAstro ephemeris - so the barycentric correction runs
+# end to end (tick 'Apply barycentric correction', Observatory = DAO).
 # columns: wavelength[A]  normalized_flux  flux_error
+# OBJECT = V563 Lyr
+# DATE-OBS = 2024-06-02T07:00:00
+# EXPTIME = 600
+# RA = 281.277612
+# DEC = 40.186516
  5000.0000   0.76461  0.00500
  5000.0500   0.74781  0.00500
  5000.1000   0.75178  0.00500

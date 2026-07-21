@@ -117,7 +117,11 @@ Other GUI features:
   time, any RV-related cards, mid-exposure BJD_TDB) and auto-fill the target
   fields.
 - **VarAstro / HJD → BJD** — fetch the eclipsing-binary ephemeris (T0, P)
-  from var.astro.cz and convert T0 to BJD_TDB for the orbital phase.
+  from var.astro.cz and convert T0 to BJD_TDB for the orbital phase. The
+  lookup handles VarAstro's GCVS spelling automatically (a name like
+  `V563 Lyr` is retried as the zero-padded `V0563 Lyr`) and, if the name
+  is still not found, retries the target's **SIMBAD cross-identifiers**,
+  matching the returned star by label so a fuzzy near-name is not accepted.
 - **Observatory** — a dropdown of built-in sites (ESO VLT/La Silla/NTT/ALMA/
   ELT, OHP (Saint-Michel), CTIO, Las Campanas, SOAR, Gemini, CFHT, Keck,
   LBT, TBL, TNG, TUG, Kreiken, …). The site coordinates stay stored behind
@@ -186,6 +190,12 @@ recovers −125.5/+270.1 km/s with vsini 189/154; a plain Gaussian fit on
 such blended, nearly-touching profiles carries a few km/s of blending
 bias (−128.0/+276.7).
 
+The example file's comment header carries real coordinates (SIMBAD) and a
+`DATE-OBS` chosen so the frame sits at orbital phase 0.25 as seen from the
+**DAO** (Victoria) with V563 Lyr's VarAstro ephemeris — so the full
+barycentric chain runs on it (`--site dao` gives v_bary ≈ +8.4 km/s; in
+the GUI, tick *Apply barycentric correction* with Observatory = DAO).
+
 A self-test on synthetic data (no input files needed):
 
 ```bash
@@ -224,14 +234,14 @@ Run `python rv_analysis.py <command> --help` for the full list of options
   resolving power R automatically. The built-in list covers the common
   optical/NIR échelle, mid- and low-resolution instruments (HARPS, ESPRESSO,
   UVES, FEROS, SOPHIE, CORALIE, PEPSI, NARVAL, ESPaDOnS, MIKE, PFS, GHOST,
-  STELES, CHIRON, CRIRES+, NIRPS, WINERED, FLAMES-GIRAFFE, X-shooter, MagE,
+  STELES, CHIRON, DAO, CRIRES+, NIRPS, WINERED, FLAMES-GIRAFFE, X-shooter, MagE,
   M2FS, IFUM, GMOS, SOXS, FIRE, FORS2, MUSE, LDSS3, EFOSC2, KMOS,
   Flamingos-2, TripleSpec, …) plus the **Gaia RVS** (R = 11 500). Print the
   full table with `python rv_analysis.py --list-spectrographs`, or set R
   directly with `--resolution`.
 - **Observatory** — `--site` accepts a built-in observatory name
   (`paranal`, `lasilla`, `ctio`, `ohp`, `tug`, `kreiken`, `lco`, `soar`,
-  `tng`, …), a `lonE,lat,alt` string in degrees/metres for a site not in the
+  `tng`, `dao`, …), a `lonE,lat,alt` string in degrees/metres for a site not in the
   list, or an astropy `of_site` name. The coordinates (longitude
   East-positive) drive the barycentric correction, including the diurnal
   term, matching the MIDAS `comp/bary` convention. List the built-in sites

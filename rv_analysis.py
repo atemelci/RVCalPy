@@ -676,17 +676,87 @@ def query_simbad(name):
     return info
 
 
+def name_variants(name):
+    """Plausible spellings of a variable-star designation to try against
+    a name-matched database. Mainly the GCVS zero-padding: 'V563 Lyr' is
+    also written 'V0563 Lyr' (VarAstro's form) — the number is padded to
+    four digits and, conversely, de-padded; a compact 'V563Lyr' also gets
+    a spaced form. The original name always comes first; duplicates are
+    dropped, order preserved."""
+    import re
+    name = str(name).strip()
+    out = [name]
+    m = re.match(r"^([Vv])\s*0*(\d{1,4})\s*[- ]?\s*(.+)$", name)
+    if m:
+        n, rest = int(m.group(2)), m.group(3).strip()
+        out.append(f"V{n:04d} {rest}")     # V0563 Lyr (GCVS zero-padded)
+        out.append(f"V{n} {rest}")         # V563 Lyr
+    seen, uniq = set(), []
+    for s in out:
+        k = s.lower()
+        if k not in seen:
+            seen.add(k)
+            uniq.append(s)
+    return uniq
+
+
+def simbad_identifiers(name):
+    """All SIMBAD identifiers (cross-names) of a target — 'V* V563 Lyr',
+    'GSC ...', 'TYC ...', 'HD ...', etc. — so a name-matched database that
+    does not recognize the entered name can be retried with its aliases.
+    Returns a list with the leading 'V* '/'NAME ' catalogue tags stripped,
+    most-useful (variable-star / bright-catalogue) names first; empty and
+    never raising on failure."""
+    import re
+    import urllib.parse
+    import urllib.request
+
+    script = ('output console=off script=off\n'
+              'format object "%IDLIST[%*\\n]"\n'
+              f'query id {name}\n')
+    url = ("https://simbad.u-strasbg.fr/simbad/sim-script?script="
+           + urllib.parse.quote(script))
+    ids = []
+    try:
+        with urllib.request.urlopen(url, timeout=30) as resp:
+            text = resp.read().decode(errors="ignore")
+        if "::error" not in text:
+            for line in text.splitlines():
+                s = line.strip()
+                if not s or s.startswith("::") or s.startswith("~"):
+                    continue
+                s = re.sub(r"^(V\*|SV\*|NAME|\*)\s+", "", s).strip()
+                if s and s not in ids and s.lower() != name.strip().lower():
+                    ids.append(s)
+    except Exception:
+        pass
+
+    def priority(idn):
+        u = idn.upper()
+        if re.match(r"^V\d", u):
+            return 0                       # GCVS variable designation
+        if u.startswith(("HD ", "HIP ", "BD", "TYC ", "GSC ")):
+            return 1                       # bright/astrometric catalogues
+        return 2
+
+    return sorted(ids, key=priority)
+
+
 def query_varastro(name):
     """Ephemeris (T0, P) of an eclipsing binary from the VarAstro database
     (https://var.astro.cz).
 
     The public pages are used: the site search resolves the star id and
     the star page carries the primary-minimum epoch (CustEpoch) and the
-    period (CustPeriod). The values are returned in VarAstro's native
-    units: T0 in HJD and the period in days. Truncated epochs are expanded
-    to full HJD (+2400000). Returns dict(t0, period, t0_unit, star, url);
-    raises ValueError when the star or its elements cannot be found — the
-    caller then falls back to manual entry.
+    period (CustPeriod). VarAstro matches by name, and it stores variable
+    stars in the GCVS zero-padded form ('V0563 Lyr', not 'V563 Lyr'), so
+    the search is retried over name_variants(name) and, if still not
+    found, over the target's SIMBAD identifiers (simbad_identifiers) —
+    the entered name need not be VarAstro's exact spelling. The values
+    are returned in VarAstro's native units: T0 in HJD, period in days;
+    truncated epochs are expanded to full HJD (+2400000). Returns
+    dict(t0, period, t0_unit, star, url); raises ValueError when nothing
+    resolves — the caller then falls back to manual entry.
     """
     import re
     import urllib.parse
@@ -700,15 +770,59 @@ def query_varastro(name):
         with urllib.request.urlopen(req, timeout=30) as resp:
             return resp.read().decode(errors="ignore")
 
-    try:
-        html = fetch(f"{base}/en/Home/Search?"
-                     f"term={urllib.parse.quote(name)}")
-    except Exception as exc:
-        raise ValueError(f"VarAstro search failed: {exc}") from exc
-    m = re.search(r'href="/en/Stars/(\d+)"', html)
-    if not m:
-        raise ValueError(f"VarAstro: no star found for '{name}'.")
-    star_url = f"{base}/en/Stars/{m.group(1)}"
+    def norm_star(s):
+        s = re.sub(r"\s+", " ", str(s).upper().strip())
+        return re.sub(r"^V0*(\d{1,4})\b",
+                      lambda m: f"V{int(m.group(1)):04d}", s)
+
+    def search_star(term):
+        """Star id from the VarAstro search results. Prefers the result
+        whose label matches the search term (after GCVS zero-padding),
+        so a fuzzy hit like 'V0593 Lyr' for 'V563 Lyr' is rejected rather
+        than accepted; for a non-variable-star term the first result is
+        used, since VarAstro resolved a specific catalogue id."""
+        html = fetch(f"{base}/en/Home/Search?term={urllib.parse.quote(term)}")
+        pairs = re.findall(r'/en/Stars/(\d+)"[^>]*>\s*([^<]{1,40})', html)
+        if not pairs:
+            return None
+        tn = norm_star(term)
+        for sid, label in pairs:
+            if norm_star(label) == tn:
+                return sid
+        if re.match(r"^V\d", tn):          # a V-designation must match exactly
+            return None
+        return pairs[0][0]
+
+    star_id, tried = None, []
+    for term in name_variants(name):
+        tried.append(term.lower())
+        try:
+            star_id = search_star(term)
+        except Exception as exc:
+            if not tried[:-1]:
+                raise ValueError(f"VarAstro search failed: {exc}") from exc
+            star_id = None
+        if star_id:
+            break
+    if star_id is None:                    # widen with SIMBAD cross-names
+        for ident in simbad_identifiers(name)[:12]:
+            for term in name_variants(ident):
+                if term.lower() in tried:
+                    continue
+                tried.append(term.lower())
+                try:
+                    star_id = search_star(term)
+                except Exception:
+                    star_id = None
+                if star_id:
+                    break
+            if star_id:
+                break
+    if star_id is None:
+        raise ValueError(f"VarAstro: no star found for '{name}' "
+                         f"(tried {len(tried)} name variant(s)/alias(es)).")
+
+    star_url = f"{base}/en/Stars/{star_id}"
     try:
         page = fetch(star_url)
     except Exception as exc:
@@ -1072,25 +1186,37 @@ def get_target_context(args):
             obstime = hdr["obstime"]
             print(f"{src}: DATE-OBS = {obstime}")
 
+    # The BJD and barycentric computations need astropy (and, for an
+    # astropy site name, its online registry). A failure there must not
+    # abort the RV measurement itself, which is pure numpy/scipy: warn
+    # and continue with no correction.
     bjd = None
     if obstime is not None:
-        _, is_jd = parse_time_input(obstime)
-        if is_jd:
-            bjd = float(str(obstime).strip())
-        elif ra is not None and dec is not None:
-            bjd = compute_bjd(obstime, ra, dec, args.site, exptime=exptime)
-        if bjd is not None:
-            print(f"BJD = {bjd:.6f}")
+        try:
+            _, is_jd = parse_time_input(obstime)
+            if is_jd:
+                bjd = float(str(obstime).strip())
+            elif ra is not None and dec is not None:
+                bjd = compute_bjd(obstime, ra, dec, args.site,
+                                  exptime=exptime)
+            if bjd is not None:
+                print(f"BJD = {bjd:.6f}")
+        except Exception as exc:
+            print(f"Warning: BJD computation skipped ({exc}).")
 
     vbary = 0.0
     if ra is not None and dec is not None and obstime is not None:
-        vbary = barycentric_correction(ra, dec, obstime, args.site)
-        if getattr(args, "no_bary", False):
-            print(f"Barycentric correction: {vbary:+.4f} km/s "
-                  "(computed, NOT applied to the reported RVs)")
-        else:
-            print(f"Barycentric correction: {vbary:+.4f} km/s "
-                  "(added to the RV)")
+        try:
+            vbary = barycentric_correction(ra, dec, obstime, args.site)
+            if getattr(args, "no_bary", False):
+                print(f"Barycentric correction: {vbary:+.4f} km/s "
+                      "(computed, NOT applied to the reported RVs)")
+            else:
+                print(f"Barycentric correction: {vbary:+.4f} km/s "
+                      "(added to the RV)")
+        except Exception as exc:
+            print(f"Warning: barycentric correction skipped ({exc}).")
+            vbary = 0.0
     elif getattr(args, "object", None) or args.ra is not None or obstime:
         print("Note: barycentric correction skipped "
               "(needs coordinates AND observation time).")
@@ -1540,6 +1666,8 @@ SPECTROGRAPHS = [
     ("GHOST",      56000, "Gemini South 8.1 m (standard; 76000 high-res)"),
     ("STELES",     50000, "SOAR 4.1 m, Cerro Pachon"),
     ("CHIRON",     80000, "CTIO/SMARTS 1.5 m (slicer; up to 136000)"),
+    ("DAO",        10000, "Dominion Astrophysical Obs. 1.8 m (Plaskett) / "
+                          "1.2 m, Victoria BC"),
     # --- near-IR high-resolution ---
     ("CRIRES+",   100000, "ESO VLT 8.2 m, Paranal (0.2\" slit)"),
     ("NIRPS",      90000, "ESO 3.6 m, La Silla (HA 100000, HE 80000)"),
@@ -1628,6 +1756,9 @@ OBSERVATORIES = [
     ("LBT (Mount Graham)", -109.8892, 32.7016, 3221.0,
      ("lbt", "mountgraham", "largebinocular"),
      "PEPSI"),
+    ("DAO (Victoria)", -123.4167, 48.5192, 229.0,
+     ("dao", "dominion", "victoria", "plaskett"),
+     "Dominion Astrophysical Observatory 1.8 m / 1.2 m"),
     ("TBL (Pic du Midi)", 0.1425, 42.9367, 2877.0,
      ("tbl", "picdumidi", "bernardlyot"),
      "NARVAL"),
