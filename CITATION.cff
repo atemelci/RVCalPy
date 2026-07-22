@@ -1,6 +1,6 @@
 cff-version: 1.2.0
 message: "If you use RVCalPy in your research, please cite it using the metadata from this file."
-title: "RVCalPy: Radial Velocity from Stellar Spectra (CCF and Broadening Function methods)"
+title: "RVCalPy: Radial Velocity Calculations"
 abstract: >-
   RVCalPy is a single-file Python tool that measures the radial velocity of a
   star by comparing an observed spectrum with a template. It implements a
@@ -13,8 +13,7 @@ type: software
 authors:
   - family-names: "Temelci"
     given-names: "Anıl"
-    # Add your ORCID once you have one (recommended for a durable citation):
-    # orcid: "https://orcid.org/0000-0000-0000-0000"
+    # orcid: "https://orcid.org/0009-0007-1416-9420"
 version: "1.0.0"
 date-released: "2026-07-22"
 license: GPL-3.0-only
