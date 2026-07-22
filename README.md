@@ -1,5 +1,8 @@
 # RVCalPy — Radial Velocity from Stellar Spectra
 
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![DOI](https://img.shields.io/badge/DOI-pending%20Zenodo%20release-lightgrey.svg)](#citing-rvcalpy)
+
 RVCalPy is a single-file Python tool, [`rv_analysis.py`](rv_analysis.py), that
 measures the radial velocity (RV) of a star by comparing an observed spectrum
 with a template spectrum. Two independent methods are available:
@@ -312,3 +315,37 @@ axis — and RV).
 | `result_CCF_linecheck.png` / `result_BF_linecheck.png` | Model reliability check at two strong diagnostic lines per 50-nm band over 400–700 nm (Ca I 4226/Fe I 4383, Ba II 4554/Fe II 4583, Fe I 5269/5328, Fe I 5572/Ca I 5588, Ca I 6122/Fe I 6302, Fe I 6663/Ca I 6717); only the lines inside the analyzed range are used |
 | `result_RV_curve.txt` / `.png` | `batch` mode: BJD, phase and per-component RVs for the whole series; components varying by more than 3 km/s peak-to-peak between epochs are flagged as binarity/variability candidates (Katz et al. 2025) |
 | `result_BF_profiles.png` | `batch` mode: all BF profiles stacked by orbital phase |
+
+## Citing RVCalPy
+
+If RVCalPy contributes to work you publish, please cite it. The repository
+ships a [`CITATION.cff`](CITATION.cff) file, so GitHub shows a **“Cite this
+repository”** button (APA/BibTeX) in the sidebar.
+
+### Getting a DOI on Zenodo
+
+A [Zenodo](https://zenodo.org) DOI makes each release permanently citable,
+the same way [saphires](https://doi.org/10.5281/zenodo.3497509) is archived.
+One-time setup, then automatic for every release:
+
+1. Sign in to <https://zenodo.org> with your GitHub account.
+2. Under **Zenodo → account → GitHub**, flip the switch **on** for the
+   `atemelci/RVCalPy` repository.
+3. On GitHub, publish a release (e.g. tag `v1.0.0`, **Releases → Draft a new
+   release**). Zenodo archives that tag and mints a DOI automatically.
+4. Copy the DOI Zenodo shows into the `doi:` field of `CITATION.cff`,
+   `.zenodo.json`, and the DOI badge at the top of this README, then commit.
+   Zenodo issues a **version DOI** for each release and one **concept DOI**
+   that always resolves to the latest — cite the concept DOI for “the
+   software”, the version DOI for exact reproducibility.
+
+Until then, cite the repository URL and the version from `CITATION.cff`.
+
+## License
+
+RVCalPy is released under the **GNU General Public License v3.0** — see
+[`LICENSE`](LICENSE). You may use, study, share and modify it freely; works
+that distribute RVCalPy or derivatives must remain under the GPL and keep the
+source available. RVCalPy is provided without warranty.
+
+© 2026 Anıl Temelci.

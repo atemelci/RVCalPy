@@ -1,0 +1,44 @@
+cff-version: 1.2.0
+message: "If you use RVCalPy in your research, please cite it using the metadata from this file."
+title: "RVCalPy: Radial Velocity from Stellar Spectra (CCF and Broadening Function methods)"
+abstract: >-
+  RVCalPy is a single-file Python tool that measures the radial velocity of a
+  star by comparing an observed spectrum with a template. It implements a
+  weighted line-mask cross-correlation function (Baranne et al. 1996; Pepe et
+  al. 2002; Pino et al. 2018) and the Rucinski (1992, 2002) Broadening
+  Function solved via SVD, with rotational-profile fitting for close binaries,
+  a two-stage RV search, barycentric correction from observatory coordinates,
+  and built-in spectrograph and observatory registries.
+type: software
+authors:
+  - family-names: "Temelci"
+    given-names: "Anıl"
+    # Add your ORCID once you have one (recommended for a durable citation):
+    # orcid: "https://orcid.org/0000-0000-0000-0000"
+version: "1.0.0"
+date-released: "2026-07-22"
+license: GPL-3.0-only
+repository-code: "https://github.com/atemelci/RVCalPy"
+url: "https://github.com/atemelci/RVCalPy"
+keywords:
+  - radial velocity
+  - spectroscopy
+  - broadening function
+  - cross-correlation function
+  - binary stars
+  - close binaries
+  - astronomy
+  - Python
+# After archiving a release on Zenodo, paste the DOI it mints here (and in the
+# README badge) so this file resolves to the versioned record. Use the
+# "concept" DOI to always point at the latest version:
+# doi: "10.5281/zenodo.XXXXXXX"
+references:
+  - type: software
+    title: "saphires"
+    authors:
+      - family-names: "Tofflemire"
+        given-names: "Benjamin M."
+    doi: "10.5281/zenodo.3497509"
+    year: 2019
+    notes: "Several BF/CCF practices in RVCalPy follow the saphires package."
