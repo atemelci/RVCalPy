@@ -16,7 +16,7 @@ authors:
     # orcid: "https://orcid.org/0009-0007-1416-9420"
 version: "1.0.0"
 date-released: "2026-07-22"
-license: GPL-3.0-only
+license: GPL-3.0
 repository-code: "https://github.com/atemelci/RVCalPy"
 url: "https://github.com/atemelci/RVCalPy"
 keywords:
