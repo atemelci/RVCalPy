@@ -300,8 +300,8 @@ axis — and RV).
 
 If RVCalPy contributes to work you publish, please cite it. The repository
 ships a [`CITATION.cff`](CITATION.cff) file, so GitHub shows a **“Cite this
-repository”** button (APA/BibTeX) in the sidebar.
-
+repository”** button (APA/BibTeX) in the sidebar; or you can accces the DOI 
+number by the way of [Zenodo](https://zenodo.org).
 
 ## License
 
