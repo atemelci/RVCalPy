@@ -1,5 +1,5 @@
 {
-  "title": "RVCalPy: Radial Velocity from Stellar Spectra (CCF and Broadening Function methods)",
+  "title": "RVCalPy: Easy Way of Radial Velocity Calculations",
   "description": "RVCalPy is a single-file Python tool that measures the radial velocity of a star by comparing an observed spectrum with a template. It implements a weighted line-mask cross-correlation function (Baranne et al. 1996; Pepe et al. 2002; Pino et al. 2018) and the Rucinski (1992, 2002) Broadening Function solved via SVD, with rotational-profile fitting for close binaries, a two-stage RV search, barycentric correction from observatory coordinates, and built-in spectrograph and observatory registries.",
   "upload_type": "software",
   "access_right": "open",
