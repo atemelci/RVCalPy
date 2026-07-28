@@ -36,26 +36,6 @@ with a template spectrum. Two independent methods are available:
   amplitudes scale with the step, so this keeps them on the
   reference-implementation scale; `--dv` overrides).
 
-Several practices are adopted from the
-[saphires](https://github.com/tofflemire/saphires) package:
-
-- multi-order (echelle) spectra get **one BF per order**, combined with
-  1/σ² weights from each order's BF sidebands, so noisy orders are
-  down-weighted automatically;
-- the BF is smoothed by the **instrumental FWHM c/R** when a
-  resolution/spectrograph is given (R does **not** degrade the template in
-  the BF flow — that would count the instrumental profile twice; use
-  `--degrade-template` only for ultra-sharp synthetic templates);
-- multi-component fits are sums of Gaussians on a **shared constant
-  baseline**, and the noisy BF edges are trimmed before fitting;
-- unphysical pixels (normalized flux > 1.2 or < 0) are interpolated over
-  before the SVD;
-- the barycentric correction is applied with the relativistic cross term,
-  `RV = RV_measured + v_bary + RV_measured·v_bary/c` (Wright & Eastman 2014),
-  from the observatory's geodetic coordinates (so the diurnal Earth-rotation
-  term is included), the way the MIDAS `comp/bary` command uses the site
-  longitude and latitude.
-
 ## Installation
 
 Python 3.8+ is required.
