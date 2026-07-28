@@ -1,4 +1,4 @@
-# RVCalPy — Radial Velocity from Stellar Spectra
+# RVCalPy: Easy Way of Radial Velocity Calculations
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![DOI](https://img.shields.io/badge/DOI-pending%20Zenodo%20release-lightgrey.svg)](#citing-rvcalpy)
