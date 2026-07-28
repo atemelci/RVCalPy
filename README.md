@@ -302,24 +302,6 @@ If RVCalPy contributes to work you publish, please cite it. The repository
 ships a [`CITATION.cff`](CITATION.cff) file, so GitHub shows a **“Cite this
 repository”** button (APA/BibTeX) in the sidebar.
 
-### Getting a DOI on Zenodo
-
-A [Zenodo](https://zenodo.org) DOI makes each release permanently citable,
-the same way [saphires](https://doi.org/10.5281/zenodo.3497509) is archived.
-One-time setup, then automatic for every release:
-
-1. Sign in to <https://zenodo.org> with your GitHub account.
-2. Under **Zenodo → account → GitHub**, flip the switch **on** for the
-   `atemelci/RVCalPy` repository.
-3. On GitHub, publish a release (e.g. tag `v1.0.0`, **Releases → Draft a new
-   release**). Zenodo archives that tag and mints a DOI automatically.
-4. Copy the DOI Zenodo shows into the `doi:` field of `CITATION.cff`,
-   `.zenodo.json`, and the DOI badge at the top of this README, then commit.
-   Zenodo issues a **version DOI** for each release and one **concept DOI**
-   that always resolves to the latest — cite the concept DOI for “the
-   software”, the version DOI for exact reproducibility.
-
-Until then, cite the repository URL and the version from `CITATION.cff`.
 
 ## License
 
