@@ -42,13 +42,30 @@ Two independent methods in one tool:
    correction is applied with the relativistic cross term
    RV + v_bary + RV*v_bary/c (utils.brvc; Wright & Eastman 2014).
 
+The epoch and the observatory
+-----------------------------
+An RV is only as good as the frame it is quoted in, and the two ways of
+losing that silently are the observatory (Earth rotation alone is +-0.46
+km/s) and the epoch. Both are therefore taken from the file itself
+whenever it says:
+
+  * the observatory comes from the header (Neo-Narval
+    LONGITUD/LATITUDE/OBSELEV, ESO 'TEL GEOLON/GEOLAT/GEOELEV', ...)
+    unless --site is given explicitly, and the choice is printed;
+  * a Neo-Narval level-2/3 file is FOUR exposures combined but keeps the
+    header of the first, so the epoch is rebuilt from the exposure-meter
+    table, which spans the whole sequence (flux-weighted mid-time);
+  * whatever the pipeline itself computed - BERV, BTLA - is used as a
+    cross-check on our own values, and a disagreement is reported.
+
 Modes of operation
 ------------------
 1) INTERACTIVE (recommended): run without arguments.
    A minimal tkinter widget opens: pick the normalized observed spectrum
-   and the synthetic template, choose CCF or BF, press Run. The fit plot
-   is embedded in the window. Without tkinter/display, a terminal wizard
-   with the same steps starts instead.
+   and the synthetic template, choose the method (CCF, BF or TODCOR —
+   the last one asks for a second template), press Run. The fit
+   plot is embedded in the window. Without tkinter/display, a terminal
+   wizard with the same steps starts instead.
 
    python rv_analysis.py
 
@@ -87,8 +104,12 @@ examples/example_synthetic.prf in this repository.
 """
 
 import argparse
+import datetime
 import os
+import platform
 import sys
+import time
+import traceback
 from collections import Counter
 
 import numpy as np
@@ -100,6 +121,166 @@ try:
     C_KMS = const.c.value / 1000.0
 except ImportError:
     C_KMS = 299792.458
+
+
+# ----------------------------------------------------------------------
+# Run log
+# ----------------------------------------------------------------------
+# Every run writes a log file: the full console output of the run, with a
+# header recording when it was run, with which command line, in which
+# directory and against which package versions. An RV is only as good as
+# the settings it was measured with, so the log is what lets a number in
+# result_BF.txt be traced back to the run that produced it months later.
+#
+# The log is written by teeing sys.stdout/sys.stderr, so it catches every
+# print, every warning and every traceback without the rest of the code
+# having to know about it. Runs append to the same file, newest last.
+
+LOG_DEFAULT_NAME = "rv_analysis.log"
+# Separator written between runs so the appended file stays readable.
+LOG_RULE = "=" * 70
+
+
+class _Tee:
+    """Write to the console and to the log file at the same time.
+
+    Delegates everything else (isatty, encoding, ...) to the console
+    stream, so colour detection and anything else asking the terminal
+    for its properties behaves exactly as before.
+    """
+
+    def __init__(self, stream, log):
+        self._stream = stream
+        self._log = log
+
+    def write(self, text):
+        self._stream.write(text)
+        self._stream.flush()
+        try:
+            self._log.write(text)
+            self._log.flush()
+        except (ValueError, OSError):
+            pass          # log file already closed or disk full: keep going
+        return len(text)
+
+    def flush(self):
+        self._stream.flush()
+        try:
+            self._log.flush()
+        except (ValueError, OSError):
+            pass
+
+    def isatty(self):
+        return self._stream.isatty()
+
+    def fileno(self):
+        return self._stream.fileno()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def _package_versions():
+    """Version strings of the packages the results depend on."""
+    names = ("numpy", "scipy", "astropy", "matplotlib", "PyAstronomy")
+    out = []
+    for name in names:
+        try:
+            mod = __import__(name)
+            out.append(f"{name} {getattr(mod, '__version__', '?')}")
+        except Exception:
+            out.append(f"{name} (not installed)")
+    return ", ".join(out)
+
+
+def pop_log_args(argv):
+    """Take --log FILE / --log=FILE / --no-log out of argv.
+
+    Scanned and removed before argparse sees the command line, so the
+    options work in any position (before or after the subcommand) and the
+    log is already open while the arguments themselves are parsed —
+    a usage error is then logged too.
+
+    Returns (path, enabled).
+    """
+    path, enabled = None, True
+    rest = []
+    i = 1
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--no-log":
+            enabled = False
+        elif arg == "--log":
+            if i + 1 >= len(argv):
+                sys.exit("--log expects a file name")
+            path = argv[i + 1]
+            i += 1
+        elif arg.startswith("--log="):
+            path = arg.split("=", 1)[1]
+        else:
+            rest.append(arg)
+        i += 1
+    argv[1:] = rest
+    return path, enabled
+
+
+def start_logging(path=None, enabled=True):
+    """Open the run log and start teeing stdout/stderr into it.
+
+    Returns the state needed by finish_logging(), or None when logging is
+    off or the file cannot be opened (a log that cannot be written is
+    never a reason to abandon the analysis).
+    """
+    if not enabled:
+        return None
+    path = os.path.abspath(path or LOG_DEFAULT_NAME)
+    try:
+        directory = os.path.dirname(path)
+        if directory and not os.path.isdir(directory):
+            os.makedirs(directory, exist_ok=True)
+        log = open(path, "a", encoding="utf-8", errors="replace")
+    except OSError as exc:
+        print(f"Warning: cannot write the log file {path}: {exc}",
+              file=sys.stderr)
+        return None
+
+    started = datetime.datetime.now()
+    log.write(f"\n{LOG_RULE}\n")
+    log.write(f"rv_analysis.py run started {started:%Y-%m-%d %H:%M:%S}\n")
+    log.write(f"{LOG_RULE}\n")
+    log.write("command    : {}\n".format(
+        " ".join([os.path.basename(sys.argv[0])] + sys.argv[1:])
+        if len(sys.argv) > 1
+        else f"{os.path.basename(sys.argv[0])} (interactive mode)"))
+    log.write(f"directory  : {os.getcwd()}\n")
+    log.write(f"python     : {platform.python_version()} "
+              f"({sys.executable})\n")
+    log.write(f"packages   : {_package_versions()}\n")
+    log.write(f"platform   : {platform.platform()}\n")
+    log.write(f"{LOG_RULE}\n\n")
+    log.flush()
+
+    state = (log, sys.stdout, sys.stderr, time.time(), path)
+    sys.stdout = _Tee(sys.stdout, log)
+    sys.stderr = _Tee(sys.stderr, log)
+    return state
+
+
+def finish_logging(state, status="finished", exc_info=None):
+    """Write the closing line, restore the streams and close the log."""
+    if state is None:
+        return
+    log, out, err, t0, path = state
+    if exc_info is not None:
+        log.write("\n")
+        traceback.print_exception(*exc_info, file=log)
+    log.write(f"\n{LOG_RULE}\n")
+    log.write(f"run {status} in {time.time() - t0:.1f} s "
+              f"({datetime.datetime.now():%Y-%m-%d %H:%M:%S})\n")
+    log.write(f"{LOG_RULE}\n")
+    sys.stdout, sys.stderr = out, err
+    log.close()
+    print(f"Log written to {path}")
 
 # BF velocity step of the reference implementation (BF_main stepV). The
 # per-bin BF amplitude scales with the step, so this default keeps amp
@@ -273,24 +454,12 @@ def eval_bf_model(x, model):
     return eval_gauss_model(x, model["popt"])
 
 
-def read_ascii_spectrum(path):
-    """Tolerant ASCII spectrum reader (.txt/.dat/.ascii/.obs/.prf/...).
+def read_two_columns(path):
+    """Tolerant two-column ASCII reader, no unit interpretation.
 
-    Real data files often contain things np.loadtxt cannot handle: header
-    lines, placeholders such as '-', Fortran D-exponent numbers, a varying
-    column count. This reader:
-      - skips comment lines starting with '#', ';', '!' or '%',
-      - converts every line to numbers; tokens that cannot be converted
-        (such as '-') count as NaN,
-      - drops lines whose column count differs from the most common
-        (modal) one, treating them as headers (SynthV .prf style),
-      - takes the first two numeric columns (wavelength, flux) and drops
-        rows containing NaN,
-      - sorts by wavelength.
-
-    Wavelengths may be given in Angstrom or nm: a median value below 1500
-    is taken to mean nm and converted to Angstrom, the internal unit of
-    the analysis.
+    Used by read_ascii_spectrum (wavelength, flux), which adds the
+    nm->Angstrom rule on top of it. See read_ascii_spectrum for what the
+    parser tolerates.
     """
     rows = []
     with open(path, "r", errors="ignore") as fh:
@@ -310,15 +479,36 @@ def read_ascii_spectrum(path):
 
     ncols = Counter(len(r) for r in rows).most_common(1)[0][0]
     if ncols < 2:
-        raise ValueError(f"{path}: need at least two columns "
-                         "(wavelength, flux).")
+        raise ValueError(f"{path}: need at least two columns.")
     data = np.array([r[:2] for r in rows if len(r) == ncols], dtype=float)
     data = data[np.isfinite(data).all(axis=1)]
     if data.shape[0] < 5:
         raise ValueError(f"{path}: fewer than 5 usable data rows "
                          "(check the file format).")
     order = np.argsort(data[:, 0])
-    wl, fx = data[order, 0], data[order, 1]
+    return data[order, 0], data[order, 1]
+
+
+def read_ascii_spectrum(path):
+    """Tolerant ASCII spectrum reader (.txt/.dat/.ascii/.obs/.prf/...).
+
+    Real data files often contain things np.loadtxt cannot handle: header
+    lines, placeholders such as '-', Fortran D-exponent numbers, a varying
+    column count. This reader:
+      - skips comment lines starting with '#', ';', '!' or '%',
+      - converts every line to numbers; tokens that cannot be converted
+        (such as '-') count as NaN,
+      - drops lines whose column count differs from the most common
+        (modal) one, treating them as headers (SynthV .prf style),
+      - takes the first two numeric columns (wavelength, flux) and drops
+        rows containing NaN,
+      - sorts by wavelength.
+
+    Wavelengths may be given in Angstrom or nm: a median value below 1500
+    is taken to mean nm and converted to Angstrom, the internal unit of
+    the analysis.
+    """
+    wl, fx = read_two_columns(path)
     if np.median(wl) < 1500.0:
         wl = wl * 10.0
     return wl, fx
@@ -468,6 +658,248 @@ def describe_raw_frame(path, header):
         "and run the analysis on the ADP file instead.")
 
 
+def read_libre_esprit(hdul):
+    """Libre-ESpRIT reader (NARVAL / Neo-Narval / ESPaDOnS 'st3' files).
+
+    The spectrum sits in one binary table whose columns are
+    'Wavelength1', 'Intensity', 'Polarization', 'Error', 'Null',
+    'Continuum', 'Null 2' (a non-polarimetric product carries only the
+    first columns). All echelle orders are concatenated into that single
+    table, red order first, so the wavelength column is NOT monotonic:
+    it climbs inside an order and drops back at every order boundary.
+    The boundaries are the row indices of the 'Orderlimit' column of a
+    later table (zero-padded at the end); when that table is missing
+    they are recovered from the drops in the wavelength column.
+
+    'Intensity' is the continuum-normalized Stokes I - the 'Continuum'
+    column holds the ADU continuum it was divided by - which is what the
+    BF/CCF steps want. The Stokes V / null columns are not used.
+
+    Orders the pipeline could not solve a continuum for are dropped:
+    there the normalized intensity scatters around zero and piles up on
+    its clip bounds (-1 and 10), which is noise, not spectrum. In a
+    low-S/N exposure this typically removes the blue and far-red ends of
+    the coverage.
+    Returns the orders blue-to-red as (wavelength, flux) pairs, or None
+    when the file does not have this layout.
+    """
+    from astropy.io import fits
+    wl = fx = cont = None
+    limits = None
+    for hdu in hdul:
+        if not isinstance(hdu, fits.BinTableHDU):
+            continue
+        cols = {c.name.upper().replace(" ", ""): c.name for c in hdu.columns}
+        if limits is None and "ORDERLIMIT" in cols:
+            limits = np.ravel(np.asarray(hdu.data[cols["ORDERLIMIT"]], dtype=int))
+        if wl is not None:
+            continue
+        # 'Wavelength1' in the polarimetric product, 'Wavelength' otherwise
+        wname = next((cols[k] for k in ("WAVELENGTH1", "WAVELENGTH") if k in cols),
+                     None)
+        if wname is None or "INTENSITY" not in cols:
+            continue
+        # the null/polarization/continuum columns are the Libre-ESpRIT
+        # signature: without one of them this is some other WAVE/FLUX table
+        if not any(k in cols for k in
+                   ("POLARIZATION", "CONTINUUM", "NULL", "NULL2")):
+            continue
+        wl = np.ravel(np.asarray(hdu.data[wname], dtype=float))
+        fx = np.ravel(np.asarray(hdu.data[cols["INTENSITY"]], dtype=float))
+        if "CONTINUUM" in cols:            # kept for the diagnosis below
+            cont = np.ravel(np.asarray(hdu.data[cols["CONTINUUM"]],
+                                       dtype=float))
+    if wl is None or wl.size < 10:
+        return None
+
+    edges = []
+    if limits is not None and limits.size:
+        # keep the strictly increasing head of the column (the tail is
+        # zero padding) and make sure the last order is closed off
+        edges = [0]
+        for v in limits:
+            if edges[-1] < v <= wl.size:
+                edges.append(int(v))
+        if edges[-1] != wl.size:
+            edges.append(wl.size)
+    if len(edges) < 3:
+        # no usable Orderlimit table: cut where the wavelength drops back
+        drops = np.flatnonzero(np.diff(wl) <= 0) + 1
+        edges = [0, *drops.tolist(), wl.size]
+
+    orders, dropped = [], []
+    for a, b in zip(edges[:-1], edges[1:]):
+        w, f = wl[a:b], fx[a:b]
+        good = np.isfinite(w) & np.isfinite(f)
+        w, f = w[good], f[good]
+        if w.size < 10:
+            continue
+        # a normalized stellar spectrum is non-negative: a quarter of the
+        # order below zero (or parked on the -1 / 10 clip bounds) means
+        # the continuum was fitted to noise, not to a stellar continuum
+        if np.mean((f < 0.0) | (f >= 10.0)) > 0.25:
+            dropped.append((w.min(), w.max()))
+            continue
+        srt = np.argsort(w)
+        orders.append((w[srt], f[srt]))
+    if not orders:
+        # The layout WAS recognized - saying "unrecognized FITS layout"
+        # here would send the user looking for a reader bug instead of at
+        # the exposure. Report what is actually wrong with the data.
+        clipped = float(np.mean((fx < 0.0) | (fx >= 10.0)))
+        floor = ""
+        if cont is not None and cont.size == fx.size:
+            med = float(np.nanmedian(cont))
+            if med <= 2.0 + 1e-9:
+                floor = (f" and the 'Continuum' column sits at its floor "
+                         f"(median {med:g} ADU), so the extracted flux "
+                         "cannot be recovered from it either")
+        raise ValueError(
+            "recognized as a Libre-ESpRIT product (NARVAL / Neo-Narval / "
+            f"ESPaDOnS), but none of its {len(dropped)} echelle orders "
+            "has a usable continuum solution: "
+            f"{100 * clipped:.0f}% of the normalized-intensity pixels sit "
+            f"on the -1 / 10 clip bounds{floor}. The DRS found no stellar "
+            "continuum to divide by, so there is no spectrum in this file "
+            "to normalize, correlate or measure - this is an exposure to "
+            "drop, not a format problem. Check the other epochs of the "
+            "same target (this one is unusable as delivered), or have the "
+            "level-1/level-2 data re-reduced.")
+    if dropped:
+        lo = min(d[0] for d in dropped)
+        hi = max(d[1] for d in dropped)
+        print(f"Note: {len(dropped)} of {len(dropped) + len(orders)} "
+              f"Libre-ESpRIT orders ({lo:.0f}-{hi:.0f} A) have no continuum "
+              "solution (unusable S/N) and were skipped.")
+    orders.sort(key=lambda o: o[0][0])          # blue to red
+    return stitch_order_overlaps(orders)
+
+
+def stitch_order_overlaps(orders, min_edge=0.03):
+    """Cut each echelle order back to the half of its overlap with the
+    neighbouring order, so consecutive orders meet without overlapping.
+
+    Adjacent Libre-ESpRIT orders overlap by ~35% of their span, and the
+    normalized intensity is at its worst exactly there: the blaze runs
+    out at an order end, so the continuum division blows up and the
+    normalized flux swings to the -1 / 10 clip bounds (in the observed
+    files, ~25% of the pixels in the outer decile of an order against ~1%
+    mid-order). Merging such orders by wavelength sorting interleaves
+    those spikes into the clean data of the neighbouring order, which is
+    where they are most damaging: the SVD sees them as sharp lines, and
+    the line check compares the model against garbage pixels.
+
+    Splitting each overlap at its midpoint keeps, for every wavelength,
+    the order that samples it furthest from its own edge, and leaves no
+    duplicated pixels behind. An order end with no overlapping
+    neighbour (the two ends of the coverage, or a gap left by a dropped
+    order) is trimmed by `min_edge` of the order span instead; the same
+    minimum is enforced on the stitched side, for the rare narrow
+    overlap. Orders are assumed sorted blue-to-red.
+    """
+    out = []
+    for k, (w, f) in enumerate(orders):
+        span = w[-1] - w[0]
+        lo = w[0] + min_edge * span
+        hi = w[-1] - min_edge * span
+        if k > 0 and orders[k - 1][0][-1] > w[0]:
+            lo = max(lo, 0.5 * (w[0] + orders[k - 1][0][-1]))
+        if k + 1 < len(orders) and orders[k + 1][0][0] < w[-1]:
+            hi = min(hi, 0.5 * (w[-1] + orders[k + 1][0][0]))
+        sel = (w >= lo) & (w <= hi)
+        if sel.sum() > 10:
+            out.append((w[sel], f[sel]))
+    return out or orders
+
+
+def linear_wcs_axis(header, npix):
+    """Axis values of a linear 1-D FITS WCS (CRVAL1 + CDELT1/CD1_1,
+    CRPIX1), or None when the header carries no such solution."""
+    if "CRVAL1" not in header:
+        return None
+    cdelt = header.get("CDELT1", header.get("CD1_1"))
+    if not cdelt:
+        return None
+    crpix = float(header.get("CRPIX1", 1.0))
+    return (float(header["CRVAL1"])
+            + (np.arange(npix) + 1 - crpix) * float(cdelt))
+
+
+def velocity_axis_note(axis, header):
+    """Describe a linear WCS axis that CANNOT be a wavelength axis.
+
+    A wavelength axis is strictly positive in every unit (A, nm, m);
+    an axis running through zero is a VELOCITY axis. The case that
+    reaches this code in practice is the ESO-MIDAS xcorr product
+    ('..._ln_corr_v.fits'): the cross-correlation function itself,
+    sampled on a velocity grid in km/s that is symmetric about zero,
+    e.g. CRVAL1 = -31515.9, CDELT1 = 1.92358 over 32768 = 2^15 pixels.
+    Read as a wavelength array it gives negative 'wavelengths' and the
+    BF/CCF that follow are meaningless, so the reader stops here.
+
+    Returns None when the axis is a plausible wavelength axis.
+    """
+    if axis is None or axis.size == 0 or float(np.nanmin(axis)) > 0.0:
+        return None
+    lo, hi = float(axis[0]), float(axis[-1])
+    step = float(axis[1] - axis[0]) if axis.size > 1 else 0.0
+    ctype = str(header.get("CTYPE1", "")).strip()
+    symmetric = abs(lo + hi) <= 2.0 * abs(step)
+    what = ("a pre-computed cross-correlation function"
+            if symmetric else "a velocity axis")
+    note = (f"the CRVAL1/CDELT1 axis runs from {lo:.4g} to {hi:.4g} "
+            f"(step {step:.6g}) over {axis.size} pixels, so it is not a "
+            f"wavelength axis (wavelengths are positive) but "
+            f"{what} in velocity units")
+    if ctype:
+        note += f" [CTYPE1 = '{ctype}']"
+    if symmetric:
+        note += (".\nThis is the ESO-MIDAS xcorr product: the file already "
+                 "IS the correlation profile, and there is no spectrum in "
+                 "it to correlate again.\nStart from the spectrum that went "
+                 "INTO the correlation (the merged, normalized spectrum on "
+                 "a wavelength scale), not from its output: every method "
+                 "here - 'ccf', 'bf' and 'todcor' - works on the spectrum.")
+    else:
+        note += (". Supply the spectrum on a wavelength scale instead.")
+    return note
+
+
+def correlation_profile_note(path):
+    """Return velocity_axis_note() for `path` if it holds a correlation
+    profile rather than a spectrum, else None.
+
+    Cheap enough to run when a file is picked in the widget, so the user
+    is told what the file is BEFORE being asked for a template that a
+    correlation profile does not need. Never raises: anything it cannot
+    read is simply not a profile as far as this check is concerned.
+    """
+    if not path or not os.path.isfile(path):
+        return None
+    if not str(path).lower().endswith((".fits", ".fit", ".fts")):
+        return None
+    try:
+        from astropy.io import fits
+        with fits.open(path) as hdul:
+            for hdu in hdul:
+                if hdu.data is None or isinstance(hdu, fits.BinTableHDU):
+                    continue
+                data = np.asarray(hdu.data, dtype=float)
+                if data.ndim > 1:
+                    data = extract_flux_band(data, hdu.header)
+                if data is None or data.ndim != 1:
+                    continue
+                axis = linear_wcs_axis(hdu.header, data.size)
+                if axis is None:
+                    continue
+                note = velocity_axis_note(axis, hdu.header)
+                if note:
+                    return note
+    except Exception:
+        return None
+    return None
+
+
 def read_fits_spectrum(path):
     """FITS spectrum reader for the common layouts of raw/pipeline data.
 
@@ -475,6 +907,8 @@ def read_fits_spectrum(path):
       - ESPRESSO S2D (flux ext=1, wavelength ext=4, 2D echelle orders)
       - phase-3 style binary tables with WAVE/LAMBDA and FLUX columns
         (FEROS, HARPS, UVES, ...)
+      - Libre-ESpRIT products (NARVAL / Neo-Narval / ESPaDOnS 'st3'):
+        one table with all orders concatenated (see read_libre_esprit)
       - IRAF echelle 'multispec' images (CTYPE1=MULTISPE, WAT2 cards;
         linear, log and Chebyshev/Legendre dispersion solutions)
       - 1D image HDUs with a linear wavelength WCS (CRVAL1/CDELT1): the
@@ -498,6 +932,12 @@ def read_fits_spectrum(path):
                 return [(w, f) for w, f in zip(wvl, flux)]
         except (IndexError, TypeError, ValueError):
             pass
+        try:
+            esprit = read_libre_esprit(hdul)
+        except ValueError as exc:               # recognized but unusable
+            raise ValueError(f"{path}: {exc}") from None
+        if esprit:
+            return esprit
         for hdu in hdul:
             if not isinstance(hdu, fits.BinTableHDU):
                 continue
@@ -518,21 +958,30 @@ def read_fits_spectrum(path):
             if ms:
                 return ms
         wcs_orders = []
+        vel_note = None
         for hdu in hdul:
-            if hdu.data is None:
-                continue
+            if hdu.data is None or isinstance(hdu, fits.BinTableHDU):
+                continue                # a table has no wavelength WCS
             data = np.asarray(hdu.data, dtype=float)
             h = hdu.header
             if data.ndim > 1:
                 data = extract_flux_band(data, h)
-            if data is not None and data.ndim == 1 and "CRVAL1" in h:
-                cdelt = h.get("CDELT1", h.get("CD1_1"))
-                if cdelt:
-                    crpix = h.get("CRPIX1", 1.0)
-                    wl = h["CRVAL1"] + (np.arange(data.size) + 1 - crpix) * cdelt
-                    wcs_orders.append((wl, data))
+            if data is not None and data.ndim == 1:
+                wl = linear_wcs_axis(h, data.size)
+                if wl is None:
+                    continue
+                # A wavelength axis is positive; anything running through
+                # zero is a velocity axis (MIDAS xcorr output) and must
+                # not be silently used as wavelengths.
+                note = velocity_axis_note(wl, h)
+                if note:
+                    vel_note = vel_note or note
+                    continue
+                wcs_orders.append((wl, data))
         if wcs_orders:
             return wcs_orders
+        if vel_note:
+            raise ValueError(f"{path}: {vel_note}")
         for hdu in hdul:
             err = describe_raw_frame(path, hdu.header)
             if err:
@@ -592,7 +1041,8 @@ def fits_header_info(path):
     """
     from astropy.io import fits
     info = {"object": None, "obstime": None, "ra": None, "dec": None,
-            "exptime": None, "rv_cards": []}
+            "exptime": None, "rv_cards": [], "epoch_note": None,
+            "neonarval": None}
     try:
         with fits.open(path) as hdul:
             h = hdul[0].header
@@ -615,6 +1065,15 @@ def fits_header_info(path):
     info["obstime"] = h.get("DATE-OBS") or h.get("DATE_OBS")
     if info["obstime"] and ":" not in str(info["obstime"]) \
             and "T" not in str(info["obstime"]):
+        # date-only DATE-OBS (Libre-ESpRIT writes '2025-06-15'): a full
+        # ISOT timestamp elsewhere in the header replaces it outright
+        for key in ("DATE-FIT", "DATE-BEG", "DATE-STR"):
+            full = h.get(key)
+            if full and "T" in str(full):
+                info["obstime"] = str(full)
+                break
+    if info["obstime"] and ":" not in str(info["obstime"]) \
+            and "T" not in str(info["obstime"]):
         for key in ("UTMIDDLE", "UT", "UTC-OBS", "UT-OBS", "TIME-OBS",
                     "UTSHUT"):
             ut = h.get(key)
@@ -632,6 +1091,33 @@ def fits_header_info(path):
                 break
     info["exptime"] = h.get("EXPTIME") if info["exptime"] is None \
         else info["exptime"]
+
+    # Neo-Narval level-2/3: the primary header describes sub-exposure 1
+    # of a 4-exposure sequence, so its times are NOT the epoch of the
+    # product. Replace them with the mid-time of the whole sequence and
+    # zero the exposure time, since that mid-time is already the middle.
+    neo = neonarval_header_info(path)
+    if neo and neo.get("mid_jd"):
+        from astropy.time import Time
+        # what the header cards alone would have given: start of
+        # sub-exposure 1 plus half ITS exposure time
+        old_jd = _isot_to_jd(info["obstime"])
+        old_mid = (old_jd + float(info["exptime"] or 0.0) / 2.0 / 86400.0
+                   if old_jd is not None else None)
+        info["obstime"] = Time(neo["mid_jd"], format="jd",
+                               scale="utc").isot
+        info["exptime"] = 0.0
+        info["neonarval"] = neo
+        shift = ((neo["mid_jd"] - old_mid) * 1440.0
+                 if old_mid is not None else None)
+        info["epoch_note"] = (
+            f"Neo-Narval: epoch = mid of the {neo['nsub']}-exposure "
+            f"sequence ({neo['epoch_source']}"
+            + (f", span {neo['span_s']:.0f} s" if neo["span_s"] else "")
+            + f") = {info['obstime']}"
+            + (f", {shift:+.1f} min from the first sub-exposure"
+               if shift is not None and abs(shift) >= 0.05 else ""))
+
     ra, dec = h.get("RA"), h.get("DEC")
     try:
         if isinstance(ra, (int, float)) and isinstance(dec, (int, float)):
@@ -645,6 +1131,224 @@ def fits_header_info(path):
     except Exception:
         pass
     return info
+
+
+# Header cards giving the observatory position, as
+# (longitude_East, latitude, altitude) triples. Longitudes are degrees
+# East throughout (negative in Chile), the convention of OBSERVATORIES
+# and of the MIDAS comp/bary command.
+SITE_CARD_SETS = (
+    ("LONGITUD", "LATITUDE", "OBSELEV"),        # Neo-Narval / NARVAL (TBL)
+    ("HIERARCH ESO TEL GEOLON", "HIERARCH ESO TEL GEOLAT",
+     "HIERARCH ESO TEL GEOELEV"),               # ESO La Silla / Paranal
+    ("GEOLON", "GEOLAT", "GEOELEV"),
+    ("OBSGEO-B", "OBSGEO-L", "OBSGEO-H"),
+    ("LONG-OBS", "LAT-OBS", "ALT-OBS"),
+    ("SITELON", "SITELAT", "SITEALT"),          # written by 'normalize'
+    ("OBS-LONG", "OBS-LAT", "OBS-ELEV"),
+)
+
+
+def header_site(path):
+    """(lon_East, lat, alt, cards) of the observatory as recorded in the
+    file's own header, or None.
+
+    Reading the site from the file removes the commonest silent error in
+    a barycentric correction: leaving the default observatory in place
+    for a spectrum taken somewhere else. Earth rotation alone is +-0.46
+    km/s, so a wrong site costs more than everything the RV pipeline
+    tries to get right - and nothing in the numbers gives it away.
+
+    FITS headers are searched HDU by HDU, the ASCII '# KEY = VALUE'
+    header written by the normalize step the same way. Only fully
+    numeric, physically plausible triples are accepted.
+    """
+    def take(get):
+        for lon_k, lat_k, alt_k in SITE_CARD_SETS:
+            lon, lat = get(lon_k), get(lat_k)
+            if lon is None or lat is None:
+                continue
+            try:
+                lon, lat = float(lon), float(lat)
+                alt = float(get(alt_k) or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if abs(lon) > 360.0 or abs(lat) > 90.0 or not -500 < alt < 9000:
+                continue
+            if lon > 180.0:
+                lon -= 360.0
+            return lon, lat, alt, f"{lon_k}/{lat_k}/{alt_k}"
+        return None
+
+    if not path or not os.path.isfile(path):
+        return None
+    if str(path).lower().endswith((".fits", ".fit", ".fits.gz", ".fit.gz")):
+        try:
+            from astropy.io import fits
+            with fits.open(path) as hdul:
+                for hdu in hdul:
+                    found = take(hdu.header.get)
+                    if found:
+                        return found
+        except Exception:
+            return None
+        return None
+    try:
+        cards = {}
+        with open(path, "r", errors="replace") as fh:
+            for line in fh:
+                if not line.startswith("#"):
+                    break
+                if "=" in line:
+                    k, v = line.lstrip("# ").split("=", 1)
+                    cards[k.strip().upper()] = v.strip()
+        return take(cards.get)
+    except OSError:
+        return None
+
+
+def neonarval_header_info(path):
+    """Epoch and pipeline values of a Neo-Narval (Libre-ESpRIT) file.
+
+    A level-2/3 product is FOUR level-1 exposures combined, and it keeps
+    the primary header of the FIRST of them (NeoNarval data format, A.
+    Lopez Ariste, sect. 1): DATE-OBS is a bare date, TIME-ISO/TIMEEND and
+    EXPTIME describe sub-exposure 1 alone, and DATE-FIT is the file
+    CREATION time, not an exposure time. Reading the epoch off those
+    cards therefore places the measurement half a sequence too early -
+    14 min on a 4x616 s sequence, 3.5 min on a 4x130 s one - which goes
+    straight into the orbital phase and, for a short-period binary, into
+    the RV itself.
+
+    The exposure-meter table ('Time Photometry' / 'Photometry') does span
+    the whole sequence, so it gives both the true time span and a
+    flux-weighted mid-time. When it is missing, the FILE1..FILE4 cards
+    (+ EXPTIME) bracket the sequence instead, and TIME-ISO/TIMEEND of the
+    first sub-exposure is the last resort.
+
+    Returns None unless the file is a NARVAL/Neo-Narval product, else a
+    dict with mid_jd, start_jd, end_jd, span_s, nsub, epoch_source, and
+    the DRS's own berv [km/s] and btla [JD] (both None when absent).
+    """
+    if not path or not str(path).lower().endswith((".fits", ".fit",
+                                                   ".fits.gz", ".fit.gz")):
+        return None
+    try:
+        from astropy.io import fits
+        with fits.open(path) as hdul:
+            hdr = hdul[0].header
+            inst = str(hdr.get("INSTRUM") or hdr.get("INSTRUME") or "")
+            if "NARVAL" not in inst.upper():
+                return None
+            out = dict(instrument=inst.strip(),
+                       berv=_as_float(hdr.get("BERV")),
+                       btla=_as_float(hdr.get("BTLA")),
+                       exptime=_as_float(hdr.get("EXPTIME")),
+                       nsub=sum(1 for k in ("FILE1", "FILE2", "FILE3",
+                                            "FILE4") if hdr.get(k)) or 1,
+                       start_jd=None, end_jd=None, mid_jd=None,
+                       span_s=None, epoch_source=None)
+
+            # 1) the exposure meter: the only table covering the sequence
+            for hdu in hdul:
+                if not isinstance(hdu, fits.BinTableHDU):
+                    continue
+                names = {c.name.upper().replace(" ", ""): c.name
+                         for c in hdu.columns}
+                tname = names.get("TIMEPHOTOMETRY") or names.get("TIME")
+                fname = names.get("PHOTOMETRY")
+                if tname is None or fname is None:
+                    continue
+                t = np.asarray(hdu.data[tname], dtype=float).ravel()
+                f = np.asarray(hdu.data[fname], dtype=float).ravel()
+                good = np.isfinite(t) & (t > 2.4e6) & np.isfinite(f)
+                if good.sum() < 4:
+                    continue
+                t, f = t[good], f[good]
+                w = f - f.min()
+                out["start_jd"], out["end_jd"] = float(t.min()), float(t.max())
+                out["mid_jd"] = (float(np.sum(t * w) / np.sum(w))
+                                 if np.sum(w) > 0 else
+                                 0.5 * (out["start_jd"] + out["end_jd"]))
+                out["epoch_source"] = ("exposure meter, flux-weighted"
+                                       if np.sum(w) > 0 else
+                                       "exposure meter, mid-point")
+                break
+
+            # 2) FILE1..FILE4 (their stamps are creation times, but they
+            #    bracket the sequence to about a second)
+            if out["mid_jd"] is None:
+                start = _as_float(hdr.get("DATE_JUL"))
+                if start is None:
+                    start = _isot_to_jd(_neonarval_start_isot(hdr))
+                last = None
+                for k in ("FILE4", "FILE3", "FILE2", "FILE1"):
+                    last = _neonarval_name_jd(hdr.get(k))
+                    if last is not None:
+                        break
+                if start is not None and last is not None \
+                        and out["exptime"]:
+                    out["start_jd"] = start
+                    out["end_jd"] = last + out["exptime"] / 86400.0
+                    out["mid_jd"] = 0.5 * (out["start_jd"] + out["end_jd"])
+                    out["epoch_source"] = "FILE1..FILE4 timestamps + EXPTIME"
+
+            # 3) the first sub-exposure alone (what the old code did)
+            if out["mid_jd"] is None:
+                start = _isot_to_jd(_neonarval_start_isot(hdr))
+                if start is not None and out["exptime"]:
+                    out["start_jd"] = start
+                    out["end_jd"] = start + out["exptime"] / 86400.0
+                    out["mid_jd"] = 0.5 * (out["start_jd"] + out["end_jd"])
+                    out["epoch_source"] = ("TIME-ISO + EXPTIME/2 (first "
+                                           "sub-exposure only)")
+            if out["start_jd"] is not None and out["end_jd"] is not None:
+                out["span_s"] = (out["end_jd"] - out["start_jd"]) * 86400.0
+            return out
+    except Exception:
+        return None
+
+
+def _as_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _neonarval_start_isot(hdr):
+    """'YYYY-MM-DDThh:mm:ss' of the exposure start from the documented
+    cards: DATE-OBS (a bare date) + TIME-ISO ('Begin Exposure'), falling
+    back to DATE-FIT (the file creation time)."""
+    date = str(hdr.get("DATE-OBS") or "").strip()
+    ut = str(hdr.get("TIME-ISO") or "").strip()
+    if date and "T" in date:
+        return date
+    if date and ut:
+        return f"{date}T{ut}"
+    fit = str(hdr.get("DATE-FIT") or "").strip()
+    return fit or None
+
+
+def _neonarval_name_jd(name):
+    """JD of the 'NEO_YYYYMMDD_hhmmss' stamp in a Libre-ESpRIT file name."""
+    import re
+    m = re.search(r"(\d{8})[_-](\d{6})", str(name or ""))
+    if not m:
+        return None
+    d, t = m.group(1), m.group(2)
+    return _isot_to_jd(f"{d[:4]}-{d[4:6]}-{d[6:]}T"
+                       f"{t[:2]}:{t[2:4]}:{t[4:]}")
+
+
+def _isot_to_jd(stamp):
+    if not stamp:
+        return None
+    try:
+        from astropy.time import Time
+        return float(Time(str(stamp), format="isot", scale="utc").jd)
+    except Exception:
+        return None
 
 
 def parse_coord(ra, dec):
@@ -683,7 +1387,8 @@ def ascii_header_info(path):
     parsed to degrees (sexagesimal accepted). Returns the same dict shape
     as fits_header_info (values None when absent)."""
     info = {"object": None, "obstime": None, "ra": None, "dec": None,
-            "exptime": None, "rv_cards": []}
+            "exptime": None, "rv_cards": [], "epoch_note": None,
+            "neonarval": None}
     ra_s = dec_s = None
     try:
         with open(path, "r", errors="ignore") as fh:
@@ -1253,6 +1958,72 @@ def apply_barycentric(rv_measured, vbary):
     return rv_measured + vbary + rv_measured * vbary / C_KMS
 
 
+BARY_CROSSCHECK_TOL = 0.05      # km/s: louder than any real difference
+
+
+def crosscheck_pipeline_bary(path, vbary, bjd, berv_hdr=None):
+    """Compare our barycentric velocity and BJD with the values the
+    instrument pipeline wrote into the file, when it wrote any.
+
+    A pipeline BERV is an independent computation of the same quantity:
+    if the two agree to a few m/s, the coordinates, the epoch and the
+    observatory are all right at once. If they do not, something is
+    wrong that no other output would reveal - a wrong site is worth up
+    to 0.46 km/s, a wrong epoch a few m/s per minute, wrong coordinates
+    up to 0.03 km/s per arcmin. This check is the reason the site and
+    epoch fixes above can be trusted.
+
+    Some pipelines store the correction with the opposite sign (the
+    velocity to ADD vs the velocity of the observer): a match after a
+    sign flip is reported as such rather than as a disagreement.
+
+    Returns dict(messages=[...], summary=str or None).
+    """
+    msgs, bits = [], []
+    if berv_hdr is not None and np.isfinite(vbary):
+        d, dflip = vbary - berv_hdr, vbary + berv_hdr
+        if abs(d) <= BARY_CROSSCHECK_TOL:
+            msgs.append(f"  cross-check: pipeline BERV = {berv_hdr:+.4f} "
+                        f"km/s, ours {vbary:+.4f} ({d * 1000:+.0f} m/s) - OK")
+            bits.append(f"BERV agrees to {abs(d) * 1000:.0f} m/s")
+        elif abs(dflip) <= BARY_CROSSCHECK_TOL:
+            msgs.append(f"  cross-check: pipeline BERV = {berv_hdr:+.4f} "
+                        f"km/s matches ours ({vbary:+.4f}) with the "
+                        "OPPOSITE sign convention - values agree, "
+                        "conventions differ")
+            bits.append("BERV agrees up to the sign convention")
+        else:
+            msgs.append(
+                f"WARNING: our barycentric velocity ({vbary:+.4f} km/s) "
+                f"differs from the pipeline's own BERV ({berv_hdr:+.4f} "
+                f"km/s) by {d:+.4f} km/s. Check, in this order: the "
+                "observatory (--site; a wrong one costs up to 0.46 "
+                "km/s), the coordinates (--ra/--dec vs the header) and "
+                "the epoch (--obstime).")
+            bits.append(f"BERV differs by {d:+.3f} km/s")
+
+    neo = neonarval_header_info(path)
+    if neo and neo.get("btla") and bjd is not None:
+        dt = (bjd - neo["btla"]) * 1440.0            # minutes
+        span = (neo["span_s"] or 0.0) / 60.0
+        # BTLA is the barycentric time of the START of the sequence, so
+        # our mid-exposure BJD must fall inside the sequence.
+        if -0.5 <= dt <= span + 0.5:
+            msgs.append(f"  cross-check: BTLA (header, sequence start) = "
+                        f"{neo['btla']:.6f}; our mid-exposure BJD is "
+                        f"{dt:+.1f} min later, inside the {span:.1f} min "
+                        "sequence - OK")
+            bits.append(f"BJD is {dt:+.1f} min after BTLA")
+        else:
+            msgs.append(
+                f"WARNING: our BJD ({bjd:.6f}) is {dt:+.1f} min from the "
+                f"header BTLA ({neo['btla']:.6f}), which is outside the "
+                f"{span:.1f} min exposure sequence. One of the two times "
+                "is wrong.")
+            bits.append(f"BJD is {dt:+.1f} min from BTLA")
+    return dict(messages=msgs, summary="; ".join(bits) or None)
+
+
 def get_target_context(args):
     """Resolve target info; return dict(vbary, bjd, phase).
 
@@ -1268,6 +2039,7 @@ def get_target_context(args):
     ra, dec = parse_coord(args.ra, args.dec)
     obstime = args.obstime
     exptime = None
+    site, site_note = observing_site(args)
 
     # Frame guard: block the run when the spectrum's own header says
     # its wavelengths are already barycentric but the correction is
@@ -1328,6 +2100,8 @@ def get_target_context(args):
         if obstime is None and hdr["obstime"]:
             obstime = hdr["obstime"]
             print(f"{src}: DATE-OBS = {obstime}")
+        if hdr.get("epoch_note"):
+            print(f"  {hdr['epoch_note']}")
 
     # The BJD and barycentric computations need astropy (and, for an
     # astropy site name, its online registry). A failure there must not
@@ -1340,7 +2114,10 @@ def get_target_context(args):
             if is_jd:
                 bjd = float(str(obstime).strip())
             elif ra is not None and dec is not None:
-                bjd = compute_bjd(obstime, ra, dec, args.site,
+                if site_note:
+                    print(site_note)
+                    site_note = None
+                bjd = compute_bjd(obstime, ra, dec, site,
                                   exptime=exptime)
             if bjd is not None:
                 print(f"BJD = {bjd:.6f}")
@@ -1350,7 +2127,10 @@ def get_target_context(args):
     vbary = 0.0
     if ra is not None and dec is not None and obstime is not None:
         try:
-            vbary = barycentric_correction(ra, dec, obstime, args.site)
+            if site_note:
+                print(site_note)
+                site_note = None
+            vbary = barycentric_correction(ra, dec, obstime, site)
             if getattr(args, "no_bary", False):
                 print(f"Barycentric correction: {vbary:+.4f} km/s "
                       "(computed, NOT applied to the reported RVs)")
@@ -1360,6 +2140,13 @@ def get_target_context(args):
         except Exception as exc:
             print(f"Warning: barycentric correction skipped ({exc}).")
             vbary = 0.0
+        cross = crosscheck_pipeline_bary(
+            args.spectrum, vbary, bjd,
+            berv_hdr=(frame_chk or {}).get("berv"))
+        for line in cross["messages"]:
+            print(line)
+        if frame_note and cross["summary"]:
+            frame_note += f"; {cross['summary']}"
     elif getattr(args, "object", None) or args.ra is not None or obstime:
         print("Note: barycentric correction skipped "
               "(needs coordinates AND observation time).")
@@ -1422,6 +2209,108 @@ def calculate_ccf(spec_wl, spec_flux, tpl_wl, tpl_flux, rv_grid):
         model = np.interp(spec_wl, shifted_wl, tpl_flux)
         ccf[i] = np.dot(spec, model - np.mean(model))
     return ccf
+
+
+def calculate_ccf_fft(orders, tpl_wl, tpl_flux, dv_kms, max_shift_kms,
+                      apodize=0.1, highpass_kms=2000.0, lowpass_kms=None):
+    """Cross-correlation of spectrum against template by FFT — the
+    Tonry & Davis (1979) construction, and what ESO-MIDAS `xcorr` does.
+
+    On a log-lambda grid a Doppler shift is an integer pixel shift, so
+    the correlation at *every* velocity is one transform pair instead of
+    one resampling per trial velocity: O(N log N) for the whole profile
+    against O(N_rv x N) for the direct sum. The full +-max_shift range
+    comes out in a single pass, which is why an FFT correlation is
+    normally computed over the entire velocity span at once.
+
+    The three steps that make it correct rather than merely fast:
+
+      * **apodization** — a cosine bell over the outer `apodize`
+        fraction of each end. The DFT treats the spectrum as periodic;
+        without a taper the discontinuity between the two ends injects
+        power at every wavenumber and rings across the whole profile.
+      * **zero padding** to at least 2N, so the circular correlation of
+        the DFT equals the linear correlation that is wanted.
+      * **bandpass** — a zero-phase cosine bell removing wavenumbers
+        below the continuum scale (`highpass_kms`, residual
+        normalization waves) and above the resolution element
+        (`lowpass_kms`, pixel noise). Being real and even it cannot
+        move the peak.
+
+    Returns (velocity, ccf_total, ccf_per_order); the correlation is
+    normalized so the peak is a correlation coefficient.
+    """
+    wl_lo = max(min(w.min() for w, _ in orders), tpl_wl.min())
+    wl_hi = min(max(w.max() for w, _ in orders), tpl_wl.max())
+    if not wl_hi > wl_lo:
+        raise RuntimeError("The spectrum and the template do not overlap "
+                           "in wavelength; no CCF can be computed.")
+    grid = log_wave_grid(wl_lo, wl_hi, dv_kms)
+    n = grid.size
+    if n < 64:
+        raise RuntimeError(f"Only {n} pixels of overlap at dv = "
+                           f"{dv_kms:g} km/s — too few for an FFT CCF.")
+
+    taper = np.ones(n)
+    edge = max(int(apodize * n), 1)
+    ramp = 0.5 * (1.0 - np.cos(np.pi * np.arange(edge) / edge))
+    taper[:edge] = ramp
+    taper[n - edge:] = ramp[::-1]
+
+    span = n * dv_kms
+    if lowpass_kms is None:
+        lowpass_kms = 2.0 * dv_kms
+    k1, k2 = span / (4.0 * highpass_kms), span / highpass_kms
+    k3, k4 = span / (2.0 * lowpass_kms), span / lowpass_kms
+
+    try:
+        from scipy.fft import next_fast_len
+        nfft = next_fast_len(2 * n)
+    except ImportError:
+        nfft = 1 << int(np.ceil(np.log2(2 * n)))
+
+    def prepared(values):
+        v = np.asarray(values, dtype=float)
+        v = (v - v.mean()) * taper
+        spec = np.fft.rfft(v, nfft)
+        spec *= cosine_bell(spec.size, k1 * nfft / n, k2 * nfft / n,
+                            k3 * nfft / n, k4 * nfft / n)
+        return spec
+
+    tpl = np.interp(grid, tpl_wl, tpl_flux)
+    ftpl = prepared(tpl)
+    tpl_power = float(np.sum(np.abs(ftpl) ** 2))
+
+    lag = np.arange(nfft)
+    lag = np.where(lag > nfft // 2, lag - nfft, lag)
+    velocity = lag * dv_kms
+    keep = np.abs(velocity) <= max_shift_kms
+    order_sort = np.argsort(velocity[keep])
+
+    per_order, total = [], np.zeros(int(keep.sum()))
+    for k, (wl, fx) in enumerate(orders):
+        good = np.isfinite(wl) & np.isfinite(fx)
+        if good.sum() < 10:
+            continue
+        w, f = wl[good], fx[good]
+        inside = (grid >= w.min()) & (grid <= w.max())
+        if inside.sum() < 64:
+            continue
+        sig = np.full(n, np.nan)
+        sig[inside] = np.interp(grid[inside], w, f)
+        sig[~inside] = np.nanmean(sig[inside])
+        fsig = prepared(sig)
+        norm = np.sqrt(float(np.sum(np.abs(fsig) ** 2)) * tpl_power)
+        cc = np.fft.irfft(fsig * np.conj(ftpl), nfft) * nfft / max(norm, 1e-30)
+        per_order.append(cc[keep][order_sort])
+        total += per_order[-1]
+        print(f"  order {k + 1}/{len(orders)} correlated by FFT",
+              end="\r")
+    print()
+    if not per_order:
+        raise RuntimeError("No order overlaps the template well enough "
+                           "for an FFT CCF.")
+    return velocity[keep][order_sort], total / len(per_order), per_order
 
 
 # Hydrogen Balmer and strong Paschen lines [A]. In hot (OBA) stars these
@@ -1612,7 +2501,8 @@ CCF_SEARCH_STEP = 10.0
 
 
 def run_ccf(spectrum_orders, tpl_wl, tpl_flux, rv_min=None, rv_max=None,
-            rv_step=0.5, mode="mask", mask_depth=0.05, keep_balmer=False):
+            rv_step=0.5, mode="mask", mask_depth=0.05, keep_balmer=False,
+            fft_dv=None, fft_lowpass=None):
     """Run the CCF over all echelle orders, combine, and fit the peak.
 
     RV search: when rv_min/rv_max are not given, the search is
@@ -1687,6 +2577,25 @@ def run_ccf(spectrum_orders, tpl_wl, tpl_flux, rv_min=None, rv_max=None,
                     "RV grid; narrow --rv-min/--rv-max or check the "
                     "wavelength overlap with the template.")
             return num_total / w_total, per_order
+    elif mode == "fft":
+        # One transform pair gives the correlation at every velocity, so
+        # the profile is computed once over the full search span and the
+        # two-stage search only ever reads slices of it.
+        dv_fft = fft_dv if fft_dv else max(rv_step, 0.5)
+        print(f"FFT cross-correlation on a log-lambda grid, "
+              f"dv = {dv_fft:g} km/s over ±{span:g} km/s")
+        v_fft, cc_fft, cc_fft_orders = calculate_ccf_fft(
+            spectrum_orders, tpl_wl, tpl_flux, dv_fft, span,
+            lowpass_kms=fft_lowpass)
+
+        def ccf_on(grid):
+            total = np.interp(grid, v_fft, cc_fft)
+            per_order = [np.interp(grid, v_fft, c) for c in cc_fft_orders]
+            peak = np.nanmax(total)
+            if peak > 0:
+                total = total / peak
+                per_order = [c / peak for c in per_order]
+            return total, per_order
     else:
         tpl_norm = tpl_flux / np.nanmax(tpl_flux)
         max_shift = span / C_KMS
@@ -1759,7 +2668,9 @@ def run_ccf(spectrum_orders, tpl_wl, tpl_flux, rv_min=None, rv_max=None,
 
     ccf_total, ccf_orders = ccf_on(rv_grid)
 
-    if mode == "mask":
+    if mode in ("mask", "fft"):
+        # Both are already bandpassed/baseline-free enough for the
+        # Pino et al. (2018) Gaussian-on-a-linear-baseline fit.
         comps, popt = fit_ccf_peak(rv_grid, ccf_total)
     else:
         comps, popt = fit_peak_with_base(rv_grid, ccf_total,
@@ -1930,6 +2841,46 @@ def observatory_coords(name):
     return None
 
 
+DEFAULT_SITE = "paranal"
+AUTO_SITE_LABEL = "Automatic (from the file header)"
+AUTO_SITE_HELP = (
+    "Default: the observatory recorded in the file's own header "
+    "(Neo-Narval LONGITUD/LATITUDE/OBSELEV, ESO TEL GEOLON/..., "
+    "...), and only then paranal")
+
+
+def observing_site(args, path=None):
+    """(site, note): the observatory to use, and one line saying where
+    it came from - to be printed only if a barycentric computation
+    actually happens, so files with no coordinates stay quiet.
+
+    Order: --site when the user gave one, else the position recorded in
+    the file's own header, else DEFAULT_SITE. '--site' defaults to None
+    precisely so that this order can be honoured - an explicit choice
+    always wins, and a file that knows where it was taken never
+    silently inherits somebody else's observatory.
+    """
+    site = getattr(args, "site", None)
+    if site:
+        return site, None
+    path = path or getattr(args, "spectrum", None)
+    found = header_site(path)
+    if found:
+        lon, lat, alt, cards = found
+        name = next((o[0] for o in OBSERVATORIES
+                     if abs(o[1] - lon) < 0.05 and abs(o[2] - lat) < 0.05),
+                    None)
+        return (f"{lon},{lat},{alt}",
+                f"Observatory from the file header ({cards}): "
+                f"lon {lon:+.4f} E, lat {lat:+.4f}, {alt:.0f} m"
+                + (f"  [{name}]" if name else ""))
+    return DEFAULT_SITE, (
+        f"Note: no observatory in the file header; using the default "
+        f"site '{DEFAULT_SITE}'. Give --site if the spectrum was taken "
+        "elsewhere - a wrong site is worth up to 0.46 km/s of "
+        "barycentric velocity.")
+
+
 def earth_location(site):
     """astropy EarthLocation for a barycentric/BJD computation.
 
@@ -1989,8 +2940,26 @@ def min_vsini(resolution):
     return C_KMS / float(resolution)
 
 
+def cr_trim(spec_wl, spec_flux):
+    """Interpolate over unphysical normalized-flux pixels (> 1.2 or < 0)
+    following the cr_trim step of saphires.utils.prepare: cosmic rays,
+    emission spikes and the continuum failures at echelle order edges.
+
+    Returns (flux, n_fixed) — the flux unchanged with n_fixed = 0 when
+    nothing is affected, or when more than half the pixels are (which
+    means the spectrum is not normalized rather than spike-ridden).
+    """
+    bad = (spec_flux > 1.2) | (spec_flux < 0.0)
+    n_bad = int(bad.sum())
+    if not 0 < n_bad < 0.5 * spec_flux.size:
+        return spec_flux, 0
+    spec_flux = spec_flux.copy()
+    spec_flux[bad] = np.interp(spec_wl[bad], spec_wl[~bad], spec_flux[~bad])
+    return spec_flux, n_bad
+
+
 def prepare_template(tpl_wl, tpl_flux, resolution=None, vsini=None,
-                     epsilon=0.6):
+                     epsilon=0.6, verbose=True):
     """Degrade the synthetic template BEFORE the BF/CCF measurement.
 
     Synthetic spectra are effectively of 'infinite' resolution and
@@ -2039,15 +3008,17 @@ def prepare_template(tpl_wl, tpl_flux, resolution=None, vsini=None,
                             + 0.5 * np.pi * epsilon * (1.0 - x[inside] ** 2))
             kern /= kern.sum()
             flux = np.convolve(flux, kern, mode="same")
-            print(f"Template: rotational broadening vsini = {vsini:g} km/s "
-                  f"(epsilon = {epsilon:g}) applied")
+            if verbose:
+                print(f"Template: rotational broadening vsini = "
+                      f"{vsini:g} km/s (epsilon = {epsilon:g}) applied")
 
     if resolution and resolution > 0:
         fwhm_kms = C_KMS / float(resolution)
         sigma_pix = fwhm_kms / 2.35482 / dv
         flux = gaussian_filter1d(flux, sigma_pix)
-        print(f"Template: degraded to R = {resolution:g} "
-              f"(instrumental FWHM = {fwhm_kms:.2f} km/s)")
+        if verbose:
+            print(f"Template: degraded to R = {resolution:g} "
+                  f"(instrumental FWHM = {fwhm_kms:.2f} km/s)")
 
     return grid, flux
 
@@ -2119,15 +3090,11 @@ def compute_bf(spec_wl, spec_flux, tpl_wl, tpl_flux,
     spec_wl, spec_flux = spec_wl[good_s], spec_flux[good_s]
     tpl_wl, tpl_flux = tpl_wl[good_t], tpl_flux[good_t]
 
-    bad = (spec_flux > 1.2) | (spec_flux < 0.0)
-    if 0 < bad.sum() < 0.5 * spec_flux.size:
-        spec_flux = spec_flux.copy()
-        spec_flux[bad] = np.interp(spec_wl[bad], spec_wl[~bad],
-                                   spec_flux[~bad])
-        if verbose:
-            print(f"Note: {bad.sum()} unphysical pixel(s) (flux > 1.2 "
-                  "or < 0: cosmics/emission) interpolated over before "
-                  "the SVD.")
+    spec_flux, n_fixed = cr_trim(spec_wl, spec_flux)
+    if n_fixed and verbose:
+        print(f"Note: {n_fixed} unphysical pixel(s) (flux > 1.2 "
+              "or < 0: cosmics/emission) interpolated over before "
+              "the SVD.")
 
     wl_min = max(spec_wl.min(), tpl_wl.min())
     wl_max = min(spec_wl.max(), tpl_wl.max())
@@ -2993,26 +3960,53 @@ DIAGNOSTIC_LINES = [
 ]
 
 
-def build_rv_model(spec_wl, tpl_wl, tpl_flux, comps):
-    """Model spectrum on the data grid from the measured (observed-frame)
-    RVs: the template shifted per component and combined with the light
-    contributions estimated from the BF areas (amp*sigma)."""
-    if len(comps) == 1:
-        return np.interp(spec_wl, doppler_shift(tpl_wl, comps[0]["rv"]),
-                         tpl_flux)
-    weights = [abs(c.get("amp", 1.0) * c.get("sigma", 1.0)) for c in comps]
+def build_rv_model(spec_wl, tpl_wl, tpl_flux, comps, epsilon=0.6):
+    """Model spectrum on the data grid from the fitted components: the
+    template broadened with each component's own profile, shifted to its
+    measured (observed-frame) RV, and combined with the light
+    contributions estimated from the BF areas (amp*sigma).
+
+    The broadening is what makes the model comparable with the data at
+    all. An observed spectrum is the template convolved with the
+    broadening function, so a synthetic template - effectively of
+    infinite resolution and rotationless - has far sharper and deeper
+    lines than any real spectrum. Comparing it unbroadened understates
+    the model line depths and destroys the pixel-to-pixel correlation
+    whenever the star is rotating: for a vsini ~ 30 km/s star the peak
+    correlation against the raw template is ~0.27, against the broadened
+    one ~0.51. Each component is convolved with the profile the BF fit
+    actually found for it - the rotational profile for a `rot`
+    component, else a Gaussian of the fitted sigma (as a resolution
+    R = c / FWHM), which already contains the instrumental,
+    rotational and macroturbulent broadening together.
+    """
+    parts, weights = [], []
+    for c in comps:
+        sigma = abs(float(c.get("sigma") or 0.0))
+        if c.get("kind") == "rot" and sigma > 0:
+            bw, bfx = prepare_template(tpl_wl, tpl_flux, vsini=sigma,
+                                       epsilon=epsilon, verbose=False)
+        elif sigma > 0:
+            bw, bfx = prepare_template(
+                tpl_wl, tpl_flux, resolution=C_KMS / (2.35482 * sigma),
+                verbose=False)
+        else:
+            bw, bfx = tpl_wl, tpl_flux
+        parts.append(np.interp(spec_wl, doppler_shift(bw, c["rv"]), bfx))
+        weights.append(abs(c.get("amp", 1.0)) * max(sigma, 1e-6))
+    if len(parts) == 1:
+        return parts[0]
     total = sum(weights)
     if total <= 0:
-        weights, total = [1.0] * len(comps), float(len(comps))
+        weights, total = [1.0] * len(parts), float(len(parts))
     model = np.zeros_like(np.asarray(spec_wl, dtype=float))
-    for c, wgt in zip(comps, weights):
-        model += wgt * np.interp(spec_wl, doppler_shift(tpl_wl, c["rv"]),
-                                 tpl_flux)
+    for part, wgt in zip(parts, weights):
+        model += wgt * part
     return model / total
 
 
 def line_check(spec_wl, spec_flux, tpl_wl, tpl_flux, comps,
-               window=6.0, method="BF"):
+               window=6.0, method="BF", epsilon=0.6):
     """Reliability check of the RV solution against real diagnostic
     lines: the observed normalized spectrum is compared with the model
     (template shifted by the measured RVs) in windows around two strong
@@ -3031,7 +4025,15 @@ def line_check(spec_wl, spec_flux, tpl_wl, tpl_flux, comps,
     """
     from matplotlib.figure import Figure
 
-    model = build_rv_model(spec_wl, tpl_wl, tpl_flux, comps)
+    # the BF was solved on the cr_trimmed spectrum, so the check has to
+    # judge the model against those same pixels: an untrimmed -1 clip
+    # sentinel or cosmic spike would otherwise set the measured line
+    # depth and swamp both the RMS and the correlation
+    spec_flux, _ = cr_trim(spec_wl, spec_flux)
+    model = build_rv_model(spec_wl, tpl_wl, tpl_flux, comps, epsilon=epsilon)
+    # half-width of the line core in units of lambda, from the fitted
+    # component width (sigma [km/s] -> dlambda/lambda)
+    core_half = abs(float(comps[0].get("sigma") or 0.0)) / C_KMS
 
     shift = 1.0 + comps[0]["rv"] / C_KMS
     targets = [(name, w0 * shift) for name, w0 in DIAGNOSTIC_LINES
@@ -3059,18 +4061,27 @@ def line_check(spec_wl, spec_flux, tpl_wl, tpl_flux, comps,
         resid = os_ - ms
         rms = float(np.std(resid))
         corr = float(np.corrcoef(os_, ms)[0, 1]) if os_.size > 3 else np.nan
-        d_obs = float(1.0 - np.nanmin(os_))
-        d_mod = float(1.0 - np.nanmin(ms))
+        # Both depths are read at the model's line centre, over the core
+        # of the profile. Taking the observed depth as 1 - min(window)
+        # instead would measure the deepest noise excursion of the whole
+        # window: on a S/N ~ 50 spectrum that lands near 1.0 for every
+        # line, whatever the star, and the ratio then says nothing.
+        i_c = int(np.nanargmin(ms))
+        w_c = float(ws[i_c])
+        half = max(2.0 * float(np.median(np.diff(ws))), 0.5 * core_half * w_c)
+        core = np.abs(ws - w_c) <= half
+        d_obs = float(1.0 - np.median(os_[core]))
+        d_mod = float(1.0 - ms[i_c])
         ratio = d_obs / d_mod if d_mod > 0 else np.nan
         stats.append(dict(name=name, wavelength=w0, rms=rms, corr=corr,
                           depth_obs=d_obs, depth_model=d_mod,
                           depth_ratio=ratio))
 
         ax.plot(ws, os_, "k-", lw=1.0, label="Observed (normalized)")
-        ax.plot(ws, ms, "r-", lw=1.2, alpha=0.8, label="Model (shifted template)")
+        ax.plot(ws, ms, "r-", lw=1.2, alpha=0.8, label="Model (broadened, shifted)")
         ax.plot(ws, resid + 1.0 + 1.2 * max(d_obs, d_mod), "-", color="0.6",
                 lw=0.8, label="Residual (offset)")
-        ax.axvline(w0, color="0.8", ls=":", lw=1)
+        ax.axvline(w_c, color="0.8", ls=":", lw=1)
         ax.set_ylabel("Flux")
         ax.set_title(f"{name}  |  RMS = {rms:.4f}  r = {corr:.3f}  "
                      f"depth O/M = {ratio:.3f}", fontsize=10)
@@ -3201,7 +4212,9 @@ def cmd_ccf(args):
     mfx = np.concatenate([f for _, f in orders])
     srt = np.argsort(mwl)
     check_fig, stats = line_check(mwl[srt], mfx[srt], tpl_wl, tpl_flux,
-                                  [dict(rv=result["rv"])], method="CCF")
+                                  [dict(rv=result["rv"],
+                                        sigma=result.get("sigma"))],
+                                  method="CCF")
     print("Line check (observed vs model):")
     flines.append("# line_check: line  RMS  corr  depth_obs/model\n")
     for s in stats:
@@ -3219,6 +4232,618 @@ def cmd_ccf(args):
     if not getattr(args, "no_save", False):
         save_payload(payload)
     return payload
+
+
+def cosine_bell(n, k1, k2, k3, k4):
+    """Brault & White (1971) cosine-bell bandpass over wavenumbers
+    0..n-1: zero below k1, a raised-cosine ramp up to k2, unity to k3, a
+    raised-cosine ramp down to k4, zero above. Real and even, hence
+    zero-phase — it changes the shape of a profile but never its
+    position, which is what a filter applied before an RV measurement
+    must guarantee."""
+    k = np.arange(n, dtype=float)
+    f = np.zeros(n)
+    f[(k >= k2) & (k <= k3)] = 1.0
+    up = (k >= k1) & (k < k2)
+    f[up] = 0.5 * (1.0 - np.cos(np.pi * (k[up] - k1) / max(k2 - k1, 1e-9)))
+    dn = (k > k3) & (k <= k4)
+    f[dn] = 0.5 * (1.0 + np.cos(np.pi * (k[dn] - k3) / max(k4 - k3, 1e-9)))
+    return f
+
+
+TODCOR_MIN_PIX = 256
+
+
+def load_todcor_engine():
+    """Import the vendored TODCOR engine, with a clear error if missing."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    vendor = os.path.join(here, "vendor")
+    if vendor not in sys.path:
+        sys.path.insert(0, vendor)
+    try:
+        import todcor as _todcor
+    except ImportError as exc:
+        raise SystemExit(
+            "The TODCOR engine is missing. It is vendored at "
+            f"{os.path.join(vendor, 'todcor.py')} (MIT, from "
+            "https://github.com/Simchon/TODCOR); re-add it there.\n"
+            f"({exc})")
+    return _todcor
+
+
+def log_lambda_grid(wl_lo, wl_hi, dv):
+    """Uniform ln-lambda grid with `dv` km/s per pixel.
+
+    TODCOR measures shifts in PIXELS, so a pixel must be a constant
+    velocity: Zucker (2012) states the requirement as n = A ln(lambda)+B.
+    On any other sampling the lag-to-velocity conversion is wrong.
+    """
+    if not (wl_hi > wl_lo > 0):
+        raise SystemExit("Empty wavelength overlap between the spectrum and "
+                         "the templates - check --wave-min/--wave-max and "
+                         "that the templates cover the spectrum.")
+    step = np.log1p(dv / C_KMS)
+    n = int(np.floor((np.log(wl_hi) - np.log(wl_lo)) / step))
+    if n < TODCOR_MIN_PIX:
+        raise SystemExit(f"Only {n} pixels in the common wavelength range at "
+                         f"--dv {dv:g} km/s; TODCOR needs at least "
+                         f"{TODCOR_MIN_PIX}. Widen the range or reduce --dv.")
+    return np.exp(np.log(wl_lo) + np.arange(n) * step)
+
+
+def resample_orders(orders, grid):
+    """Merge echelle orders onto one log-lambda grid.
+
+    Overlapping orders are averaged where they overlap; gaps are filled
+    with the continuum (1.0) so a missing order cannot create a spurious
+    correlation feature. Returns the resampled flux and the fraction of
+    the grid that real data actually covered.
+    """
+    total = np.zeros(grid.size)
+    count = np.zeros(grid.size)
+    for wl, fx in orders:
+        wl = np.asarray(wl, float)
+        fx = np.asarray(fx, float)
+        good = np.isfinite(wl) & np.isfinite(fx)
+        wl, fx = wl[good], fx[good]
+        if wl.size < 2:
+            continue
+        order = np.argsort(wl)
+        wl, fx = wl[order], fx[order]
+        inside = (grid >= wl[0]) & (grid <= wl[-1])
+        if not inside.any():
+            continue
+        total[inside] += np.interp(grid[inside], wl, fx)
+        count[inside] += 1.0
+    covered = count > 0
+    flux = np.ones(grid.size)
+    flux[covered] = total[covered] / count[covered]
+    return flux, float(covered.mean())
+
+
+def clean_for_correlation(wl, flux, poly_order=3, window=200.0):
+    """Make one order fit to correlate: reject spikes, put the continuum
+    at 1.
+
+    A correlation is a variance-weighted comparison, so it is dominated
+    by whatever has the largest amplitude. In a pipeline-normalized
+    echelle order that is not the lines but the leftovers — cosmics,
+    dead pixels, order-edge roll-off — which is why the raw Neo-Narval
+    `st3` orders (flux running -1 to +10 around a continuum near 0.7)
+    give a correlation peak of only ~0.1. Clipping those and re-flattening
+    the continuum is what puts the stellar lines back in charge.
+    """
+    wl = np.asarray(wl, float)
+    flux = np.asarray(flux, float)
+    good = np.isfinite(wl) & np.isfinite(flux)
+    if good.sum() < 32:
+        return wl, np.ones_like(wl)
+    wl, flux = wl[good], flux[good]
+    med = float(np.median(flux))
+    mad = float(np.median(np.abs(flux - med))) * 1.4826
+    if mad <= 0:
+        mad = float(np.std(flux)) or 1.0
+    spike = (flux > med + 5.0 * mad) | (flux < med - 10.0 * mad)
+    flux[spike] = med
+    try:
+        norm = np.asarray(normalize_continuum(wl, flux,
+                                              poly_order=poly_order,
+                                              iterations=20,
+                                              window=window)[0], float)
+        if norm.shape == flux.shape and np.all(np.isfinite(norm)):
+            return wl, norm
+    except Exception:
+        pass
+    return wl, flux / med if med else flux
+
+
+def todcor_lag(args, dv):
+    """Maximum lag m in pixels for a +-max_rv km/s search."""
+    return int(round(float(getattr(args, "max_rv", None) or 200.0) / dv))
+
+
+def extend_log_grid(grid, dv, m):
+    """Continue a log-lambda grid by m pixels at each end.
+
+    The grid is geometric with ratio 1 + dv/c, so extending it is a
+    multiplication - the added pixels carry the same velocity step as the
+    rest, which is what makes the lag-to-velocity conversion valid over
+    the whole search.
+    """
+    ratio = 1.0 + dv / C_KMS
+    return grid[0] * ratio ** np.arange(-m, grid.size + m, dtype=float)
+
+
+def prep_todcor_arrays(args, orders, t1, t2):
+    """Put the observed spectrum and both templates on one log-lambda
+    grid, the templates on a grid extended by m pixels at each end.
+
+    That extension is what selects the EXACT TODCOR: the engine needs
+    len(t1) = len(t2) = len(obs) + 2m to normalize every correlation over
+    the spectral bins that actually overlap at each lag, the way
+    Tonry & Davis (1979) prescribe and saphires follows. Given equal
+    lengths instead, it has no data to slide into the window, warns, and
+    falls back to building the template-template term from a single 1-D
+    correlation with global standard deviations - the "regular" TODCOR.
+    Since that term is precisely what models the blend, the approximation
+    is worst where TODCOR is used: two peaks close together.
+
+    Returns (grid, obs, tpl1, tpl2, dv, coverage, m).
+    """
+    dv = float(getattr(args, "dv", None) or 1.0)
+    m = todcor_lag(args, dv)
+    ratio = 1.0 + dv / C_KMS
+    pad = ratio ** m
+    lo_obs = min(w.min() for w, _ in orders)
+    hi_obs = max(w.max() for w, _ in orders)
+    lo_tpl = max(t1[0].min(), t2[0].min())
+    hi_tpl = min(t1[0].max(), t2[0].max())
+    lo = max(lo_obs, lo_tpl * pad)
+    hi = min(hi_obs, hi_tpl / pad)
+    if args.wave_min:
+        lo = max(lo, args.wave_min * 10.0)
+    if args.wave_max:
+        hi = min(hi, args.wave_max * 10.0)
+    grid = log_lambda_grid(lo + 1.0, hi - 1.0, dv)
+    grid_ext = extend_log_grid(grid, dv, m)
+    if getattr(args, "no_clean", False):
+        use = orders
+    else:
+        use = [clean_for_correlation(w, f) for w, f in orders]
+    obs, covered = resample_orders(use, grid)
+    a1 = np.interp(grid_ext, *t1)
+    a2 = np.interp(grid_ext, *t2)
+    return grid, obs, a1, a2, dv, covered, m
+
+
+def todcor_valid_mask(corr, dv, min_sep=0.0):
+    """Cells of a TODCOR surface that may hold the maximum.
+
+    Two things are excluded.
+
+    The v1 == v2 ridge, because it is degenerate: two components at the
+    same velocity are indistinguishable from one star, so the flux ratio
+    there is not a measurable quantity. With ONE template used for both
+    components - the normal choice for a twin binary - that shows up as
+    hard NaN: t1 and t2 are then bit-identical, so ccf1 == ccf2 and the
+    template-template correlation is exactly 1 on the diagonal, which
+    makes the engine's optimal-alpha expression 0/0
+    (vendor/todcor.py:306, `(ccf1*ccf12 - ccf2)/(ccf2*ccf12 - ccf1)`).
+    numpy's argmax then returns the first NaN and the fit rails at
+    -max_rv. Masking the ridge is not a workaround for that NaN; the
+    ridge was never a legitimate maximum.
+
+    Anything else non-finite, for the same reason.
+
+    `min_sep` widens the excluded band to |v1 - v2| < min_sep, for
+    near-identical templates where the ridge is merely ill-conditioned
+    rather than exactly singular.
+    """
+    n = corr.shape[0]
+    lag = np.arange(n)
+    sep = np.abs(lag[:, None] - lag[None, :]) * dv
+    ok = np.isfinite(corr) & (sep > max(float(min_sep), 0.0))
+    return ok
+
+
+def todcor_peak_index(corr, dv, min_sep=0.0):
+    """Index of the largest legitimate cell of a TODCOR surface."""
+    ok = todcor_valid_mask(corr, dv, min_sep)
+    if not ok.any():
+        raise ValueError("the whole TODCOR surface is masked or non-finite")
+    # Fill with a finite floor rather than -inf: the masked cells can fall
+    # inside the sub-pixel fit patch of a peak that sits against the mask
+    # edge, and infinities there destroy the quadratic fit.
+    floor = float(np.min(corr[ok])) - 1.0
+    masked = np.where(ok, corr, floor)
+    return np.unravel_index(np.argmax(masked), corr.shape), masked
+
+
+def todcor_vel_alpha(engine, obs, t1, t2, m, dv, min_sep=0.0):
+    """`todcorVelAlpha` with the degenerate ridge excluded.
+
+    The vendored routine picks its patch centre with a bare
+    `np.argmax(M)`, which is exactly the step that fails on identical
+    templates, and its own `ccfInput=` shortcut cannot be used to work
+    around it (that branch reads a name it never binds). So the peak
+    search is repeated here on the masked surface and the vendored
+    3-D (v1, v2, alpha) quadratic refinement is then applied around the
+    cell we chose - same fit, same error model as
+    vendor/todcor.py:todcorVelAlpha, only the starting cell differs.
+
+    Returns (vel, alpha, peak, sig) like the vendored function.
+    """
+    d_alpha, alpha_rad, rad = 0.01, 1, 1
+    corr, alpha_m, ccfs = engine.todcor(obs, t1, t2, m, outAll=True)
+    idx, _ = todcor_peak_index(corr, dv, min_sep)
+    idx = np.asarray(idx)
+    shape = np.array(corr.shape)
+    center = shape // 2
+    best_alpha = alpha_m[tuple(idx)]
+
+    if np.any((idx < rad) | (idx >= shape - rad)):
+        return ((idx - center) * dv, best_alpha, corr[tuple(idx)],
+                np.full(3, np.nan))
+
+    a_vec = np.arange(-alpha_rad, alpha_rad + 1)
+    v_vec = np.arange(-rad, rad + 1)
+    grid = np.empty((4, 2 * rad + 1, 2 * rad + 1, 2 * alpha_rad + 1))
+    grid[1] = v_vec[:, None, None]
+    grid[2] = v_vec[None, :, None]
+    grid[3] = a_vec[None, None, :]
+    for i, a in enumerate(a_vec):
+        mi, _ = engine.todcor(ccfInput=ccfs, alpha=best_alpha + a * d_alpha)
+        grid[0, :, :, i] = mi[idx[0] - rad:idx[0] + rad + 1,
+                              idx[1] - rad:idx[1] + rad + 1]
+
+    flat = grid.reshape(4, -1)
+    powers = lambda x, y, z: np.array([x * x, y * y, z * z, x * y, x * z,
+                                       y * z, x, y, z, np.ones_like(x)])
+    A = powers(flat[1], flat[2], flat[3]).T
+    cf, *_ = np.linalg.lstsq(A, flat[0], rcond=None)
+    H = np.array([[2 * cf[0], cf[3], cf[4]],
+                  [cf[3], 2 * cf[1], cf[5]],
+                  [cf[4], cf[5], 2 * cf[2]]])
+    grad = np.array([cf[6], cf[7], cf[8]])
+    try:
+        delta = -np.linalg.solve(H, grad)
+    except np.linalg.LinAlgError:
+        delta = np.zeros(3)
+    if not np.all(np.isfinite(delta)) or np.any(np.abs(delta[:2]) > rad):
+        # The patch is a shoulder, not a maximum - the quadratic extrapolates
+        # far outside it. Happens when --min-sep pushes the search onto the
+        # flank of the excluded ridge. Keep the grid cell instead.
+        delta = np.zeros(3)
+    val = powers(delta[0], delta[1], delta[2]) @ cf
+    try:
+        cov = (1 - min(val, 0.99999) ** 2) / obs.size / val * -np.linalg.inv(H)
+        sig = np.sqrt(np.diag(cov)) * np.array([dv, dv, d_alpha])
+    except np.linalg.LinAlgError:
+        sig = np.full(3, np.nan)
+    return ((idx - center + delta[:2]) * dv, best_alpha + delta[2] * d_alpha,
+            val, sig)
+
+
+def todcor_solve(engine, obs, t1, t2, dv, max_rv, alpha=None, m=None,
+                 min_sep=0.0):
+    """Run TODCOR and return (v1, v2, alpha, peak, errors).
+
+    `todcorVelAlpha` returns 5 values normally but only 4 when its alpha
+    fit degenerates, so both shapes are handled here rather than at the
+    call sites. `m` comes from prep_todcor_arrays, which sized the
+    template padding for it; it is recomputed only for callers that
+    build their arrays themselves. The v1 == v2 ridge is excluded from
+    the peak search either way - see `todcor_valid_mask`.
+    """
+    if m is None:
+        m = int(round(max_rv / dv))
+    if alpha is not None:
+        corr, alpha_m = engine.todcor(obs=obs, t1=t1, t2=t2, m=m, alpha=alpha)
+        _, masked = todcor_peak_index(corr, dv, min_sep)
+        vel, peak, err = engine.todcorVel(masked, obs.size, dv=dv)
+        return (float(vel[0]), float(vel[1]), float(alpha), float(peak),
+                np.asarray(list(err) + [np.nan], float), corr)
+    vel, al, peak, err = todcor_vel_alpha(engine, obs, t1, t2, m, dv, min_sep)
+    err = np.asarray(err, float)
+    corr, _ = engine.todcor(obs=obs, t1=t1, t2=t2, m=m, alpha=float(al))
+    return (float(vel[0]), float(vel[1]), float(al), float(peak), err, corr)
+
+
+def make_todcor_figure(corr, dv, v1, v2, alpha, path, bjd=None, phase=None):
+    """The TODCOR surface as an image, with the two cuts through the
+    maximum. The cuts are the point of the figure: each is what an
+    ordinary 1-D CCF would look like if the OTHER component's velocity
+    were already known, so the peak that a 1-D CCF cannot separate is
+    clean here (Zucker 2012, figs. 3-4)."""
+    from matplotlib.figure import Figure
+    fig = Figure(figsize=(10, 4.6))
+    axes = fig.subplots(1, 3)
+    m = corr.shape[0] // 2
+    ax = np.arange(-m, m + 1) * dv
+    i1 = int(np.argmin(np.abs(ax - v1)))
+    i2 = int(np.argmin(np.abs(ax - v2)))
+
+    a0 = axes[0]
+    im = a0.imshow(corr.T, origin="lower", aspect="auto", cmap="viridis",
+                   extent=[ax[0], ax[-1], ax[0], ax[-1]])
+    a0.plot(v1, v2, "r+", ms=14, mew=2)
+    a0.set_xlabel("primary velocity [km/s]")
+    a0.set_ylabel("secondary velocity [km/s]")
+    a0.set_title(f"TODCOR surface  (alpha = {alpha:.3f})")
+    fig.colorbar(im, ax=a0, fraction=0.046)
+
+    axes[1].plot(ax, corr[:, i2], "k-", lw=1.2)
+    axes[1].axvline(v1, color="r", ls=":")
+    axes[1].set_xlabel("primary velocity [km/s]")
+    axes[1].set_ylabel("correlation")
+    axes[1].set_title(f"cut at v2 = {v2:.2f} km/s")
+
+    axes[2].plot(ax, corr[i1, :], "k-", lw=1.2)
+    axes[2].axvline(v2, color="r", ls=":")
+    axes[2].set_xlabel("secondary velocity [km/s]")
+    axes[2].set_title(f"cut at v1 = {v1:.2f} km/s")
+
+    for a in axes[1:]:
+        a.set_xlim(min(v1, v2) - 120, max(v1, v2) + 120)
+        a.grid(alpha=0.3)
+    sub = f"BJD {bjd:.5f}" if bjd is not None else ""
+    if phase is not None:
+        sub += f"   phase {phase:.4f}"
+    fig.suptitle(os.path.basename(str(path)) + ("   " + sub if sub else ""))
+    fig.tight_layout()
+    return fig
+
+
+def cmd_todcor(args):
+    """Two-dimensional correlation (Zucker & Mazeh 1994) — the method to
+    use when the two CCF peaks blend, which is precisely where fitting
+    two Gaussians to a 1-D correlation stops being trustworthy.
+
+    Needs the SPECTRUM and one template per component: it cannot be run
+    on a pre-computed correlation profile, because it has to correlate
+    the spectrum against a combination of two shifted templates.
+    """
+    engine = load_todcor_engine()
+    if not args.template2 and args.teff2 is None:
+        args.template2 = args.template1     # twin binary: one template, twice
+    if getattr(args, "simulate", False):
+        return todcor_self_calibration(args, engine)
+
+    orders = read_spectrum(args.spectrum, args.format)
+    t1 = load_template(make_args(template=args.template1, teff=args.teff1,
+                                 logg=args.logg, feh=args.feh))
+    t2 = load_template(make_args(template=args.template2, teff=args.teff2,
+                                 logg=args.logg, feh=args.feh))
+    res = get_resolution(args)
+    t1 = prepare_template(t1[0], t1[1], resolution=res, vsini=args.vsini1,
+                          epsilon=args.epsilon)
+    t2 = prepare_template(t2[0], t2[1], resolution=res, vsini=args.vsini2,
+                          epsilon=args.epsilon)
+
+    grid, obs, a1, a2, dv, covered, m = prep_todcor_arrays(args, orders,
+                                                           t1, t2)
+    print(f"Common log-lambda grid: {grid[0]:.1f} - {grid[-1]:.1f} A, "
+          f"{grid.size} px at {dv:g} km/s/px "
+          f"({100 * covered:.0f}% covered by real data); templates "
+          f"extended by {m} px on each side (exact TODCOR)")
+    if covered < 0.5:
+        print("WARNING: less than half the grid is covered by the spectrum; "
+              "the gaps are filled with continuum and dilute the "
+              "correlation. Restrict --wave-min/--wave-max to a covered "
+              "region.")
+
+    twin = np.array_equal(a1, a2)
+    if twin:
+        print("Both components use the same template: the surface is exactly "
+              "symmetric under (v1, v2, alpha) -> (v2, v1, 1/alpha), so the "
+              "component LABELS are a convention, not a measurement - read "
+              "alpha (alpha < 1 = component 1 is the brighter star).")
+    v1, v2, alpha, peak, err, corr = todcor_solve(
+        engine, obs, a1, a2, dv, args.max_rv, alpha=args.alpha, m=m,
+        min_sep=getattr(args, "todcor_min_sep", 0.0) or 0.0)
+
+    ctx = get_target_context(args)
+    vbary, bjd, phase = ctx["vbary"], ctx["bjd"], ctx["phase"]
+    apply_bary = not getattr(args, "no_bary", False)
+    rv1 = apply_barycentric(v1, vbary) if apply_bary else v1
+    rv2 = apply_barycentric(v2, vbary) if apply_bary else v2
+    tag = "" if apply_bary else "   (no barycentric correction applied)"
+
+    lines = ["================ TODCOR RESULT ================",
+             f"Spectrum            : {args.spectrum}",
+             f"Template 1 (primary): {args.template1}",
+             f"Template 2 (second.): {args.template2}",
+             f"Method              : 2-D correlation against "
+             "t1(v1) + alpha*t2(v2) (Zucker & Mazeh 1994; Zucker 2012)",
+             f"Grid                : {grid[0]:.1f}-{grid[-1]:.1f} A, "
+             f"{grid.size} px, {dv:g} km/s/px, |v| <= {args.max_rv:g} km/s",
+             f"Normalization       : exact TODCOR - every correlation "
+             f"normalized over the {grid.size} overlapping bins "
+             "(Tonry & Davis 1979 convention, as in saphires)",
+             f"Light ratio alpha   : {alpha:.4f}"
+             + (" (fixed by --alpha)" if args.alpha is not None
+                else f" (fitted, +-{err[2]:.4f})"
+                if np.isfinite(err[2]) else " (fitted)"),
+             f"Peak correlation    : {peak:.4f}"]
+    if bjd is not None:
+        lines.append(f"BJD = {bjd:.6f}"
+                     + (f"   phase = {phase:.4f}" if phase is not None else ""))
+    lines.append(f"Component 1: RV = {rv1:.4f} ± {err[0]:.4f} km/s" + tag)
+    lines.append(f"Component 2: RV = {rv2:.4f} ± {err[1]:.4f} km/s" + tag)
+    lines.append(f"Separation  : {v2 - v1:.4f} km/s")
+    if np.isfinite(alpha) and alpha > 0:
+        bright, faint = ((1, rv1), (2, rv2)) if alpha < 1 else ((2, rv2),
+                                                                (1, rv1))
+        lines.append(f"Brighter    : component {bright[0]} "
+                     f"(RV = {bright[1]:.2f} km/s), by a factor "
+                     f"{max(alpha, 1 / alpha):.2f} in flux")
+    if twin:
+        lines.append("NOTE: one template was used for both components, so "
+                     "1/2 is a label, not an identification - the surface is "
+                     "exactly mirror-symmetric. Compare 'Brighter' between "
+                     "epochs, never the component number.")
+    if apply_bary:
+        lines.append(f"v_bary = {vbary:+.4f} km/s (applied)")
+    elif vbary:
+        lines.append(f"v_bary = {vbary:+.4f} km/s "
+                     "(for information only, not applied)")
+    if args.alpha is None and not (0.02 <= alpha <= 50.0):
+        lines.append(f"WARNING: the fitted light ratio {alpha:.3g} is "
+                     "implausible. In the self-calibration tests a badly "
+                     "wrong alpha is the signature of a template that does "
+                     "not match the component - check Teff/vsini before "
+                     "trusting these RVs.")
+    lines.append("===============================================")
+    summary = "\n".join(lines)
+    print("\n" + summary)
+
+    flines = [f"# spectrum : {args.spectrum}\n",
+              f"# template1 : {args.template1}\n",
+              f"# template2 : {args.template2}\n",
+              "# method : TODCOR 2-D correlation (Zucker & Mazeh 1994, "
+              "ApJ 420, 806)\n",
+              f"# grid : {grid[0]:.4f}-{grid[-1]:.4f} A, {grid.size} px, "
+              f"{dv:g} km/s/px, max|v| = {args.max_rv:g} km/s\n",
+              f"# todcor variant : exact (templates padded by {m} px per "
+              "side; overlap-window normalization)\n",
+              f"# data coverage of the grid : {covered:.4f}\n",
+              f"# alpha : {alpha:.6f}"
+              + (" (fixed)\n" if args.alpha is not None
+                 else f"  err {err[2]:.6f}\n"),
+              f"# peak correlation : {peak:.6f}\n",
+              "# barycentric correction applied: "
+              + ("yes" if apply_bary else "no") + "\n"]
+    if not apply_bary:
+        flines.append(f"# v_bary [km/s] = {vbary:.5f}  "
+                      "(computed for information only; NOT applied)\n")
+    flines.append("# component  BJD  phase  RV[km/s]  RV_err[km/s]\n")
+    for k, (rv, e) in enumerate(((rv1, err[0]), (rv2, err[1])), start=1):
+        flines.append(f"{k}  {bjd if bjd is not None else 'nan'}  "
+                      f"{f'{phase:.5f}' if phase is not None else 'nan'}  "
+                      f"{rv:.5f}  {e:.5f}\n")
+
+    outfile = args.output or "result_TODCOR.txt"
+    plotfile = args.plot or "result_TODCOR.png"
+    fig = make_todcor_figure(corr, dv, v1, v2, alpha, args.spectrum,
+                             bjd=bjd, phase=phase)
+    payload = dict(method="TODCOR", fig=fig, text=summary, output=outfile,
+                   plot=plotfile, file_text="".join(flines),
+                   figs=[(fig, plotfile)], saved=False)
+    if not getattr(args, "no_save", False):
+        save_payload(payload)
+    return payload
+
+
+def todcor_self_calibration(args, engine):
+    """Torres-style check (Zucker 2012, sect. 3, after Torres et al.
+    2009): build NOISELESS composite spectra from the two templates at
+    known velocities, run TODCOR on them, and report the residual bias.
+
+    This is the honest way to decide whether a template pair is good
+    enough, and how far the method can be trusted at the separations a
+    given system actually shows — no observed spectrum is involved.
+    """
+    from scipy.ndimage import shift as ndshift
+    t1 = load_template(make_args(template=args.template1, teff=args.teff1,
+                                 logg=args.logg, feh=args.feh))
+    t2 = load_template(make_args(template=args.template2, teff=args.teff2,
+                                 logg=args.logg, feh=args.feh))
+    res = get_resolution(args)
+    t1 = prepare_template(t1[0], t1[1], resolution=res, vsini=args.vsini1,
+                          epsilon=args.epsilon)
+    t2 = prepare_template(t2[0], t2[1], resolution=res, vsini=args.vsini2,
+                          epsilon=args.epsilon)
+
+    dv = float(args.dv or 1.0)
+    m = todcor_lag(args, dv)
+    pad = (1.0 + dv / C_KMS) ** m
+    lo = max(t1[0].min(), t2[0].min()) * pad + 1.0
+    hi = min(t1[0].max(), t2[0].max()) / pad - 1.0
+    if args.wave_min:
+        lo = max(lo, args.wave_min * 10.0)
+    if args.wave_max:
+        hi = min(hi, args.wave_max * 10.0)
+    grid = log_lambda_grid(lo, hi, dv)
+    grid_ext = extend_log_grid(grid, dv, m)
+    a1 = np.interp(grid_ext, *t1)
+    a2 = np.interp(grid_ext, *t2)
+
+    alpha = args.alpha if args.alpha is not None else 0.6
+    v1 = 0.0
+    seps = ([float(s) for s in args.sim_sep] if args.sim_sep
+            else [10., 15., 20., 25., 30., 40., 60., 90.])
+
+    lines = ["=========== TODCOR SELF-CALIBRATION ===========",
+             f"Template 1 : {args.template1}",
+             f"Template 2 : {args.template2}",
+             f"Grid       : {grid[0]:.1f}-{grid[-1]:.1f} A, {grid.size} px, "
+             f"{dv:g} km/s/px",
+             f"Composite  : t1(v1) + {alpha:g} x t2(v2), noiseless",
+             "Method     : Torres et al. (2009) style - measure the bias of "
+             "TODCOR on spectra it should fit exactly",
+             "",
+             f"{'sep_true':>9}{'v1_rec':>9}{'v2_rec':>9}{'bias1':>8}"
+             f"{'bias2':>8}{'sep_err':>9}{'alpha':>8}{'swap':>6}"]
+    rows = []
+    swaps = 0
+    twin = np.array_equal(a1, a2)
+    for sep in seps:
+        v2 = v1 + sep
+        obs = (ndshift(a1, v1 / dv, mode="grid-wrap", order=3)
+               + alpha * ndshift(a2, v2 / dv, mode="grid-wrap", order=3))
+        obs = obs[m:obs.size - m] / (1.0 + alpha)
+        try:
+            r1, r2, al, _peak, _err, _corr = todcor_solve(
+                engine, obs, a1, a2, dv, args.max_rv, m=m)
+        except Exception as exc:
+            lines.append(f"{sep:9.1f}   FAILED: {exc}")
+            continue
+        # The surface has a mirror maximum at (v2, v1, 1/alpha); with equal
+        # templates it is exactly as high, so which component gets label 1
+        # is decided by rounding noise. Score the bias on the pair, not on
+        # the labels, and count the flip separately - otherwise a perfectly
+        # recovered pair is reported as a bias of one whole separation.
+        flip = abs(r1 - v1) + abs(r2 - v2) > abs(r1 - v2) + abs(r2 - v1)
+        if flip:
+            r1, r2, al = r2, r1, (1.0 / al if al else np.inf)
+            swaps += 1
+        rows.append((sep, r1 - v1, r2 - v2))
+        lines.append(f"{sep:9.1f}{r1:9.2f}{r2:9.2f}{r1 - v1:+8.2f}"
+                     f"{r2 - v2:+8.2f}{(r2 - r1) - sep:+9.2f}{al:8.3f}"
+                     f"{'yes' if flip else '-':>6}")
+    if rows:
+        worst = max(abs(b) for _, b1, b2 in rows for b in (b1, b2))
+        lines += ["",
+                  f"Largest bias over the tested separations: {worst:.2f} "
+                  "km/s. This is the floor set by the templates and the "
+                  "grid alone - the real measurement can only be worse.",
+                  "A bias that grows at small separations, or an alpha far "
+                  "from the input, means the template pair is wrong for "
+                  "this system."]
+        if swaps:
+            lines.append(
+                f"'swap' = the mirror solution won at {swaps} of "
+                f"{len(rows)} separations: v1/v2 came back exchanged and "
+                "alpha inverted. Velocities above are re-matched to the "
+                "input pair; the raw run had them the other way round."
+                + (" With one template for both components this is expected "
+                   "at every separation - the two maxima are exactly equal, "
+                   "so the label is a coin toss and only alpha identifies "
+                   "the brighter star." if twin else
+                   " Between epochs of a real system this is what makes "
+                   "component labels jump; identify components by alpha or "
+                   "by orbital phase, not by the label."))
+    lines.append("===============================================")
+    summary = "\n".join(lines)
+    print("\n" + summary)
+    outfile = args.output or "result_TODCOR_selfcal.txt"
+    if not getattr(args, "no_save", False):
+        with open(outfile, "w") as f:
+            f.write(summary + "\n")
+        print(f"Results written: {outfile}")
+    return dict(method="TODCOR-selfcal", text=summary, output=outfile,
+                fig=None, figs=[], file_text=summary + "\n",
+                saved=not getattr(args, "no_save", False))
 
 
 def solve_bf(args):
@@ -3446,7 +5071,7 @@ def cmd_bf(args):
                          bary_applied=apply_bary)
 
     check_fig, stats = line_check(spec_wl, spec_flux, tpl_wl, tpl_flux,
-                                  comps, method="BF")
+                                  comps, method="BF", epsilon=args.epsilon)
     print("Line check (observed vs model):")
     flines.append("# line_check: line  RMS  corr  depth_obs/model\n")
     for s in stats:
@@ -3507,6 +5132,17 @@ def cmd_normalize(args):
     print(f"Normalizing {args.spectrum} "
           f"({desc}, {args.iterations} iterations"
           + (f", {args.window:g} nm windows" if window_a else "") + ")...")
+    # A Libre-ESpRIT level-2/3 'Intensity' column has already been
+    # divided by the pipeline continuum, so this run re-flattens what is
+    # left (usually harmless, sometimes useful) rather than normalizing a
+    # raw spectrum. Worth saying, because the step is not needed at all
+    # for ccf/bf/todcor, which read these files directly.
+    if neonarval_header_info(args.spectrum):
+        print("  Note: this is a Libre-ESpRIT product - its 'Intensity' "
+              "column is ALREADY continuum-normalized by the DRS (the "
+              "divisor is the 'Continuum' column). ccf/bf/todcor read "
+              "the file directly; normalizing again only re-flattens "
+              "what the pipeline left behind.")
     wl, nf, diag = normalize_spectrum_file(
         args.spectrum, args.format, poly_order=args.poly_order,
         iterations=args.iterations, low_clip=args.low_clip,
@@ -3537,10 +5173,20 @@ def cmd_normalize(args):
         hdr_lines.append(f"DATE-OBS = {meta['obstime']}")
     if meta["exptime"] is not None:
         hdr_lines.append(f"EXPTIME = {meta['exptime']}")
+    if src.get("epoch_note"):
+        hdr_lines.append(str(src["epoch_note"]))
     if meta["ra"] is not None:
         hdr_lines.append(f"RA = {meta['ra']:.6f}")
     if meta["dec"] is not None:
         hdr_lines.append(f"DEC = {meta['dec']:.6f}")
+    # Keep the observatory with the spectrum: without it the normalized
+    # copy would fall back to the default site and quietly lose up to
+    # 0.46 km/s of barycentric velocity.
+    site_src = header_site(args.spectrum)
+    if site_src:
+        lon, lat, alt, _cards = site_src
+        hdr_lines += [f"SITELON = {lon:.4f}", f"SITELAT = {lat:.4f}",
+                      f"SITEALT = {alt:.1f}"]
 
     # Carry the barycentric-frame evidence of the source file into the
     # output header so barycheck (and the batch header check) still
@@ -3881,14 +5527,15 @@ def cmd_batch(args):
             have_coords = ra_i is not None and dec_i is not None
             if obstime is not None:
                 _, is_jd = parse_time_input(obstime)
+                site_i, _ = observing_site(args, path=path)
                 if is_jd:
                     bjd = float(str(obstime).strip())
                 elif have_coords:
-                    bjd = compute_bjd(obstime, ra_i, dec_i, args.site,
+                    bjd = compute_bjd(obstime, ra_i, dec_i, site_i,
                                       exptime=hdr.get("exptime"))
                 if have_coords:
                     vbary = barycentric_correction(ra_i, dec_i, obstime,
-                                                   args.site)
+                                                   site_i)
             phase = (orbital_phase(bjd, args.t0, args.period)
                      if np.isfinite(bjd) and args.t0 is not None
                      and args.period else None)
@@ -4051,12 +5698,31 @@ def cmd_header(args):
              + (f"{info['ra']:.5f}" if info['ra'] is not None else "-"),
              f"Dec [deg]: "
              + (f"{info['dec']:.5f}" if info['dec'] is not None else "-"),
-             f"EXPTIME  : {info['exptime']}"]
+             f"EXPTIME  : {info['exptime']}"
+             + (f"   (DATE-OBS is already the mid-time; EXPTIME of one "
+                f"sub-exposure = {info['neonarval']['exptime']:g} s)"
+                if (info.get("neonarval") or {}).get("exptime") else "")]
+    if info.get("epoch_note"):
+        lines.append(f"Epoch    : {info['epoch_note']}")
+    site_src = header_site(args.spectrum)
+    if site_src:
+        lon, lat, alt, cards = site_src
+        lines.append(f"Site     : lon {lon:+.4f} E, lat {lat:+.4f}, "
+                     f"{alt:.0f} m   (from {cards})")
     if info["ra"] is not None and info["obstime"]:
         try:
+            site, _ = observing_site(args)
             bjd = compute_bjd(info["obstime"], info["ra"], info["dec"],
-                              args.site, exptime=info["exptime"])
+                              site, exptime=info["exptime"])
             lines.append(f"BJD_TDB  : {bjd:.6f}  (mid-exposure)")
+            vb = barycentric_correction(info["ra"], info["dec"],
+                                        info["obstime"], site)
+            lines.append(f"v_bary   : {vb:+.4f} km/s  (computed here)")
+            chk0 = barycentric_frame_check(args.spectrum)
+            for msg in crosscheck_pipeline_bary(
+                    args.spectrum, vb, bjd,
+                    berv_hdr=chk0.get("berv"))["messages"]:
+                lines.append(msg.strip())
         except Exception as exc:
             lines.append(f"BJD_TDB  : could not be computed ({exc})")
     try:
@@ -4193,7 +5859,12 @@ def _bary_match_value_key(norm):
     return None, None
 
 
-def _bary_verdict(frame, flag_applied, flag_skipped, phase3):
+def _bary_verdict(frame, flag_applied, flag_skipped, phase3,
+                  topocentric_rule=False):
+    """`topocentric_rule`: a known pipeline that leaves the wavelengths
+    in the observer frame. It ranks below the explicit frame keywords
+    and the processing switches (a file that says what it is wins over
+    what its pipeline usually does) but above everything else."""
     if frame is not None and any(frame.startswith(v)
                                  for v in BARY_FRAME_CORRECTED):
         return "corrected"
@@ -4203,6 +5874,8 @@ def _bary_verdict(frame, flag_applied, flag_skipped, phase3):
     if flag_applied:
         return "corrected"
     if flag_skipped:
+        return "not-corrected"
+    if topocentric_rule:
         return "not-corrected"
     if phase3:
         return "corrected"
@@ -4335,6 +6008,7 @@ def _barycentric_check_fits(path):
     instrument = None
     phase3 = False
     pipeline_rule = False
+    pipeline_topocentric = False
     flag_applied = False
     flag_skipped = False
     evidence = []
@@ -4346,7 +6020,24 @@ def _barycentric_check_fits(path):
         for ihdu, hdu in enumerate(hdul):
             hdr = hdu.header
             if instrument is None:
-                instrument = hdr.get("INSTRUME")
+                # Neo-Narval writes INSTRUM, not the usual INSTRUME
+                instrument = hdr.get("INSTRUME") or hdr.get("INSTRUM")
+            # Libre-ESpRIT (NARVAL / Neo-Narval / ESPaDOnS) records BERV
+            # and BTLA but leaves the wavelength scale in the observer
+            # frame. Verified on the data rather than assumed: telluric
+            # lines (O2 A band) of two epochs 18.5 km/s apart in BERV
+            # coincide to 0.2 km/s, where a corrected scale would put
+            # them 18.5 km/s apart.
+            if "NARVAL" in str(hdr.get("INSTRUM")
+                               or hdr.get("INSTRUME") or "").upper():
+                pipeline_topocentric = True
+                evidence.append(
+                    f"HDU{ihdu} INSTRUM = "
+                    f"{hdr.get('INSTRUM') or hdr.get('INSTRUME')}: the "
+                    "Libre-ESpRIT pipeline computes BERV/BTLA but does "
+                    "NOT shift the wavelengths - the scale is "
+                    "topocentric and the correction must be applied "
+                    "(checked on telluric lines, see the manual)")
             for key in BARY_FRAME_KEYS:
                 val = hdr.get(key)
                 if val and frame is None:
@@ -4440,7 +6131,8 @@ def _barycentric_check_fits(path):
                                 "standard)")
 
     verdict = _bary_verdict(frame, flag_applied, flag_skipped,
-                            phase3 or pipeline_rule)
+                            phase3 or pipeline_rule,
+                            topocentric_rule=pipeline_topocentric)
     return dict(verdict=verdict, frame=frame, berv=berv,
                 instrument=instrument, evidence=evidence)
 
@@ -4699,7 +6391,7 @@ def make_args(**overrides):
     base = dict(spectrum=None, format="auto", template=None,
                 teff=None, logg=4.5, feh=0.0,
                 wave_min=None, wave_max=None,
-                object=None, ra=None, dec=None, obstime=None, site="paranal",
+                object=None, ra=None, dec=None, obstime=None, site=None,
                 no_bary=False,
                 t0=None, period=None, varastro=False, t0_to_bjd=False,
                 plot=None, output=None,
@@ -4711,7 +6403,14 @@ def make_args(**overrides):
                 gamma=None, degrade_template=False,
                 spectrograph=None, resolution=None, vsini=None, epsilon=0.6,
                 poly_order=3, iterations=20, low_clip=1.0, high_clip=4.0,
-                window=20.0, fit_method="poly", no_save=False)
+                window=20.0, fit_method="poly", no_save=False,
+                # todcor: one template per component
+                template1=None, template2=None, teff1=None, teff2=None,
+                vsini1=None, vsini2=None, max_rv=200.0, alpha=None,
+                no_clean=False, simulate=False, sim_sep=None,
+                # deliberately not `min_sep` - that is BF's, and defaults
+                # to 30 km/s, which would silently gate the TODCOR peak
+                todcor_min_sep=0.0)
     base.update(overrides)
     return argparse.Namespace(**base)
 
@@ -4768,8 +6467,9 @@ def _ask_target(kw):
                             "DD/MM/YY; empty: read from FITS header)",
                             allow_empty=True)
         kw["site"] = ask("Observatory (built-in name paranal/lasilla/ctio/"
-                         "ohp/tug/kreiken/lco/... or 'lonE,lat,alt')",
-                         default="tug")
+                         "ohp/tug/kreiken/lco/... or 'lonE,lat,alt'; "
+                         "empty: read it from the file header)",
+                         allow_empty=True)
         already_bary = False
         try:
             if kw.get("spectrum"):
@@ -4983,13 +6683,16 @@ def run_gui():
     Sections, top to bottom: target (SIMBAD lookup with manual-coordinate
     fallback, for the barycentric correction), input files (with a
     'Normalize raw...' dialog for un-normalized spectra), wavelength
-    range, a 'Method...' button opening a small dialog (CCF or BF; for
-    BF also the components and the mode: 'with assumptions' shows the
-    smoothed BF with one click so per-component RV/Amp/Sigma can be read
-    off and typed in, 'automatic component search' disables all
-    assumption inputs), Run, result text and the embedded fit plot. The
-    analysis core is shared with the CLI (cmd_ccf/cmd_bf); the result
-    files (result_*.txt, result_*.png) are written to disk as usual.
+    range, a 'Method...' button opening a small dialog (CCF, BF or
+    TODCOR; for BF also the components and the mode: 'with
+    assumptions' shows the smoothed BF with one click so per-component
+    RV/Amp/Sigma can be read off and typed in, 'automatic component
+    search' disables all assumption inputs; TODCOR reveals a second
+    template row in the main window and can run its self-calibration
+    without any spectrum), Run, result text and the embedded fit plot.
+    The analysis core is shared with the CLI (cmd_ccf/cmd_bf/
+    cmd_todcor); the result files (result_*.txt, result_*.png) are
+    written to disk as usual.
     """
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox
@@ -5016,7 +6719,7 @@ def run_gui():
     target_var = tk.StringVar()
     ra_var, dec_var = tk.StringVar(), tk.StringVar()
     time_var = tk.StringVar()
-    site_var = tk.StringVar(value=OBSERVATORIES[0][0])
+    site_var = tk.StringVar(value=AUTO_SITE_LABEL)
     custom_site = {"coords": None}   # (lonE, lat, alt) entered by the user
 
     trow = ttk.LabelFrame(main, text="Target (optional, for barycentric "
@@ -5067,7 +6770,7 @@ def run_gui():
                                                           pady=(4, 0))
     ttk.Label(trow, text="Observatory:").grid(row=1, column=4, sticky="e",
                                               pady=(4, 0))
-    obs_choices = [o[0] for o in OBSERVATORIES]
+    obs_choices = [AUTO_SITE_LABEL] + [o[0] for o in OBSERVATORIES]
 
     def on_observatory_selected(_e=None):
         custom_site["coords"] = None      # a built-in choice replaces custom
@@ -5127,13 +6830,18 @@ def run_gui():
 
     def resolve_site():
         """Observatory string for the analysis: the stored custom
-        coordinates when a custom site was entered, else the selected
-        built-in observatory name."""
+        coordinates when a custom site was entered, the selected built-in
+        observatory name otherwise - and None while the selection is
+        'Automatic', which lets the analysis read the observatory out of
+        the file's own header (and fall back to the default site only if
+        the header has none)."""
         if custom_site["coords"] and site_var.get().startswith("Custom"):
             lon, lat, alt = custom_site["coords"]
             return f"{lon},{lat},{alt}"
         name = site_var.get().strip()
-        return name if observatory_coords(name) else "paranal"
+        if name == AUTO_SITE_LABEL:
+            return None
+        return name if observatory_coords(name) else None
 
     t0_var, per_var = tk.StringVar(), tk.StringVar()
     t0_unit_var = tk.StringVar(value="BJD")
@@ -5208,8 +6916,10 @@ def run_gui():
 
     spec_var = tk.StringVar()
     tpl_var = tk.StringVar()
+    spec_label_var = tk.StringVar(value="Normalized spectrum:")
 
-    ttk.Label(main, text="Normalized spectrum:").grid(row=2, column=0, sticky="w")
+    ttk.Label(main, textvariable=spec_label_var).grid(row=2, column=0,
+                                                      sticky="w")
     ttk.Entry(main, textvariable=spec_var, width=48).grid(row=2, column=1,
                                                           sticky="ew", padx=4)
     fbtns = ttk.Frame(main)
@@ -5239,14 +6949,58 @@ def run_gui():
             bary_chk.configure(text="Apply barycentric correction",
                                state="normal")
 
-    spec_var.trace_add("write", update_bary_guard)
+    def update_profile_hint(*_):
+        """Say so, next to the file, when the chosen file is a correlation
+        profile rather than a spectrum — the output of a correlation, not
+        an input any method here can use."""
+        if correlation_profile_note(spec_var.get().strip()):
+            profile_hint_var.set("correlation profile (velocity axis) — "
+                                 "not a spectrum: use the spectrum that "
+                                 "went into it")
+        else:
+            profile_hint_var.set("")
 
-    ttk.Label(main, text="Synthetic spectrum:").grid(row=3, column=0, sticky="w")
-    ttk.Entry(main, textvariable=tpl_var, width=48).grid(row=3, column=1,
-                                                         sticky="ew", padx=4)
-    ttk.Button(main, text="Browse...",
-               command=lambda: browse(tpl_var, "Select synthetic spectrum")
-               ).grid(row=3, column=2, sticky="w")
+    profile_hint_var = tk.StringVar(value="")
+    ttk.Label(main, textvariable=profile_hint_var, foreground="#b06000",
+              wraplength=200
+              ).grid(row=2, column=3, sticky="w", padx=(8, 0))
+
+    spec_var.trace_add("write", update_bary_guard)
+    spec_var.trace_add("write", update_profile_hint)
+
+    tpl_label = ttk.Label(main, text="Synthetic spectrum:")
+    tpl_label.grid(row=3, column=0, sticky="w")
+    tpl_entry = ttk.Entry(main, textvariable=tpl_var, width=48)
+    tpl_entry.grid(row=3, column=1, sticky="ew", padx=4)
+    tpl_browse = ttk.Button(main, text="Browse...",
+                            command=lambda: browse(tpl_var,
+                                                   "Select synthetic spectrum"))
+    tpl_browse.grid(row=3, column=2, sticky="w")
+
+    # Second template: TODCOR correlates against t1(v1) + alpha*t2(v2), so
+    # it needs one template per component. The row is shown only for that
+    # method; every other method uses the single template above.
+    tpl2_var = tk.StringVar()
+    tpl2_label = ttk.Label(main,
+                           text="Template 2 (empty = same as template 1):")
+    tpl2_entry = ttk.Entry(main, textvariable=tpl2_var, width=48)
+    tpl2_browse = ttk.Button(
+        main, text="Browse...",
+        command=lambda: browse(tpl2_var, "Select the secondary template"))
+    tpl2_row = [(tpl2_label, dict(row=6, column=0, sticky="w")),
+                (tpl2_entry, dict(row=6, column=1, sticky="ew", padx=4)),
+                (tpl2_browse, dict(row=6, column=2, sticky="w"))]
+    for _w, _opts in tpl2_row:
+        _w.grid(**_opts)
+
+    def show_tpl2(show):
+        for w, opts in tpl2_row:
+            if show:
+                w.grid(**opts)
+            else:
+                w.grid_remove()
+
+    show_tpl2(False)
 
     wmin_var, wmax_var = tk.StringVar(), tk.StringVar()
     res_var, vsini_var = tk.StringVar(), tk.StringVar()
@@ -5320,10 +7074,39 @@ def run_gui():
     guess_amp_var = tk.StringVar()
     guess_sigma_var = tk.StringVar()
     method_summary_var = tk.StringVar()
+    # TODCOR: two templates, a log-lambda grid in km/s per pixel
+    tod_dv_var = tk.StringVar(value="1.0")
+    tod_maxrv_var = tk.StringVar(value="200")
+    tod_alpha_var = tk.StringVar()
+    tod_vsini2_var = tk.StringVar()
+    tod_clean_var = tk.BooleanVar(value=True)
+    tod_sim_var = tk.BooleanVar(value=False)
+    tod_simsep_var = tk.StringVar()
 
     def update_method_summary():
+        """Also switches the file section: TODCOR needs a second
+        template, every other method a single one."""
+        show_tpl2(method_var.get() == "TODCOR")
+        spec_label_var.set("Normalized spectrum:")
+        for w in (tpl_entry, tpl_browse):
+            w.configure(state="normal")
+        tpl_label.configure(text="Synthetic spectrum:", foreground="")
         if method_var.get() == "CCF":
             method_summary_var.set("CCF (single star)")
+        elif method_var.get() == "TODCOR":
+            tpl_label.configure(text="Template 1 (primary):", foreground="")
+            if tod_sim_var.get():
+                method_summary_var.set(
+                    "TODCOR self-calibration (noiseless composites from "
+                    "the two templates; no spectrum used)")
+            else:
+                method_summary_var.set(
+                    f"TODCOR, 2-D correlation, "
+                    f"{_f(tod_dv_var, 1.0):g} km/s/px, "
+                    f"|v| <= {_f(tod_maxrv_var, 200.0):g} km/s, "
+                    + ("alpha fixed at "
+                       f"{_f(tod_alpha_var):g}" if tod_alpha_var.get().strip()
+                       else "alpha fitted"))
         else:
             mode = ("with assumptions" if bf_mode_var.get() == "assume"
                     else "automatic component search")
@@ -5379,7 +7162,8 @@ def run_gui():
             note = ("Preview only - nothing written to disk; press Run "
                     "for the full fit.")
         elif payload.get("saved", True):
-            note = f"Saved: {payload['output']}, {payload['plot']}"
+            note = "Saved: " + ", ".join(
+                [payload["output"]] + [n for _, n in payload.get("figs", [])])
         else:
             note = ("Results NOT saved yet - press 'Save' to write the "
                     "result files.")
@@ -5390,6 +7174,10 @@ def run_gui():
 
         if canvas_holder["canvas"] is not None:
             canvas_holder["canvas"].get_tk_widget().destroy()
+            canvas_holder["canvas"] = None
+        # The TODCOR self-calibration is a table, not a fit: no figure.
+        if payload.get("fig") is None:
+            return
         canvas = FigureCanvasTkAgg(payload["fig"], master=plot_frame)
         canvas.draw()
         canvas.get_tk_widget().pack(fill="both", expand=True)
@@ -5508,14 +7296,16 @@ def run_gui():
 
         ccf_sec = ttk.LabelFrame(frm, text="CCF settings", padding=6)
         bf_sec = ttk.LabelFrame(frm, text="BF settings", padding=6)
+        tod_sec = ttk.LabelFrame(
+            frm, text="TODCOR settings (one template per component)",
+            padding=6)
 
         def refresh_method():
-            if method_var.get() == "CCF":
-                bf_sec.grid_remove()
-                ccf_sec.grid(row=1, column=0, sticky="ew", pady=(6, 0))
-            else:
-                ccf_sec.grid_remove()
-                bf_sec.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+            for sec in (ccf_sec, bf_sec, tod_sec):
+                sec.grid_remove()
+            {"CCF": ccf_sec, "BF": bf_sec,
+             "TODCOR": tod_sec}[method_var.get()].grid(
+                row=1, column=0, sticky="ew", pady=(6, 0))
             update_method_summary()
 
         ttk.Radiobutton(mrow, text="CCF (single star)", variable=method_var,
@@ -5523,6 +7313,9 @@ def run_gui():
                         ).pack(side="left", padx=8)
         ttk.Radiobutton(mrow, text="BF (binary/multiple)",
                         variable=method_var, value="BF",
+                        command=refresh_method).pack(side="left", padx=8)
+        ttk.Radiobutton(mrow, text="TODCOR (blended SB2)",
+                        variable=method_var, value="TODCOR",
                         command=refresh_method).pack(side="left", padx=8)
 
         for j, (lbl, var) in enumerate([("RV min", rvmin_var),
@@ -5545,6 +7338,61 @@ def run_gui():
                         variable=exclude_h_var
                         ).grid(row=1, column=3, columnspan=4, sticky="w",
                                pady=(6, 0))
+
+        # --- TODCOR ----------------------------------------------------
+        trow1 = ttk.Frame(tod_sec)
+        trow1.grid(row=0, column=0, columnspan=8, sticky="w")
+        for lbl, var, w, unit in [("Grid step", tod_dv_var, 6, "km/s/px"),
+                                  ("   Search ±", tod_maxrv_var, 6, "km/s"),
+                                  ("   Light ratio alpha", tod_alpha_var, 6,
+                                   "(empty: fitted)"),
+                                  ("   vsini template 2", tod_vsini2_var, 6,
+                                   "km/s")]:
+            ttk.Label(trow1, text=lbl).pack(side="left")
+            e = ttk.Entry(trow1, textvariable=var, width=w)
+            e.pack(side="left", padx=2)
+            e.bind("<KeyRelease>", lambda _e: update_method_summary())
+            ttk.Label(trow1, text=unit, foreground="gray").pack(side="left",
+                                                                padx=(0, 4))
+
+        ttk.Checkbutton(tod_sec, text="Clean the observed spectrum first "
+                                      "(spike rejection + continuum "
+                                      "re-flattening) — untick only to see "
+                                      "what that step does",
+                        variable=tod_clean_var
+                        ).grid(row=1, column=0, columnspan=8, sticky="w",
+                               pady=(6, 0))
+
+        trow2 = ttk.Frame(tod_sec)
+        trow2.grid(row=2, column=0, columnspan=8, sticky="w", pady=(6, 0))
+        ttk.Checkbutton(trow2, text="Self-calibration instead of a "
+                                    "measurement (no spectrum needed)",
+                        variable=tod_sim_var,
+                        command=update_method_summary).pack(side="left")
+        ttk.Label(trow2, text="   separations [km/s]:").pack(side="left")
+        ttk.Entry(trow2, textvariable=tod_simsep_var,
+                  width=24).pack(side="left", padx=2)
+        ttk.Label(trow2, text="(empty: 10...90)",
+                  foreground="gray").pack(side="left", padx=4)
+
+        ttk.Label(tod_sec, wraplength=560, foreground="gray",
+                  text="Two-dimensional correlation against "
+                       "t1(v1) + alpha*t2(v2) (Zucker & Mazeh 1994): the "
+                       "method for an SB2 whose CCF/BF peaks blend, i.e. "
+                       "where a two-component fit to the 1-D profile can no "
+                       "longer separate them. It needs "
+                       "the SPECTRUM and both templates — never a "
+                       "pre-computed correlation profile. Run the "
+                       "self-calibration first: it builds noiseless "
+                       "composites from the two templates at known "
+                       "velocities and reports the bias TODCOR shows on "
+                       "them, which is the floor of what the real "
+                       "measurement can reach. A fitted alpha far from the "
+                       "expected light ratio, or one that changes between "
+                       "epochs of the same system, means the templates are "
+                       "wrong."
+                  ).grid(row=3, column=0, columnspan=8, sticky="w",
+                         pady=(6, 0))
 
         top = ttk.Frame(bf_sec)
         top.grid(row=0, column=0, columnspan=3, sticky="w")
@@ -5664,13 +7512,31 @@ def run_gui():
 
     def run_analysis():
         run_payload["payload"] = None
+        # Recognise a correlation profile BEFORE asking for a template:
+        # every method here works on a spectrum, so this file is simply
+        # the wrong input and saying so now saves a confusing failure
+        # deep inside the reader.
+        note = correlation_profile_note(spec_var.get().strip())
+        if note:
+            messagebox.showerror("This file is a correlation profile", note)
+            return
         try:
-            if not spec_var.get().strip():
+            todcor = method_var.get() == "TODCOR"
+            simulate = todcor and bool(tod_sim_var.get())
+            # The self-calibration builds its composites from the templates
+            # alone, so it is the one run that needs no observed spectrum.
+            if not spec_var.get().strip() and not simulate:
                 raise ValueError("No normalized spectrum file selected "
                                  "(use 'Normalize raw...' if you only have "
                                  "a raw spectrum).")
             if not tpl_var.get().strip():
-                raise ValueError("No synthetic spectrum file selected.")
+                raise ValueError("No template 1 (primary) file selected."
+                                 if todcor else
+                                 "No synthetic spectrum file selected.")
+            # Template 2 may be left empty: TODCOR always needs two template
+            # arrays, but for a twin binary the same file is used for both,
+            # which is the usual case and keeps the surface exactly
+            # symmetric. cmd_todcor does the defaulting.
             r_val, v_val = _f(res_var), _f(vsini_var)
             if r_val and v_val and v_val < min_vsini(r_val):
                 messagebox.showwarning(
@@ -5701,6 +7567,19 @@ def run_gui():
                                     else "template"),
                           keep_balmer=not exclude_h_var.get())
                 payload = cmd_ccf(make_args(**kw))
+            elif todcor:
+                sep = [float(t) for t in
+                       tod_simsep_var.get().replace(",", " ").split()]
+                kw.update(spectrum=spec_var.get().strip() or None,
+                          template1=tpl_var.get().strip(),
+                          template2=tpl2_var.get().strip(),
+                          vsini1=_f(vsini_var), vsini2=_f(tod_vsini2_var),
+                          dv=_f(tod_dv_var, 1.0),
+                          max_rv=_f(tod_maxrv_var, 200.0),
+                          alpha=_f(tod_alpha_var),
+                          no_clean=not tod_clean_var.get(),
+                          simulate=simulate, sim_sep=sep or None)
+                payload = cmd_todcor(make_args(**kw))
             else:
                 guess = guess_amp = guess_sigma = None
                 if bf_mode_var.get() == "assume":
@@ -5808,11 +7687,12 @@ def add_common_args(p):
                                      "(2453254.847090365) or old FITS "
                                      "date DD/MM/YY (16/10/98, optionally "
                                      "+ UT time)")
-    p.add_argument("--site", default="paranal",
+    p.add_argument("--site", default=None,
                    help="Observatory: a built-in name (paranal, lasilla, "
                         "ctio, ohp, tug, kreiken, lco, soar, ... — see "
                         "--list-observatories), a 'lonE,lat,alt' string "
-                        "in degrees/metres, or an astropy site name")
+                        "in degrees/metres, or an astropy site name. "
+                        + AUTO_SITE_HELP)
     p.add_argument("--no-bary", action="store_true",
                    help="Compute the barycentric correction but do NOT "
                         "apply it to the RVs: the value is kept in the "
@@ -6008,7 +7888,7 @@ def cmd_fetch_adp(args):
               f"  rv_analysis.py batch --spectra '{os.path.join(d, 'ADP.*.fits')}' ...")
 
 
-def main():
+def run_cli():
     if len(sys.argv) == 1:
         run_interactive()
         return
@@ -6027,6 +7907,16 @@ def main():
                         help="Print the built-in observatory list and exit")
     parser.add_argument("--list-spectrographs", action="store_true",
                         help="Print the built-in spectrograph list and exit")
+    # --log / --no-log are taken out of sys.argv by pop_log_args() before
+    # the parser runs, so that the log is already open while the command
+    # line is parsed. They are declared here only so that --help lists
+    # them; argparse itself never sees them.
+    parser.add_argument("--log", metavar="FILE",
+                        help=f"Run log file (default: {LOG_DEFAULT_NAME} in "
+                             "the current directory; runs are appended). "
+                             "Works before or after the command name")
+    parser.add_argument("--no-log", action="store_true",
+                        help="Do not write the run log file")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_gui = sub.add_parser("gui", help="Open the widget (same as no arguments)")
@@ -6060,6 +7950,118 @@ def main():
                             "the mask (default: excluded — hot-star "
                             "practice)")
     p_ccf.set_defaults(func=cmd_ccf)
+
+    p_tod = sub.add_parser(
+        "todcor",
+        help="TODCOR: two-dimensional correlation with one template per "
+             "component (Zucker & Mazeh 1994) - the method for SB2s whose "
+             "CCF peaks blend",
+        description="Correlates the spectrum against the combination "
+                    "t1(v1) + alpha*t2(v2) and maximises over both "
+                    "velocities at once, so a blend is modelled instead of "
+                    "being fitted around. Use it when the two peaks of a "
+                    "1-D CCF/BF are no longer cleanly separated: at small "
+                    "separations TODCOR beats the BF, while at low S/N the "
+                    "BF is the more robust of the two, and TODCOR is the "
+                    "method most sensitive to a template mismatch - its "
+                    "flux ratio first of all (saphires, Tofflemire). It "
+                    "needs the SPECTRUM and two templates - it cannot run "
+                    "on a pre-computed correlation profile.")
+    p_tod.add_argument("--spectrum",
+                       help="Normalized observed spectrum (not needed with "
+                            "--simulate)")
+    p_tod.add_argument("--format", default="auto",
+                       choices=["auto", "s2d", "text"])
+    p_tod.add_argument("--template1", required=True,
+                       help="Template for the primary component")
+    p_tod.add_argument("--template2",
+                       help="Template for the secondary component. Omit it "
+                            "for a twin binary and --template1 is used for "
+                            "both, which is the usual choice unless the two "
+                            "stars really differ in spectral type: two "
+                            "near-identical but non-identical templates "
+                            "break the mirror symmetry for no physical "
+                            "reason and make the component labels unstable")
+    p_tod.add_argument("--teff1", type=float,
+                       help="T_eff [K] if --template1 is downloaded")
+    p_tod.add_argument("--teff2", type=float,
+                       help="T_eff [K] if --template2 is downloaded")
+    p_tod.add_argument("--logg", type=float, default=4.5)
+    p_tod.add_argument("--feh", type=float, default=0.0)
+    p_tod.add_argument("--vsini1", type=float,
+                       help="Rotational broadening of template 1 [km/s]")
+    p_tod.add_argument("--vsini2", type=float,
+                       help="Rotational broadening of template 2 [km/s]")
+    p_tod.add_argument("--epsilon", type=float, default=0.6,
+                       help="Limb darkening for the rotational profile")
+    p_tod.add_argument("--dv", type=float, default=1.0,
+                       help="km/s per pixel of the log-lambda grid "
+                            "(default 1.0). TODCOR works in pixel lags, so "
+                            "this sets the velocity resolution")
+    p_tod.add_argument("--max-rv", type=float, default=200.0,
+                       help="Half-width of the velocity search [km/s] "
+                            "(default 200)")
+    p_tod.add_argument("--alpha", type=float,
+                       help="Fix the light ratio instead of fitting it. "
+                            "A fitted alpha far from the expected value is "
+                            "the clearest sign of a wrong template")
+    # dest is NOT min_sep: that name already belongs to the BF component
+    # search (default 30 km/s) and make_args() hands the same namespace to
+    # every method, so a shared name silently applies BF's 30 km/s here.
+    p_tod.add_argument("--min-sep", dest="todcor_min_sep", metavar="MIN_SEP",
+                       type=float, default=0.0,
+                       help="Exclude |v1 - v2| < this [km/s] from the peak "
+                            "search. The v1 == v2 ridge is always excluded "
+                            "(two components at one velocity are "
+                            "indistinguishable from one star, so the flux "
+                            "ratio there is not measurable); raise this to "
+                            "also skip the ill-conditioned band around it")
+    p_tod.add_argument("--wave-min", type=float,
+                       help="Minimum wavelength to use [nm]")
+    p_tod.add_argument("--wave-max", type=float,
+                       help="Maximum wavelength to use [nm]")
+    p_tod.add_argument("--spectrograph",
+                       help="Built-in instrument name (sets R)")
+    p_tod.add_argument("--resolution", type=float,
+                       help="Resolving power R; degrades both templates")
+    p_tod.add_argument("--no-clean", action="store_true",
+                       help="Skip the per-order spike rejection and "
+                            "continuum re-flattening applied to the observed "
+                            "spectrum before correlating. Only useful to see "
+                            "what that step is doing - without it, pipeline "
+                            "leftovers dominate the correlation")
+    p_tod.add_argument("--simulate", action="store_true",
+                       help="Torres-style self-calibration: build NOISELESS "
+                            "composites from the two templates at known "
+                            "velocities and report the bias TODCOR shows on "
+                            "them. No observed spectrum needed - run this "
+                            "first to check a template pair")
+    p_tod.add_argument("--sim-sep", nargs="+", type=float,
+                       help="Separations [km/s] to test with --simulate")
+    p_tod.add_argument("--object", help="Star name (SIMBAD) for the "
+                                        "barycentric correction")
+    p_tod.add_argument("--ra", help="RA for the barycentric correction")
+    p_tod.add_argument("--dec", help="Dec for the barycentric correction")
+    p_tod.add_argument("--obstime", help="Observation time: ISOT, BJD "
+                                         "number or DD/MM/YY")
+    p_tod.add_argument("--site", default=None,
+                       help="Observatory. " + AUTO_SITE_HELP)
+    p_tod.add_argument("--no-bary", action="store_true",
+                       help="Compute the barycentric correction but do NOT "
+                            "apply it")
+    p_tod.add_argument("--force-bary", action="store_true",
+                       help="Apply the correction even when the header says "
+                            "the data are already barycentric")
+    p_tod.add_argument("--t0", type=float, help="Ephemeris T0 [BJD]")
+    p_tod.add_argument("--period", type=float, help="Orbital period [d]")
+    p_tod.add_argument("--varastro", action="store_true",
+                       help="Fetch T0/P from VarAstro using --object")
+    p_tod.add_argument("--t0-to-bjd", action="store_true",
+                       help="Convert the ephemeris T0 from HJD to BJD_TDB")
+    p_tod.add_argument("--plot", help="Figure PNG name")
+    p_tod.add_argument("--output", help="Result text file name")
+    p_tod.add_argument("--dpi", type=int, help="PNG resolution")
+    p_tod.set_defaults(func=cmd_todcor)
 
     p_bf = sub.add_parser("bf", help="Broadening Function (thesis method, SVD)")
     add_common_args(p_bf)
@@ -6184,10 +8186,10 @@ def main():
                          help="BJD of each spectrum, one value per file in "
                               "sorted order (as the bjd list of the "
                               "reference document)")
-    p_batch.add_argument("--site", default="paranal",
+    p_batch.add_argument("--site", default=None,
                          help="Observatory: built-in name, 'lonE,lat,alt' "
                               "string, or astropy site name "
-                              "(see ccf --site)")
+                              "(see ccf --site). " + AUTO_SITE_HELP)
     p_batch.add_argument("--no-bary", action="store_true",
                          help="Compute the barycentric correction but do "
                               "NOT apply it to the RVs: the value is kept "
@@ -6282,8 +8284,9 @@ def main():
                                  "normalized ASCII (summary + comment "
                                  "header), incl. the bary-frame verdict")
     p_head.add_argument("--spectrum", required=True, help="FITS spectrum file")
-    p_head.add_argument("--site", default="paranal",
-                        help="Observatory for the BJD computation")
+    p_head.add_argument("--site", default=None,
+                        help="Observatory for the BJD computation. "
+                             + AUTO_SITE_HELP)
     p_head.add_argument("--output", help="Save the header to a text file")
     p_head.set_defaults(func=cmd_header)
 
@@ -6407,6 +8410,36 @@ def main():
         args.func(args)
     except ValueError as exc:
         sys.exit(f"ERROR: {exc}")
+
+
+def main():
+    """Run the tool with the console output captured in the run log."""
+    log_path, log_enabled = pop_log_args(sys.argv)
+    state = start_logging(log_path, log_enabled)
+    status, exc_info = "finished", None
+    try:
+        run_cli()
+    except SystemExit as exc:
+        # sys.exit("message") is the tool's normal way of stopping on a
+        # bad input, but the interpreter prints that message only after
+        # this frame is gone — after the log is closed, so it would miss
+        # the log and come out after the "Log written" line. Print it
+        # here instead (through the tee, so it reaches both) and exit
+        # with the status a string exit code would have given anyway.
+        code = exc.code
+        if isinstance(code, str):
+            print(code, file=sys.stderr)
+            status = "stopped with an error"
+            raise SystemExit(1) from None
+        if code not in (None, 0):
+            status = f"stopped (exit code {code})"
+        raise
+    except BaseException:
+        status = "failed"
+        exc_info = sys.exc_info()
+        raise
+    finally:
+        finish_logging(state, status, exc_info)
 
 
 if __name__ == "__main__":
