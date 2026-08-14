@@ -124,7 +124,9 @@ python rv_analysis.py
 ### The usual workflow
 
 1. **Look at the header** — `header` tells you the object, the date, the
-   coordinates and the mid-exposure BJD.
+   coordinates and the mid-exposure BJD. In the GUI the same button also
+   plots the spectrum in a zoomable window, so you can see what you are
+   about to measure.
 2. **Check the barycentric frame** — `barycheck` decides whether the
    wavelengths are already barycentric, so you know whether to pass
    `--no-bary` ([section 7](#7-barycentric-frame-the-double-correction-guard)).
@@ -244,7 +246,7 @@ python rv_analysis.py          # same as: python rv_analysis.py gui
 A small window opens: resolve the target via SIMBAD (or enter RA/Dec), pick
 the normalized observed spectrum and the template, and choose the method via
 the **Method...** button — like **Normalize raw...**, it opens a small
-sub-window offering **CCF** or **BF**. Choosing BF also brings up the number
+sub-window offering **CCF**, **BF** or **TODCOR**. Choosing BF also brings up the number
 of components, the systemic gamma and a two-option mode:
 
 - **With assumptions** — press **Show smoothed BF** to display, with one
@@ -265,12 +267,17 @@ hydrogen-line exclusion checkbox.
 Choosing **TODCOR** is for an SB2 whose two peaks blend. It reveals a
 second file row in the main window — **Template 2 (empty = same as
 template 1)**, the first one being relabelled **Template 1 (primary)** — and
-offers the grid step in km/s per pixel, the search half-width, the light
-ratio α (empty = fitted), the secondary's *v* sin *i*, the spectrum cleaning
-(on by default) and the **self-calibration** checkbox, which measures the
-method's own bias on noiseless composites built from the two templates and
-therefore needs no spectrum at all. Run that first; see
-[`todcor`](#todcor--two-dimensional-correlation-blended-sb2s).
+its **TODCOR settings** panel offers the grid step in km/s per pixel, the
+search half-width, the light ratio α (empty = fitted), the secondary's
+*v* sin *i*, **Clean the observed spectrum first** (on by default: per-order
+spike rejection and continuum re-flattening) and **Self-calibration**, which
+measures the method's own bias on noiseless composites built from the two
+templates and therefore needs no spectrum at all. Run that first.
+
+The panel itself is deliberately bare — what the method is, why the cleaning
+matters, and how to read a fitted α are all documented in
+[`todcor`](#todcor--two-dimensional-correlation-blended-sb2s) rather than
+repeated on the widget.
 
 **Leave Template 2 empty unless the two stars differ in spectral type** —
 template 1 is then used for both components, which is the normal setup for a
@@ -289,15 +296,33 @@ height read off the BF axis (the profile integrals/areas and the light
 ratios stay in the text summary). **Nothing is written to disk until you
 press Save** next to Run.
 
+**Save** asks where first: a directory chooser opens on the folder the run
+would have used, and the result text file and figures are written there
+under their usual names. Cancelling the chooser writes nothing at all. The
+result box then lists the paths the files actually went to. On the command
+line nothing changed — each command still writes where its `--output` and
+`--plot` say, immediately after the run.
+
 Other GUI features:
 
 - **Normalize raw...** — continuum-normalize a raw spectrum first; choose the
   continuum model (**Polynomial** in blended windows, or a cubic
   **B-spline** with knots every window — the polynomial order applies to the
   polynomial model only, the clipping iterations to both).
-- **Header** — inspect the FITS header (object, DATE-OBS, RA/Dec, exposure
-  time, any RV-related cards, mid-exposure BJD_TDB) and auto-fill the target
-  fields.
+- **Header** — opens the selected spectrum in its own **plot window** and
+  inspects the FITS header (object, DATE-OBS, RA/Dec, exposure time, any
+  RV-related cards, mid-exposure BJD_TDB) into the result box, auto-filling
+  the target fields. The plot window carries the full matplotlib navigation
+  bar, so it can be zoomed, panned, sent back **Home** and saved as a PNG,
+  and the cursor position is read out in wavelength and flux as it moves —
+  the same interactive look a MIDAS plot gives you. One line is drawn per
+  echelle order.
+
+  What it draws is what the analysis will actually read, not the raw file:
+  orders the reader discards are absent. On a Libre-ESpRIT `st3`, where
+  roughly half the orders have no continuum solution at this S/N, the window
+  therefore shows ~17 of the 41 orders. Use it as a check on what the fit
+  will see.
 - **VarAstro / HJD → BJD** — fetch the eclipsing-binary ephemeris (T0, P)
   from var.astro.cz and convert T0 to BJD_TDB for the orbital phase. The
   lookup handles VarAstro's GCVS spelling automatically (a name like
@@ -1163,4 +1188,3 @@ line then reads `run stopped with an error` or `run failed` instead of
 
 Run `python rv_analysis.py <command> --help` for the full, authoritative list
 of options.
-
