@@ -4,7 +4,9 @@ RVCalPy is a single-file Python tool, [`rv_analysis.py`](rv_analysis.py), that
 measures the radial velocity (RV) of a star by comparing an observed spectrum
 with a template spectrum, by two independent methods — a weighted line-mask
 **CCF** and the SVD **Broadening Function (BF)** — plus **TODCOR** for binaries
-whose two peaks have merged.
+whose two peaks have merged. For a double-lined binary it carries the
+velocities on to the **Wilson plot** (mass ratio and systemic velocity with no
+orbit assumed) and to an **SB2 orbit fit**.
 
 **Usage is documented in [`Guide.txt`](Guide.txt)**: preparing data, the
 interactive mode, every command-line command, the barycentric-frame rules, the
@@ -71,6 +73,9 @@ license.
 | Cross-correlation with a weighted line mask | Baranne, A., et al. 1996, A&AS 119, 373; Pepe, F., et al. 2002, A&A 388, 632 |
 | Mask construction and the contrast (peak) fit | Pino, L., et al. 2018, A&A 619, A3 |
 | Two-stage RV search, S/N and variability warnings | Katz, D., et al. 2025, A&A 704, A294 |
+| Two-dimensional correlation (`todcor`) | Zucker, S., & Mazeh, T. 1994, ApJ 420, 806; Mazeh, T., & Zucker, S. 1994, Ap&SS 212, 349; review: Zucker, S. 2012, IAU Symp. 282, 371 |
+| Mass ratio from the RV1-vs-RV2 line (`wilson`) | Wilson, O. C. 1941, ApJ 93, 29 |
+| The Wilson step ahead of the orbit; circular SB2 orbit fit (`orbit`) | Kovalev, M., & Straumit, I. 2022, MNRAS 510, 1515; Nachmani, G., Faigler, S., & Mazeh, T. 2026, MNRAS 546 (MESS) |
 | Barycentric correction with the relativistic cross term | Wright, J. T., & Eastman, J. D. 2014, PASP 126, 838 |
 | Rotational line profile (`--profile rot`) | Gray, D. F. 1992, *The Observation and Analysis of Stellar Photospheres* |
 | FEROS/MIDAS barycentric accuracy caveat | Müller, A., et al. 2013, A&A 556, A3 |
@@ -86,6 +91,10 @@ license.
   also set the Tonry & Davis (1979) overlap normalization used by `todcor`
   and the BF-vs-TODCOR guidance in
   the `todcor` section of [`Guide.txt`](Guide.txt).
+- [Simchon/TODCOR](https://github.com/Simchon/TODCOR) (MIT) — the TODCOR
+  engine, vendored unmodified at `vendor/todcor.py` with its provenance in
+  `vendor/VERSION.todcor`; everything RVCalPy adds around it (the log-λ grid,
+  the spectrum cleaning, the α and detection logic) lives in the wrapper.
 - [PyAstronomy](https://github.com/sczesla/PyAstronomy) — `pyasl.SVD`, the
   SVD broadening-function solver used underneath, and the rotational
   broadening routines.
@@ -96,6 +105,27 @@ license.
 - The full-spectrum cross-covariance mode (`--ccf-mode template`) follows the
   *Between the Lines* 2024 workshop material (E. Sedaghati).
 
+### Data services
+
+- [SIMBAD](https://simbad.cds.unistra.fr/simbad/) (CDS, Strasbourg) — target
+  coordinates and cross-identifiers.
+- [VarAstro](https://var.astro.cz/) — eclipsing-binary ephemerides (T0, P).
+- [ESO Science Archive](https://archive.eso.org/) — the TAP/ObsCore service
+  and the dataportal used by `fetch-adp`.
+
+If you use RVCalPy in published work, please cite the method papers above
+alongside this repository.
+
+## Acknowledgements
+
+I am grateful to **Tobias Cornelius Hinse**, **Mehmet Alperen Kul** and
+**Otmar Stahl** for their guidance, discussions and feedback during the
+development of this tool. Their input shaped the methods, the data handling
+and the checks built into `rv_analysis.py`.
+
+Thanks are due as well to the authors and maintainers of the open-source
+packages and the archive and catalogue services listed under
+[References](#references), without which this work would not be possible.
 ### Data services
 
 - [SIMBAD](https://simbad.cds.unistra.fr/simbad/) (CDS, Strasbourg) — target
