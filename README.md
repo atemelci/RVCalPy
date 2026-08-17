@@ -67,7 +67,6 @@ license.
 
 ### Methods implemented
 
-| Topic | Reference |
 |---|---|
 | Broadening Function, SVD formulation | Rucinski, S. M. 1992, AJ 104, 1968; Rucinski, S. M. 2002 |
 | Cross-correlation with a weighted line mask | Baranne, A., et al. 1996, A&AS 119, 373; Pepe, F., et al. 2002, A&A 388, 632 |
