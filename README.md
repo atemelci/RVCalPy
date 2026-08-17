@@ -1,4 +1,4 @@
-# RVCalPy — Easy Way of Radial Velocity Calculation
+# RVCalPy — Easy Way of Radial Velocity Calculations
 
 RVCalPy is a single-file Python tool, [`rv_analysis.py`](rv_analysis.py), that
 measures the radial velocity (RV) of a star by comparing an observed spectrum
