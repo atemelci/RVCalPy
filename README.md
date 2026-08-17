@@ -68,6 +68,7 @@ license.
 ### Methods implemented
 
 |---|---|
+|---|---|
 | Broadening Function, SVD formulation | Rucinski, S. M. 1992, AJ 104, 1968; Rucinski, S. M. 2002 |
 | Cross-correlation with a weighted line mask | Baranne, A., et al. 1996, A&AS 119, 373; Pepe, F., et al. 2002, A&A 388, 632 |
 | Mask construction and the contrast (peak) fit | Pino, L., et al. 2018, A&A 619, A3 |
