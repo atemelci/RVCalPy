@@ -125,7 +125,7 @@ HARPS/FEROS measurements of two double-lined eclipsing binaries, LL Aqr and
 AK For. What was compared, how the statistics are defined, the night-by-night
 residuals and the phased velocity figures are in the report:
 
-**[⬇ Download the report (PDF)](https://github.com/atemelci/RVCalPy/raw/HEAD/RV_benchmark_report.pdf)**
+**[RV benchmark report (PDF)](https://github.com/atemelci/RVCalPy/raw/HEAD/RV_benchmark_report.pdf)**
 
 ## Acknowledgements
 
