@@ -10,8 +10,8 @@ orbit assumed) and to an **SB2 orbit fit**.
 
 **Usage is documented in [`Guide.txt`](Guide.txt)**: preparing data, the
 interactive mode, every command-line command, the barycentric-frame rules, the
-BF sampling guards, the outputs, and troubleshooting. This file covers setup,
-license, references and acknowledgements.
+BF sampling guards, the outputs, and troubleshooting. This file covers the
+benchmark, setup, license, references and acknowledgements.
 
 ## Setup
 
@@ -80,6 +80,8 @@ license.
 | Rotational line profile (`--profile rot`) | Gray, D. F. 1992, *The Observation and Analysis of Stellar Photospheres* |
 | FEROS/MIDAS barycentric accuracy caveat | Müller, A., et al. 2013, A&A 556, A3 |
 | Example system V563 Lyr (orbital elements) | Alvarez et al. 2022, RMxAA 58, 223 |
+| Benchmark: published velocities of LL Aqr | Graczyk, D., Smolec, R., Gazeas, K., et al. 2016, A&A 594, A92 |
+| Benchmark: published velocities of AK For | Hełminiak, K. G., Graczyk, D., Konacki, M., et al. 2014, A&A 567, A64 |
 
 ### Software this tool builds on or follows
 
@@ -105,27 +107,37 @@ license.
 - The full-spectrum cross-covariance mode (`--ccf-mode template`) follows the
   *Between the Lines* 2024 workshop material (E. Sedaghati).
 
-### Data services
+## Benchmark
 
-- [SIMBAD](https://simbad.cds.unistra.fr/simbad/) (CDS, Strasbourg) — target
-  coordinates and cross-identifiers.
-- [VarAstro](https://var.astro.cz/) — eclipsing-binary ephemerides (T0, P).
-- [ESO Science Archive](https://archive.eso.org/) — the TAP/ObsCore service
-  and the dataportal used by `fetch-adp`.
+How accurate are the velocities? They were compared **night by night** with the
+published measurements of two double-lined eclipsing binaries, on public ESO
+archive (phase-3) spectra, measured as broadening functions against a single
+template over 500–550 nm. The full comparison — method, night-by-night
+residuals and the phased velocity figures — is in
+**[`RV_benchmark_report.pdf`](RV_benchmark_report.pdf)** (5 pages):
 
-If you use RVCalPy in published work, please cite the method papers above
-alongside this repository.
+| Component | Reference | Nights | Offset Δ [km s⁻¹] | Scatter *s* [km s⁻¹] | χ²ᵣ | Slope *a* |
+|---|---|---|---|---|---|---|
+| LL Aqr, primary | Graczyk et al. 2016 (HARPS) | 16 | +0.251 | 0.092 | 1.03 | 0.9997 |
+| LL Aqr, secondary | Graczyk et al. 2016 (HARPS) | 16 | +0.294 | 0.142 | 0.81 | 0.9989 |
+| AK For, primary | Hełminiak et al. 2014 (FEROS+HARPS) | 14 | +0.208 | 0.150 | 0.45 | 0.9986 |
+| AK For, secondary | Hełminiak et al. 2014 (FEROS+HARPS) | 14 | +0.318 | 0.864 | 2.54 | 0.9923 |
 
-## Acknowledgements
+Δ is a constant velocity zero point — absorbed by the systemic velocity in any
+orbit fit, and therefore harmless; *s* is the scatter left after removing it,
+χ²ᵣ asks whether that scatter is explained by the quoted uncertainties, and the
+slope *a* of v(ours) = *a*·v(published) + *b* is what propagates into the
+masses.
 
-I am grateful to **Tobias Cornelius Hinse**, **Mehmet Alperen Kul** and
-**Otmar Stahl** for their guidance, discussions and feedback during the
-development of this tool. Their input shaped the methods, the data handling
-and the checks built into `rv_analysis.py`.
+Three of the four components reproduce the published velocity amplitudes to
+better than 0.15 % with χ²ᵣ ≈ 1 or below: the differences are fully explained
+by the measurement uncertainties, and an orbit fitted to these velocities
+returns the same masses. The exception is the AK For secondary, whose 0.8 %
+amplitude deficit is a systematic traced to the single 4676 K template being
+~300 K hotter than that star — an orbit fitted to those velocities alone would
+underestimate M₁ by about one per cent, and re-measuring the secondary against
+a cooler (~4400 K) template is the obvious test.
 
-Thanks are due as well to the authors and maintainers of the open-source
-packages and the archive and catalogue services listed under
-[References](#references), without which this work would not be possible.
 ### Data services
 
 - [SIMBAD](https://simbad.cds.unistra.fr/simbad/) (CDS, Strasbourg) — target
