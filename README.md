@@ -107,37 +107,6 @@ license.
 - The full-spectrum cross-covariance mode (`--ccf-mode template`) follows the
   *Between the Lines* 2024 workshop material (E. Sedaghati).
 
-## Benchmark
-
-How accurate are the velocities? They were compared **night by night** with the
-published measurements of two double-lined eclipsing binaries, on public ESO
-archive (phase-3) spectra, measured as broadening functions against a single
-template over 500–550 nm. The full comparison — method, night-by-night
-residuals and the phased velocity figures — is in
-**[`RV_benchmark_report.pdf`](RV_benchmark_report.pdf)** (5 pages):
-
-| Component | Reference | Nights | Offset Δ [km s⁻¹] | Scatter *s* [km s⁻¹] | χ²ᵣ | Slope *a* |
-|---|---|---|---|---|---|---|
-| LL Aqr, primary | Graczyk et al. 2016 (HARPS) | 16 | +0.251 | 0.092 | 1.03 | 0.9997 |
-| LL Aqr, secondary | Graczyk et al. 2016 (HARPS) | 16 | +0.294 | 0.142 | 0.81 | 0.9989 |
-| AK For, primary | Hełminiak et al. 2014 (FEROS+HARPS) | 14 | +0.208 | 0.150 | 0.45 | 0.9986 |
-| AK For, secondary | Hełminiak et al. 2014 (FEROS+HARPS) | 14 | +0.318 | 0.864 | 2.54 | 0.9923 |
-
-Δ is a constant velocity zero point — absorbed by the systemic velocity in any
-orbit fit, and therefore harmless; *s* is the scatter left after removing it,
-χ²ᵣ asks whether that scatter is explained by the quoted uncertainties, and the
-slope *a* of v(ours) = *a*·v(published) + *b* is what propagates into the
-masses.
-
-Three of the four components reproduce the published velocity amplitudes to
-better than 0.15 % with χ²ᵣ ≈ 1 or below: the differences are fully explained
-by the measurement uncertainties, and an orbit fitted to these velocities
-returns the same masses. The exception is the AK For secondary, whose 0.8 %
-amplitude deficit is a systematic traced to the single 4676 K template being
-~300 K hotter than that star — an orbit fitted to those velocities alone would
-underestimate M₁ by about one per cent, and re-measuring the secondary against
-a cooler (~4400 K) template is the obvious test.
-
 ### Data services
 
 - [SIMBAD](https://simbad.cds.unistra.fr/simbad/) (CDS, Strasbourg) — target
@@ -148,6 +117,15 @@ a cooler (~4400 K) template is the obvious test.
 
 If you use RVCalPy in published work, please cite the method papers above
 alongside this repository.
+
+## Benchmark
+
+RVCalPy's velocities were checked night by night against the published
+HARPS/FEROS measurements of two double-lined eclipsing binaries, LL Aqr and
+AK For. What was compared, how the statistics are defined, the night-by-night
+residuals and the phased velocity figures are in the report:
+
+**[⬇ Download the RV benchmark report (PDF, 5 pages, 0.8 MB)](https://github.com/atemelci/RVCalPy/raw/HEAD/RV_benchmark_report.pdf)**
 
 ## Acknowledgements
 
