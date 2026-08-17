@@ -13,7 +13,7 @@ type: software
 authors:
   - family-names: "Temelci"
     given-names: "Anıl"
-    # orcid: "https://orcid.org/0009-0007-1416-9420"
+    orcid: "https://orcid.org/0009-0007-1416-9420"
 version: "1.0.0"
 date-released: "2026-07-22"
 license: GPL-3.0
