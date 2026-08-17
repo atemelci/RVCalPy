@@ -1,4 +1,4 @@
-# RVCalPy — Easy Way of Radial Velocity Calculations
+# RVCalPy — Easy Way of Radial Velocity Calculation
 
 RVCalPy is a single-file Python tool, [`rv_analysis.py`](rv_analysis.py), that
 measures the radial velocity (RV) of a star by comparing an observed spectrum
@@ -94,9 +94,10 @@ license.
   and the BF-vs-TODCOR guidance in
   the `todcor` section of [`Guide.txt`](Guide.txt).
 - [Simchon/TODCOR](https://github.com/Simchon/TODCOR) (MIT) — the TODCOR
-  engine, vendored unmodified at `vendor/todcor.py` with its provenance in
-  `vendor/VERSION.todcor`; everything RVCalPy adds around it (the log-λ grid,
-  the spectrum cleaning, the α and detection logic) lives in the wrapper.
+  engine, vendored unmodified inside `rv_analysis.py` (see "TODCOR engine" at
+  the end of the file, between the `---8<---` markers, with its commit hash and
+  licence); everything RVCalPy adds around it (the log-λ grid, the spectrum
+  cleaning, the α and detection logic) lives in the wrapper.
 - [PyAstronomy](https://github.com/sczesla/PyAstronomy) — `pyasl.SVD`, the
   SVD broadening-function solver used underneath, and the rotational
   broadening routines.
