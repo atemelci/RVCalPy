@@ -68,7 +68,7 @@ in [`Guide.txt`](Guide.txt#2-quick-start):
 | `example_CCF_SOPHIE_norm.txt` | TYC 3844-385-1, SOPHIE, OHP 1.93 m |
 | `example_BF_HARPS_norm.txt` | LL Aqr, HARPS, ESO Science Archive, programme 084.D-0591(C) |
 | `example_TODCOR_NeoNarval_norm.txt` | HD 105637, Neo-Narval, TBL 2 m (Pic du Midi) |
-| `template_5215K_Logg3.txt` | synth3/SynthV model, 5215 K, log g 3.55, 5650-6850 A |
+| `template_5215K_Logg3.txt` | synth3/SynthV model, 5215 K, log g 3.55, 4500-6500 A |
 
 The three spectra are observed data, redistributed here as example data in
 the continuum-normalized ASCII form written by `rv_analysis.py normalize`;
