@@ -59,9 +59,29 @@ provided that derivative works are distributed under the same license and
 with their source available. The program comes with **no warranty**, to the
 extent permitted by law.
 
-The bundled example data (`examples/`) are synthetic spectra generated for
-this repository from published orbital elements and are covered by the same
-license.
+`examples/` holds the worked examples — one observed spectrum per method
+and the single synthetic template that serves all three, run step by step
+in [`Guide.txt`](Guide.txt#2-quick-start):
+
+| File | Origin |
+|---|---|
+| `example_CCF_SOPHIE_norm.txt` | TYC 3844-385-1, SOPHIE, OHP 1.93 m |
+| `example_BF_HARPS_norm.txt` | LL Aqr, HARPS, ESO Science Archive, programme 084.D-0591(C) |
+| `example_TODCOR_NeoNarval_norm.txt` | HD 105637, Neo-Narval, TBL 2 m (Pic du Midi) |
+| `template_5215K_Logg3.txt` | synth3/SynthV model, 5215 K, log g 3.55, 5650-6850 A |
+
+The three spectra are observed data, redistributed here as example data in
+the continuum-normalized ASCII form written by `rv_analysis.py normalize`;
+any use of them should follow the terms of the archive or observatory they
+came from. The template is synthetic and is covered by the same license as
+the code. Every file carries its provenance, epoch, site and barycentric
+frame in its own `#` comment header — `rv_analysis.py header <file>` prints
+it.
+
+One template for three different stars is deliberate, not a shortcut: it is
+enough to exercise `ccf`, `bf` and `todcor`, and the LL Aqr example
+reproduces the published velocities to 0.24 km/s despite an ~900 K
+mismatch.
 
 ## References
 
@@ -79,7 +99,6 @@ license.
 | Barycentric correction with the relativistic cross term | Wright, J. T., & Eastman, J. D. 2014, PASP 126, 838 |
 | Rotational line profile (`--profile rot`) | Gray, D. F. 1992, *The Observation and Analysis of Stellar Photospheres* |
 | FEROS/MIDAS barycentric accuracy caveat | Müller, A., et al. 2013, A&A 556, A3 |
-| Example system V563 Lyr (orbital elements) | Alvarez et al. 2022, RMxAA 58, 223 |
 | Benchmark: published velocities of LL Aqr | Graczyk, D., Smolec, R., Gazeas, K., et al. 2016, A&A 594, A92 |
 | Benchmark: published velocities of AK For | Hełminiak, K. G., Graczyk, D., Konacki, M., et al. 2014, A&A 567, A64 |
 
