@@ -84,30 +84,161 @@ Several practices are adopted from the
 
 ## 2. Quick start
 
-Install first (see [Setup](README.md#setup)), then try the bundled example data: the
-overcontact (W UMa-type) binary **V563 Lyrae** at quadrature, simulated in the
-500–550 nm region from its published spectroscopic orbit (Alvarez et al. 2022,
-RMxAA 58, 223: Vγ = +22.5, K1 = 147.4, K2 = 247.2 km/s, q = 0.596). The
-synchronously rotating components (vsini = 191 and 155 km/s) produce the
-classic nearly-touching contact-binary BF; the true values at this phase are
-RV1 = −124.9 km/s and RV2 = +269.7 km/s:
+Install first (see [Setup](README.md#setup)), then run the bundled data in
+`examples/` — one **real** spectrum per method, and a **single** synthetic
+template that serves all three:
+
+| File | What it is | Method |
+|---|---|---|
+| `example_CCF_SOPHIE_norm.txt` | TYC 3844-385-1 — SOPHIE, OHP 1.93 m, 387–694 nm | `ccf` |
+| `example_BF_HARPS_norm.txt` | LL Aqr — HARPS, ESO 3.6 m (archive programme 084.D-0591(C)), 378–691 nm | `bf` |
+| `example_TODCOR_NeoNarval_norm.txt` | HD 105637 — Neo-Narval, TBL 2 m (Pic du Midi), 568–919 nm | `todcor` |
+| `template_5215K_Logg3.txt` | synth3 synthetic spectrum, 5215 K, log g 3.55, 4500–6500 Å | all three |
+
+The three spectra are observed data, in the continuum-normalized two-column
+ASCII that `normalize` writes, each with the observation's metadata in its
+`#` comment header — `rv_analysis.py header <file>` prints it. The
+coordinates, the epoch, the site and the barycentric frame are therefore
+read off the file, and none of them has to be typed on the command line.
+The template is the raw synth3 output, line list and all: the reader skips
+the header block and takes the 367 725 wavelength points below it — 0.006 Å
+at 6000 Å, i.e. 0.3 km/s per point, well inside the 1 km/s TODCOR grid.
+
+**One template for three different stars is deliberate.** The velocity is far
+less sensitive to the template's temperature than to the data: LL Aqr is
+≈ 900 K hotter than this template, yet its two velocities come out within
+0.1 km/s of the matched 6093 K template used in the
+[benchmark run](README.md#benchmark), and within 0.25 km/s of the published
+values. One G-type template is therefore enough to demonstrate all three
+methods on three different stars. Match the spectral type for production
+work — a mismatch shows up in the line-check figure, in the peak shape and,
+first of all, in TODCOR's fitted α — but do not read "one template per star"
+into this set.
+
+The template also does not have to span the spectrum. It covers
+4500–6500 Å against spectra reaching from 378 to 919 nm, and each command
+restricts itself to the overlap on its own (5686–6495 Å for the Neo-Narval
+file, which starts at 568 nm).
+
+### `ccf` — a single clean peak
 
 ```bash
-python rv_analysis.py bf --spectrum examples/example_observed.obs \
-    --template examples/example_synthetic.prf \
-    --components 2 --resolution 15000 --profile rot
+python rv_analysis.py ccf --spectrum examples/example_CCF_SOPHIE_norm.txt \
+    --template examples/template_5215K_Logg3.txt \
+    --spectrograph SOPHIE --no-bary
 ```
 
-The rotational-profile fit (`--profile rot`, the DDO-series practice)
-recovers −125.5/+270.1 km/s with vsini 189/154; a plain Gaussian fit on
-such blended, nearly-touching profiles carries a few km/s of blending
-bias (−128.0/+276.7).
+```
+CCF method          : weighted line mask, 3163 lines, hydrogen series excluded
+Continuum S/N       : ~405 per pixel
+BJD = 2461123.405687
+RV = -35.7994 ± 0.0069 km/s  (no barycentric correction applied)
+v_bary = -7.7835 km/s (for information only, not applied)
+```
 
-The example file's comment header carries real coordinates (SIMBAD) and a
-`DATE-OBS` chosen so the frame sits at orbital phase 0.25 as seen from the
-**DAO** (Victoria) with V563 Lyr's VarAstro ephemeris — so the full
-barycentric chain runs on it (`--site dao` gives v_bary ≈ +8.4 km/s; in
-the GUI, tick *Apply barycentric correction* with Observatory = DAO).
+`--no-bary` is **required here, and the run refuses to start without it**:
+the SOPHIE header says the wavelengths are already barycentric, so applying
+the correction again would double it ([section
+7](#7-barycentric-frame-the-double-correction-guard)). v_bary is still
+computed and written to the result file as a note — and cross-checked
+against the pipeline's own BERV (−7.7835 vs −7.8121, +29 m/s: OK).
+
+Running `bf --components 2` on the same file returns the same velocity,
+−35.7765 ± 0.0115 km/s, and a second "component" that is a broad flat
+pedestal (amp 0.0006, σ = 43 km/s) rather than a star. The epoch is
+single-peaked, which is exactly when `ccf` is the right command.
+
+### `bf` — the two components of an SB2
+
+```bash
+python rv_analysis.py bf --spectrum examples/example_BF_HARPS_norm.txt \
+    --template examples/template_5215K_Logg3.txt \
+    --spectrograph HARPS --components 2 --dv 1 --no-bary
+```
+
+```
+Continuum S/N       : ~146 per pixel
+BJD = 2455144.516777
+Component 1: RV = -35.7643 ± 0.0155 km/s   (amp=0.0552, area=0.424, sigma=3.07 km/s)
+Component 2: RV =  20.9487 ± 0.0241 km/s   (amp=0.0322, area=0.202, sigma=2.51 km/s)
+Light ratio (C2/C1, from BF areas) ≈ 0.476
+```
+
+This is the eclipsing binary **LL Aqr** on 2009-11-09, one of the two systems
+of the [benchmark report](README.md#benchmark). Graczyk et al. (2016, A&A
+594, A92, Table 1) give **−35.991 ± 0.027** and **+20.699 ± 0.052** km/s for
+this epoch, so both components land within 0.25 km/s of the published
+velocities. The `--dv 1` is the sampling guard of [section
+9](#9-bf-velocity-step-and-the-reliability-of-the-rv-errors): these
+components are 3 km/s wide, and the 5 km/s default step would under-sample
+them. `--no-bary` again — HARPS DRS products are barycentric too.
+
+### `todcor` — an SB2 whose peaks have merged
+
+```bash
+python rv_analysis.py todcor --spectrum examples/example_TODCOR_NeoNarval_norm.txt \
+    --template1 examples/template_5215K_Logg3.txt \
+    --spectrograph NARVAL --dv 1
+```
+
+```
+Grid                : 5685.7-6494.6 A, 39881 px, 1 km/s/px, |v| <= 200 km/s
+Light ratio alpha   : 0.8676 (fitted, +-0.0872)
+Peak correlation    : 0.1050
+Detection gain      : 1.304   (one star gives 1.00)
+Component 1: RV = 44.2293 ± 0.5689 km/s
+Component 2: RV = 22.3370 ± 1.0630 km/s
+Brighter    : component 1 (RV = 44.23 km/s), by a factor 1.15 in flux
+v_bary = -10.8108 km/s (applied)
+```
+
+**Why this file is not a `bf` example.** The two components are 22 km/s
+apart — closer than one profile FWHM — so their BF peaks have merged into a
+single hump. `bf --components 2` on the very same spectrum does not fail
+quietly, it says so:
+
+```
+Component 1: RV = 412.1833 ± 14.1861 km/s   (amp=0.0040, area=0.851, sigma=84.19 km/s)
+Component 2: RV =  43.3984 ±  1.6163 km/s   (amp=0.0092, area=0.392, sigma=16.95 km/s)
+Blended / degenerate fit: C1 has an RV error of 14.2 km/s. The multi-component
+split is not constrained by the data. Single-component fit of the same profile:
+RV = 43.0988 +/- 3.5246 km/s
+WARNING: the fitted peak is only 2.4x the profile noise - this result is
+probably NOT meaningful.
+```
+
+The second component wanders off to +412 km/s as an 84 km/s-wide bump with a
+14 km/s error: the split is not in the data, whatever seeds you give it, and
+the single-component fit of the same profile is the honest reading of it.
+TODCOR models the blend instead of fitting around it, and returns both
+velocities ([section 5](#todcor--two-dimensional-correlation-blended-sb2s)).
+Note that here the barycentric correction **is** applied and no `--no-bary`
+appears: Neo-Narval `st3` spectra are topocentric, and the tool decides that
+from the header rather than from a flag.
+
+Before trusting those velocities, check what the template alone can do —
+noiseless composites, no spectrum needed:
+
+```bash
+python rv_analysis.py todcor --simulate \
+    --template1 examples/template_5215K_Logg3.txt \
+    --sim-sep 10 20 40 --spectrograph NARVAL
+```
+
+```
+ sep_true   v1_rec   v2_rec   bias1   bias2  sep_err   alpha  swap
+     10.0     0.00    10.00   +0.00   -0.00    -0.01   0.600     -
+     20.0     0.00    20.00   +0.00   -0.00    -0.00   0.601     -
+     40.0     0.00    40.00   +0.00   -0.00    -0.00   0.601     -
+```
+
+Bias ≤ 0.01 km/s and α recovered to 0.001 at every separation: the template
+and the grid are not what limits this measurement.
+
+On an ordinary laptop `ccf` takes about 7 s, `todcor` about 11 s and `bf`
+about 30 s (it solves an SVD per order over the full 2000 Å overlap). Each
+writes `result_*.txt`, `result_*.png` and a line-check figure into the
+current directory, plus the run log ([section 11](#11-outputs)).
 
 A self-test on synthetic data (no input files needed at all):
 
@@ -277,6 +408,22 @@ An ASCII/`.prf` synthetic spectrum (synth3 / SynthV style), a FITS spectrum
 (an observed standard used as template), or a PHOENIX model downloaded
 automatically via `--teff/--logg/--feh` (needs `expecto`). **Templates must be
 continuum-normalized, like the observed spectrum.**
+
+A synth3/SynthV file may be given as it comes out of the code, with its line
+list still at the top: the reader skips that block and reads the wavelength
+table below it. That is what `examples/template_5215K_Logg3.txt` is.
+
+The template only has to overlap the observed spectrum in wavelength — it may
+be much shorter, and the analysis is restricted to the common range
+automatically. The bundled template covers 4500-6500 A and is used against
+spectra reaching from 378 to 919 nm.
+
+Match the spectral type where you can, but do not overrate it: the same
+5215 K template measures all three example stars in
+[section 2](#2-quick-start), including one about 900 K hotter, and still
+reproduces the published LL Aqr velocities to 0.25 km/s. A mismatch shows up
+in the line-check figure, in the BF/CCF peak shape and — most of all — in
+TODCOR's fitted alpha, long before it moves the velocity.
 
 ### Observation time
 
@@ -468,6 +615,10 @@ Every run writes a log by default — see [The run log](#the-run-log).
 | `demo` | CCF vs BF self-test on synthetic SB2 data |
 
 ### Common examples
+
+Command shapes, with placeholder file names. For runnable commands on the
+bundled data — with the output they produce — see
+[section 2](#2-quick-start).
 
 ```bash
 # Wilson plot — mass ratio, systemic velocity and which star is the
@@ -1234,6 +1385,12 @@ Applying the correction to an already-corrected file doubles it. The
 python rv_analysis.py barycheck --spectra 'HARPS/ADP.*.fits' 'FEROS/ADP.*.fits'
 ```
 
+The bundled examples show both cases: the HARPS and SOPHIE spectra are
+already barycentric, so `ccf`/`bf` **refuse to run** on them without
+`--no-bary`, while the Neo-Narval spectrum is topocentric and the correction
+is applied silently ([section 2](#2-quick-start)). Nothing but the file
+headers decides that.
+
 **Neo-Narval / NARVAL / Libre-ESpRIT** files get a verdict of their own:
 the pipeline writes `BERV` and `BTLA` into the header but leaves the
 wavelengths in the observer frame, so the correction must be applied. That
@@ -1555,7 +1712,7 @@ time:
 ======================================================================
 rv_analysis.py run started 2026-08-10 22:03:11
 ======================================================================
-command    : rv_analysis.py bf --spectrum examples/example_observed.obs --template examples/example_synthetic.prf --components 2 --resolution 15000 --profile rot
+command    : rv_analysis.py bf --spectrum examples/example_BF_HARPS_norm.txt --template examples/template_5215K_Logg3.txt --spectrograph HARPS --components 2 --dv 1 --no-bary
 directory  : /home/user/work/kxaqr
 python     : 3.12.3 (/home/user/RV_testing/bin/python)
 packages   : numpy 2.5.1, scipy 1.18.0, astropy 8.0.1, matplotlib 3.11.0, PyAstronomy 0.25.0
@@ -1565,7 +1722,7 @@ platform   : Linux-7.0.0-28-generic-x86_64-with-glibc2.39
 ... the full output of the run ...
 
 ======================================================================
-run finished in 2.8 s (2026-08-10 22:03:14)
+run finished in 29.9 s (2026-08-10 22:03:41)
 ======================================================================
 ```
 
@@ -1610,4 +1767,3 @@ line then reads `run stopped with an error` or `run failed` instead of
 
 Run `python rv_analysis.py <command> --help` for the full, authoritative list
 of options.
-
