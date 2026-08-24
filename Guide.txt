@@ -322,9 +322,12 @@ circular orbits fitted to the same velocities.
 
 ### Observed spectrum
 
-ASCII tables (`.txt`, `.dat`, `.obs`, ...; first two numeric columns are
-wavelength — Å or nm, auto-detected — and flux; comment lines, header lines
-and `-` placeholders are skipped) and the common FITS layouts:
+ASCII tables (`.txt`, `.dat`, `.obs`, `.nrm`, ...; first two numeric columns
+are wavelength — Å or nm, auto-detected — and flux; comment lines, header
+lines and `-` placeholders are skipped; a file with no header at all is read
+just the same, and if it follows the DAO naming convention its metadata is
+taken from the [file name](#metadata-in-the-file-name)) and the common
+FITS layouts:
 
 - ESPRESSO S2D (flux ext 1, wavelength ext 4),
 - phase-3 style binary tables with WAVE/LAMBDA and FLUX columns
@@ -427,9 +430,11 @@ TODCOR's fitted alpha, long before it moves the velocity.
 
 ### Observation time
 
-ISOT (`2024-12-03T02:30:00`), a JD/BJD number, or the old FITS date convention
-`DD/MM/YY` (combined automatically with the `UT`/`UTMIDDLE` header card when
-only a date is present). Note that SOPHIE/HARPS-style `s1d` products are
+ISOT (`2024-12-03T02:30:00`), a JD/BJD number (full or reduced by 2 400 000
+— see [Julian dates](#julian-dates-full-or-reduced)), the old FITS date
+convention `DD/MM/YY` (combined automatically with the `UT`/`UTMIDDLE` header
+card when only a date is present), or, for a file with no header, the
+[file name](#metadata-in-the-file-name). Note that SOPHIE/HARPS-style `s1d` products are
 already in the barycentric frame — do not apply the correction twice (see
 [section 7](#7-barycentric-frame-the-double-correction-guard)).
 
@@ -517,9 +522,21 @@ Other GUI features:
   **B-spline** with knots every window — the polynomial order applies to the
   polynomial model only, the clipping iterations to both).
 - **Header** — opens the selected spectrum in its own **plot window** and
-  inspects the FITS header (object, DATE-OBS, RA/Dec, exposure time, any
-  RV-related cards, mid-exposure BJD_TDB) into the result box, auto-filling
-  the target fields. The plot window carries the full matplotlib navigation
+  prints the [standard summary block](#the-standard-summary-block) into the
+  result box, filling the Target fields from **the file that is loaded now**.
+
+  Load a different spectrum and the fields the program filled in for the
+  previous one are cleared the moment the path changes — including **T0 and
+  Period**, which belong to a target rather than to a file and so are the
+  easiest to leave behind: an ephemeris fetched for the last star will
+  otherwise still be sitting there, folding the next star's velocities on
+  somebody else's period. Press **Header** again and the box describes the
+  new spectrum.
+
+  Values *you* typed are not cleared, because you put them there on purpose.
+  They are kept, listed in a note when the spectrum changes, and if the new
+  file disagrees with one, `Header` says so — with both values — instead of
+  overwriting it. The plot window carries the full matplotlib navigation
   bar, so it can be zoomed, panned, sent back **Home** and saved as a PNG,
   and the cursor position is read out in wavelength and flux as it moves —
   the same interactive look a MIDAS plot gives you. One line is drawn per
@@ -694,8 +711,44 @@ python rv_analysis.py batch --spectra 'data/*.fits' --normalize \
 | `--site NAME` | Observatory (built-in name, `lonE,lat,alt`, or an astropy site). **Default: read from the file's own header**, and only then `paranal` |
 | `--no-bary` | Compute v_bary but do **not** add it to the RVs (report only) |
 | `--force-bary` | Apply it anyway when the header check says "already corrected" |
-| `--t0/--period`, `--varastro`, `--t0-to-bjd` | Ephemeris for the orbital phase; fetch it from VarAstro; convert T0 HJD → BJD_TDB |
+| `--t0/--period`, `--varastro`, `--t0-to-bjd` | Ephemeris for the orbital phase; fetch it from VarAstro; convert T0 HJD → BJD_TDB. T0 may be written full or reduced — see [Julian dates](#julian-dates-full-or-reduced) |
 | `--output`, `--plot`, `--dpi` | Result file, figure file, figure resolution (default 600 dpi) |
+
+#### Julian dates: full or reduced
+
+An ephemeris epoch is published both ways — `2459553.00338` and
+`59553.00338` are the same instant, the second one reduced by 2 400 000 —
+and it is easy to type whichever the source used. **RVCalPy accepts both.**
+Every date it works with internally is a full Julian date, so any value
+below 1 000 000 is read as the reduced form and 2 400 000 is added to it:
+
+```
+--t0 59553.00338     ->  Note: Ephemeris T0 = 59553.00338 is a reduced Julian
+                         date; RVCalPy works in full JD and uses
+                         2459553.00338 = 59553.00338 + 2400000.
+--t0 2459553.00338   ->  used as it stands
+```
+
+The promotion is never silent: the note above is printed (and lands in the
+run log), and in the GUI the T0 field is rewritten to the full value so what
+you see is what is used. The rule holds everywhere a date is entered —
+`--t0` on every subcommand, `--obstime`, the terminal wizard, the GUI field,
+and the epoch fetched from VarAstro, which publishes it in both forms.
+
+It matters because nothing downstream would catch the mistake. A reduced T0
+subtracted from a full BJD gives a phase that is wrong but perfectly finite:
+`(BJD - T0)/P mod 1` still returns a number between 0 and 1, the figure
+still folds, and only the physics is nonsense. Feeding a short date to the
+HJD → BJD conversion is worse still, since the light-travel terms would be
+computed for the wrong position of the Earth.
+
+**One form is not recognized: MJD.** A Modified Julian Date is `JD -
+2 400 000.5`, half a day away from the reduced JD above, and it falls in
+exactly the same range of numbers — `59553.00338` alone cannot say which of
+the two it is. RVCalPy always assumes the reduced JD. If your epoch is an
+MJD, add the half day yourself and pass the full JD (`MJD + 2400000.5`); the
+note printed on every promotion repeats that value so it can be checked at a
+glance.
 
 ### `ccf` — cross-correlation
 
@@ -1304,10 +1357,258 @@ on the fitted period, with the O−C residuals underneath).
 python rv_analysis.py header --spectrum ADP.xxxx.fits --site lasilla
 ```
 
-Prints the summary (object, DATE-OBS, RA/Dec, exposure time, RV-related
-cards, mid-exposure BJD_TDB computed for `--site`) followed by all primary
-cards; for a normalized ASCII file it prints the comment header instead,
-including the bary-frame verdict. `--output` saves it to a text file.
+`--output` saves everything to a text file; `--resolve` asks SIMBAD for the
+coordinates of the OBJECT the file names, when the file itself gives none
+(the command is otherwise offline). Without coordinates there is no BJD_TDB
+and no v_bary to print, so `--resolve` is what completes the summary for a
+file that carries a target and a time but no position.
+
+#### The standard summary block
+
+**Every spectrum prints the same block, in the same order, whatever it is.**
+A HARPS phase-3 product, a SOPHIE `s1d`, a FEROS or UVES archive file, a raw
+CCD frame, a normalized ASCII table and a file whose only metadata is its
+name all come out looking like this — and a field the file does not provide
+is printed as `-` rather than left out, so a missing value is *visibly*
+missing:
+
+```
+=============== SPECTRUM HEADER =============
+File       : ADP.2014-09-24T09:43:51.650.fits
+Format     : FITS, 2 HDUs: binary table (WAVE, FLUX, ERR)
+Instrument : HARPS   (INSTRUME)   [built-in: R = 115000]
+Telescope  : ESO-3.6   (TELESCOP)
+Target     : LL-Aqr   (OBJECT)
+RV info    : ESO DRS BERV = -4.2699   (Barycentric Earth Radial Velocity)
+DATE-OBS   : 2010-09-10T00:17:46.910   (DATE-OBS)
+RA [deg]   : 338.67179   (RA)
+Dec [deg]  : -3.59881
+EXPTIME [s]: 300.0019   (EXPTIME)
+Site       : lon -70.7345 E, lat -29.2584, 2400 m   (HIERARCH ESO TEL GEOLON/…)
+Site used  : Observatory from the file header (…)  [ESO La Silla]
+BJD_TDB    : 2455449.520562   (mid-exposure, computed here)
+v_bary     : -4.2639 km/s   (computed here)
+cross-check: pipeline BERV = -4.2699 km/s, ours -4.2639 (+6 m/s) - OK
+Bary frame : corrected (BARYCENT), v_bary = -4.2699 km/s
+=============================================
+```
+
+The part in brackets after each value is **where it was read from** — the
+card, the comment key, or the naming convention. That is the point of the
+block: the commonest header problem is not a missing value but a value taken
+from the wrong place, and a summary that only prints `OBJECT: LL-Aqr` cannot
+show you that. `Format` names the layout the reader actually made of the
+file, and `Instrument` is looked up in the built-in
+[spectrograph table](#6-instruments-and-observatories) so you can see at once
+whether `--spectrograph` will be recognized.
+
+Each field is filled from the first source that has it:
+
+| Field | Read from |
+|---|---|
+| Instrument | `INSTRUME`, `INSTRUM`, `INSTRUMENT`, `ESO INS ID`, `ESO SEQ ARM`; the `OHP …` keyword prefix identifies SOPHIE, which names itself in no card; the Neo-Narval sequence cards identify Neo-Narval |
+| Telescope | `TELESCOP`, `TELESCOPE`, `ESO TEL NAME` |
+| Target | `OBJECT`, `OBJNAME` (Demetra), `TARGNAME`, `TARGET`, `ESO OBS TARG NAME`, `OHP TARG NAME`, else the file name |
+| DATE-OBS | `DATE-OBS`, `DATE_OBS`, `OHP OBS DATE START`, else the file name |
+| RA/Dec | `RA`/`DEC`, `OBJCTRA`/`OBJCTDEC`, `RA-OBJ`/`DEC-OBJ`, or the packed sexagesimal `OHP TARG ALPHA`/`DELTA`; `--resolve` falls back to SIMBAD |
+| EXPTIME | `EXPTIME`, `EXPOSURE`, `ITIME`, `TELAPSE`, else the file name |
+| Site | `SITE_CARD_SETS`: ESO `TEL GEOLON/…`, Neo-Narval `LONGITUD/…`, `GEOLON/…`, `OBSGEO-L/…`, `LONG-OBS/…`, `SITELON/…` (written by `normalize`), `OBS-LONG/…`, Demetra `GEO_LONG/…` and `BSS_LONG/…`; then the instrument's home observatory; then the file name |
+| Epoch | The note explaining what the timestamp *is* — exposure start, mid-exposure, or the mid-time of a sub-exposure sequence — for the conventions where that differs |
+| Bary frame | The keyword vocabulary of [section 7](#7-barycentric-frame-the-double-correction-guard) |
+
+The packed sexagesimal cards deserve a note: `OHP TARG ALPHA = 112631.39`
+means 11:26:31.39, not 112631 degrees. Those are decoded by the reader that
+owns them and are deliberately *not* in the generic list, because a number
+read from the wrong convention gives a position that is wrong without ever
+looking wrong.
+
+#### Normalized files keep everything
+
+`normalize` writes the metadata it found into the `# KEY = VALUE` comment
+header of its output, and `header` reads all of it back, so **a normalized
+copy reports the same block as the file it came from** — same instrument,
+telescope, target, epoch, coordinates, exposure time, site, BJD, v_bary and
+bary-frame verdict, differing only in `Format` and in the source labels:
+
+```
+Instrument : HARPS   (INSTRUME)   [built-in: R = 115000]     <- FITS parent
+Instrument : HARPS   (INSTRUME)   [built-in: R = 115000]     <- _norm.txt
+Site       : … (HIERARCH ESO TEL GEOLON/…)                   <- FITS parent
+Site       : … (SITELON/SITELAT/SITEALT)                     <- _norm.txt
+```
+
+That matters because the normalized ASCII file is often the only copy that
+survives a project. Free-text lines are carried too: the sentence explaining
+a Neo-Narval sequence epoch (`# Neo-Narval: epoch = mid of the 4-exposure
+sequence …`) is read back as the `Epoch` line rather than being discarded as
+an unrecognized card.
+
+#### Metadata in the file name
+
+Not every reduction writes a header, and one of them writes a FITS file whose
+header has been stripped to the wavelength WCS and nothing else. For those
+products the file name is not decoration — it is the only metadata there is,
+and RVCalPy reads it, in `header`, in `ccf`/`bf`/`todcor` and in `batch`.
+
+Two rules hold for every convention below:
+
+- **a card actually written in the file always wins over the name**;
+- **a name may be trusted for what its own convention encodes and nothing
+  more.** The DAO pattern is that observatory's own, so it implies the site;
+  the Demetra pattern is a vendor default that every telescope running that
+  software writes, so it implies no site whatever and does not pretend to.
+
+##### DAO
+
+The DAO (Dominion Astrophysical Observatory) products are plain three-column
+ASCII — wavelength [Å], normalized flux, error — with nothing above the first
+data row, and everything a FITS header would have held is in the name:
+
+```
+sci_KLPer_JD2458010.851821111_DO2017-09-14T080137_ID16030_wst.nrm
+ |    |     |                  |                   |       |
+ |    |     |                  |                   |       processing tags
+ |    |     |                  |                   frame number
+ |    |     |                  UT date/time the exposure STARTED
+ |    |     mid-exposure JD (UTC, geocentric)
+ |    target
+ frame kind
+```
+
+A file matching this pattern gets its OBJECT, its epoch **and its
+observatory** from the name, and the target name is resolved to coordinates
+so the barycentric correction can be computed at all.
+
+**The two times in the name are different times.** `JD...` is the
+mid-exposure epoch, `DO...` the moment the shutter opened, so their
+difference is half the exposure; RVCalPy uses the JD as the epoch and
+reports EXPTIME as 0, because adding half an exposure to a mid-exposure
+time would shift it twice. It also checks the two against each other and
+says so if they disagree by more than a plausible half-exposure — then one
+of them is not what the convention says it is, and you should pass
+`--obstime` yourself.
+
+That JD is a **plain UTC geocentric date, not a BJD**: across the three
+KL Per frames of 2017-09-04/14/15 its offset from the DO stamp is 1500.0 s
+every time, constant to better than half a second over eleven nights, which
+is a fixed half-exposure and not a light-travel term — a heliocentric
+correction would have drifted by up to a minute and a half over that span.
+So the barycentric correction still has to be applied to the epoch.
+
+Two cautions, both because a file name is weaker evidence than a header:
+
+- **The observatory comes from the naming convention alone.** It is used
+  only after the file's own header and its INSTRUME card have come up empty,
+  it is always announced in the output, and `--site` overrides it. A renamed
+  or borrowed file would carry it wrongly.
+- **The wavelength frame is unrecorded.** The double-correction guard of
+  [section 7](#7-barycentric-frame-the-double-correction-guard) reads
+  headers, and there is no header here, so it can only return *unknown* —
+  which is not the same as *topocentric*. A run that applies the correction
+  therefore warns that it is doing so on no evidence. Check one epoch
+  against an RV you trust: **if the uncorrected value is the one that
+  matches, the spectra are already barycentric and you want `--no-bary`.**
+  For the KL Per frames above that is exactly the case — the measured RVs
+  reproduce the published table to 0.2–1.6 km/s with `--no-bary`, and are
+  off by the full v_bary (+22 to +24 km/s) without it.
+
+##### Demetra (Shelyak)
+
+Demetra names every frame it writes after the target, the frame kind, the
+exposure time and the UT start of the exposure, and its extracted products
+inherit that name:
+
+```
+HD234899_Object_3599s_20250809_215627-1_mbtsf_ext_wav_rv_dop.fits
+ |        |      |     |        |      |  |
+ |        |      |     |        |      |  processing chain
+ |        |      |     |        |      exposure number of the night
+ |        |      |     |        UT time the exposure STARTED
+ |        |      |     UT date
+ |        |      exposure time in seconds
+ |        frame kind (Object, Flat, Bias, ThAr, …)
+ target
+```
+
+This one matters even for FITS: the extracted `.fits` above holds `CRVAL1`,
+`CDELT1`, `CTYPE1` **and nothing else** — no OBJECT, no DATE-OBS, no exposure
+time, no site. RVCalPy takes the target, the epoch and EXPTIME from the name;
+`TIC142587827_Object_3600s_20231014_191542_order_all_norm.txt` is read the
+same way.
+
+**The timestamp is the UT START of the exposure**, so EXPTIME is carried
+along with it and the usual half-exposure is added where it always is. That
+is not an inference — the raw frame that still has its header says so. For
+`HD47961_Object_3590s_20241109_013040-1` Demetra wrote
+
+```
+DATE-OBS= '2024-11-09T01:30:41' / Date of observation start
+EXPTIME =                 3590 / [s] Total observation duration
+JD_OBS  = '2460623.563'        / JD start observation
+JD_MID  = '2460623.5838'       / JD mid observation
+```
+
+— the name's `013040` is that DATE-OBS to the second and its `3590s` is that
+EXPTIME exactly, and `JD_MID − JD_OBS` is half of it. When a header does
+carry `JD_MID`, RVCalPy checks it against DATE-OBS + EXPTIME/2 and says so if
+they disagree by more than a minute; it does not otherwise use it, because
+DATE-OBS + EXPTIME/2 is exact to the second where `JD_MID` is rounded to
+1e-4 d = 8.6 s.
+
+Two cautions:
+
+- **The name does not give the observatory** and RVCalPy will not invent one.
+  Demetra is Shelyak Instruments' software, used the world over, so the
+  pattern says nothing about where the spectrum was taken; without `--site`
+  the run falls back to the default observatory and says so. For the AUKR
+  T80 / Whoppshel spectra above that is `--site kreiken` — and their *raw*
+  `.fit` frames give it directly, in `GEO_LONG`/`GEO_LAT`/`GEO_ELEV` and
+  `BSS_LONG`/`BSS_LAT`/`BSS_ELEV`, which RVCalPy now reads.
+- **The processing tags are not header cards.** A name ending
+  `_rv_dop` *may* mean the wavelengths have already been Doppler-corrected,
+  and RVCalPy points at the tag when it is about to apply a correction to a
+  file with no recorded frame — but it does not act on it. Settle it the way
+  the DAO case above was settled: measure one epoch both ways and keep the
+  one that matches an RV you trust.
+
+##### An instrument named in the file name
+
+Weakest of all, and last to be consulted. A file that has no header and
+follows no convention still sometimes states the one thing plainly:
+
+```
+ESPaDOnS_Procyon-1.txt
+```
+
+If a whole word of the name is a spectrograph in the
+[built-in table](#6-instruments-and-observatories), RVCalPy takes the
+instrument from it — and, only when nothing else has supplied one, that
+instrument's home observatory, announced as the weakest evidence it uses.
+The match must be a complete token, so `template_5215K_Logg3.txt` and
+`ADP.2016-09-26T07:15:37.665.fits` match nothing; and the three instrument
+names that are also ordinary English words — `MIKE`, `FIRE`, `GHOST` — must
+be capitalized the way the table spells them, so `my_fire_test.dat` is not
+read as a Magellan spectrum and sent to Las Campanas.
+
+**It gives you the instrument, not the epoch.** A name like that records no
+date, no time and no exposure, so there is no BJD and no barycentric
+correction to be had from it — pass `--object` (or `--ra/--dec`) and
+`--obstime` yourself. The summary says so instead of showing a bare dash:
+
+```
+Instrument : ESPaDOnS   (file name ('ESPaDOnS'))   [built-in: R = 68000]
+Target     : -
+DATE-OBS   : -
+BJD_TDB    : -   (needs coordinates and an epoch: give --object NAME,
+                  or --ra/--dec; --obstime)
+```
+
+RVCalPy does **not** guess the target from the rest of the name. `Procyon` is
+obvious to you and not to a parser: the same rule applied to
+`example_BF_HARPS_norm.txt` would offer `example` or `BF`, and a wrong name
+that happens to resolve in SIMBAD gives coordinates that are wrong without
+ever looking wrong.
+
 
 ### `fetch-adp` — download reduced ESO spectra
 
@@ -1764,6 +2065,11 @@ line then reads `run stopped with an error` or `run failed` instead of
 | A run misbehaved and the terminal is gone | Read `rv_analysis.log` — it holds the whole output of every run, including the command line that produced it ([The run log](#the-run-log)) |
 | No template file at hand | Give `--teff/--logg/--feh` to download a PHOENIX model (needs `expecto`) |
 | VarAstro finds nothing | The lookup already retries the zero-padded GCVS spelling and the SIMBAD cross-identifiers; if it still fails, pass `--t0/--period` yourself |
+| The GUI shows the previous spectrum's target | Fixed: the fields the program filled in are cleared when the spectrum path changes, and `Header` refills them from the file now loaded. Fields you typed yourself are kept and reported rather than overwritten — clear them by hand if they belonged to the previous target |
+| A file with no header gives OBJECT/DATE-OBS = None | If its name follows a convention RVCalPy knows (DAO, Demetra — see [metadata in the file name](#metadata-in-the-file-name)) the values are read from the name; `header --resolve` shows what was found. Otherwise pass `--object/--obstime/--site` yourself |
+| A Demetra spectrum picks the wrong observatory | That convention does not encode the site and the run falls back to the default, saying so. Pass `--site` (`kreiken` for the AUKR T80/Whoppshel spectra); the raw `.fit` frames carry it in `GEO_LONG`/`GEO_LAT`/`GEO_ELEV` and are read automatically |
+| RVs offset by 20-25 km/s from a published table | A spectrum whose header does not record the wavelength frame may already be barycentric; the guard cannot see it and the run says so. Compare one epoch both ways and use `--no-bary` if the uncorrected value is the one that matches ([section 7](#7-barycentric-frame-the-double-correction-guard)) |
+| The orbital phase looks wrong | Check the two dates against each other. Both `--t0` and `--obstime` may be full or reduced by 2 400 000 and are promoted to full JD with a printed note ([Julian dates](#julian-dates-full-or-reduced)) — but an **MJD** is silently taken as a reduced JD and lands half a day off; give an MJD as `MJD + 2400000.5` |
 
 Run `python rv_analysis.py <command> --help` for the full, authoritative list
 of options.
