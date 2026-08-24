@@ -692,7 +692,7 @@ python rv_analysis.py fetch-adp --spectra 'data/FEROS.*.fits'
 
 # a whole time series into an RV curve
 python rv_analysis.py batch --spectra 'data/*.fits' --normalize \
-    --template template.prf --components 2 --object "KX Aqr" --varastro
+    --template template.prf --components 2 --object "*" --varastro
 ```
 
 ### Options shared by `ccf`, `bf` and `batch`
@@ -2013,8 +2013,8 @@ time:
 ======================================================================
 rv_analysis.py run started 2026-08-10 22:03:11
 ======================================================================
-command    : rv_analysis.py bf --spectrum examples/example_BF_HARPS_norm.txt --template examples/template_5215K_Logg3.txt --spectrograph HARPS --components 2 --dv 1 --no-bary
-directory  : /home/user/work/kxaqr
+command    : rv_analysis.py bf --spectrum examples/example_BF_HARPS_norm.txt --template examples/template_*.txt --spectrograph HARPS --components 2 --dv 1 --no-bary
+directory  : /home/user/work/*
 python     : 3.12.3 (/home/user/RV_testing/bin/python)
 packages   : numpy 2.5.1, scipy 1.18.0, astropy 8.0.1, matplotlib 3.11.0, PyAstronomy 0.25.0
 platform   : Linux-7.0.0-28-generic-x86_64-with-glibc2.39
@@ -2036,7 +2036,7 @@ line then reads `run stopped with an error` or `run failed` instead of
 
 - Runs are **appended**, newest last, so one file keeps the history of a
   whole reduction session. Delete it whenever you want a fresh start.
-- `--log FILE` puts the log somewhere else (`--log logs/kxaqr.log`; missing
+- `--log FILE` puts the log somewhere else (`--log logs/*.log`; missing
   directories are created), which is the convenient way to keep one log per
   target.
 - `--no-log` switches it off.
