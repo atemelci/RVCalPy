@@ -19,24 +19,6 @@ directory of their own; the raw files are never modified. Each spectrum's
 own header supplies its epoch, so every point on the curve gets its own BJD,
 barycentric correction and orbital phase.
 
-The results then arrive as **one full-screen gallery**, a card per epoch
-with its fit, its velocities and its time. Clicking a card opens that epoch
-at ordinary size with the full report and a zoomable figure; closing it
-brings the gallery back. Untick the epochs you do not trust, and one save
-writes:
-
-- each kept epoch's own result files, in a subdirectory named after the
-  spectrum
-- **`result_batch_report.txt`** — the run as one readable document, opening
-  with a table of every epoch (BJD, phase, each component's RV and error,
-  v_bary, S/N, peak significance, kept or dropped or failed)
-- **`result_batch_overview.png`** — the gallery as a single picture
-- **`result_RV_curve.txt`** and its figure, ready for the Wilson plot and
-  the orbit fit
-
-The command-line `batch` runs the same measurement unattended and writes the
-same RV curve.
-
 **Usage is documented in [`Guide.txt`](Guide.txt)**: preparing data, the
 interactive mode and its batch, every command-line command, the
 barycentric-frame rules, the BF sampling guards, the outputs, and
