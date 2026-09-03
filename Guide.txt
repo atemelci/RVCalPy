@@ -129,12 +129,24 @@ python rv_analysis.py ccf --spectrum examples/example_CCF_SOPHIE_norm.txt \
 ```
 
 ```
+Star                : TYC 3844-385-1
 CCF method          : weighted line mask, 3163 lines, hydrogen series excluded
 Continuum S/N       : ~405 per pixel
 BJD = 2461123.405687
 RV = -35.7994 ± 0.0069 km/s  (no barycentric correction applied)
 v_bary = -7.7835 km/s (for information only, not applied)
 ```
+
+Every run names the **star** at the top of its report and writes it as the
+first column of the result file's table — never as a `#` note, so a velocity
+is never separated from the star it belongs to. The name is `--object` when
+you give one (the GUI's **Target** box), and otherwise the `OBJECT` the
+spectrum's own header carries, or, for a convention that puts the target in
+the file name, the name read from there. In the table a blank inside a name
+is written as an underscore (`TYC 3844-385-1` → `TYC_3844-385-1`), because a
+blank would split a column. A spectrum that names no target anywhere gets
+`-` and the run still works: the star name is a label, not an input to the
+measurement.
 
 `--no-bary` is **required here, and the run refuses to start without it**:
 the SOPHIE header says the wavelengths are already barycentric, so applying
@@ -157,6 +169,7 @@ python rv_analysis.py bf --spectrum examples/example_BF_HARPS_norm.txt \
 ```
 
 ```
+Star                : 2234_LL-Aqr
 Continuum S/N       : ~146 per pixel
 BJD = 2455144.516777
 Component 1: RV = -35.7643 ± 0.0155 km/s   (amp=0.0552, area=0.424, sigma=3.07 km/s)
@@ -182,6 +195,7 @@ python rv_analysis.py todcor --spectrum examples/example_TODCOR_NeoNarval_norm.t
 ```
 
 ```
+Star                : HD_105637
 Grid                : 5685.7-6494.6 A, 39881 px, 1 km/s/px, |v| <= 200 km/s
 Light ratio alpha   : 0.8676 (fitted, +-0.0872)
 Peak correlation    : 0.1050
@@ -283,13 +297,18 @@ Two things to know if you edit there:
 2. **Check the barycentric frame** — `barycheck` decides whether the
    wavelengths are already barycentric, so you know whether to pass
    `--no-bary` ([section 7](#7-barycentric-frame-the-double-correction-guard)).
-3. **Normalize** — `normalize` (or `batch --normalize`) if the spectrum is
-   not yet continuum-normalized. Templates must be normalized too.
+3. **Normalize** — `normalize` (or `batch --normalize`, or the GUI batch's
+   own tick box) if the spectrum is not yet continuum-normalized.
+   Templates must be normalized too.
 4. **Measure** — `ccf` or `bf` on one spectrum; inspect `result_BF.png`.
 5. **Refine** — rerun with `--guess/--guess-amp/--guess-sigma`, `--dv`,
    `--profile rot`, or a wider `--vel-range` if the first fit is poor.
-6. **Run the series** — `batch` over all epochs with the settings you
-   validated on the single spectrum.
+6. **Run the series** — over all epochs, with the settings you validated on
+   the single spectrum. Two ways, same measurement:
+   [**Batch...** in the GUI](#batch-a-whole-series-in-one-run) when you want
+   to look at every fit and choose which epochs to keep, and the
+   command-line [`batch`](#batch--a-time-series-into-an-rv-curve) when you
+   want it unattended.
 7. **Check the series** — `wilson` plots RV1 against RV2. For a real SB2 the
    points fall on a straight line whose slope is the mass ratio, so a
    mis-identified pair stands out at once and the primary is identified
@@ -517,10 +536,16 @@ line nothing changed — each command still writes where its `--output` and
 
 Other GUI features:
 
-- **Normalize raw...** — continuum-normalize a raw spectrum first; choose the
-  continuum model (**Polynomial** in blended windows, or a cubic
-  **B-spline** with knots every window — the polynomial order applies to the
-  polynomial model only, the clipping iterations to both).
+- **Batch...** — the same settings applied to a whole series of spectra, with
+  every fit shown at once afterwards. It has [two sections of its
+  own](#batch-a-whole-series-in-one-run) below.
+- **Normalize raw...** — continuum-normalize **one** raw spectrum, with a
+  preview: choose the continuum model (**Polynomial** in blended windows, or
+  a cubic **B-spline** with knots every window — the polynomial order applies
+  to the polynomial model only, the clipping iterations to both), press
+  **Preview** to overlay the result on the template, and adjust until they
+  match. This is the place to settle the continuum on one file; the batch
+  normalizes a whole queue with a fixed B-spline and no preview.
 - **Header** — opens the selected spectrum in its own **plot window** and
   prints the [standard summary block](#the-standard-summary-block) into the
   result box, filling the Target fields from **the file that is loaded now**.
@@ -594,10 +619,190 @@ Other GUI features:
   figure always quotes the RV of the Gaussian fit exactly as measured —
   the fit is never altered — and, with the checkbox on, lists **v_bary on
   the legend line right below the fitted RVs**; the result text file
-  contains the raw RV, the corrected RV and v_bary side by side.
+  contains the star, the raw RV, the corrected RV and v_bary side by side,
+  on one line per component.
 
-Without `tkinter` or without a display, the same steps run as a **terminal
-wizard** instead — no options are lost.
+### Batch: a whole series in one run
+
+**Batch...**, next to Run and Save, measures many spectra with the settings
+already on the window — one template, one method, one wavelength range, one
+resolution, one component count — and puts every result in front of you at
+once. It is the same thing as pressing Run ten times, without the ten
+chances to change a setting halfway through: each epoch is measured by
+exactly the `ccf`, `bf` or `todcor` call the single-spectrum Run would have
+made on that file, so a batch result and a hand-run result on the same
+spectrum are the same numbers.
+
+Set the window up first — template, method, spectrograph, target — then
+press **Batch...**. The dialog has a queue and a panel listing exactly what
+the series will share, so there is nothing hidden:
+
+- **Add spectra...** — multi-select, in one or several goes.
+- **Add a folder...** — every spectrum file in a directory, with the
+  template excluded, since a template queued as an epoch would be measured
+  against itself.
+- **Remove selected** / **Clear** — the queue is de-duplicated and sorted; a
+  file queued twice would be one epoch entered twice in the RV curve, under
+  the same BJD.
+
+**Raw spectra are normalized first, in one pass.** Every method here
+measures a *normalized* spectrum: it compares line depths against a
+continuum at 1.0, and a raw frame still carrying the blaze has no such
+continuum. Queueing raw frames and pressing **Run all** would measure the
+blaze as if it were the star. So tick **Normalize the queued spectra
+first** and the run asks for a directory of its own for the normalized
+files before anything is measured.
+
+There is nothing else to set. The batch always fits a **cubic B-spline**
+continuum with interior knots every 20 nm and 20 clipping iterations, and
+that is deliberate rather than a shortcut: a batch is normalized *blind* —
+thirty continuum fits go past with nothing overlaid on a template — so the
+model that runs has to be the one that copes with a whole queue unattended.
+A B-spline follows a wide range through its knots instead of one global
+curve, so it does not need an order chosen per spectrum the way a
+polynomial does, and a wrong polynomial order is precisely the mistake that
+cannot be caught when nothing is being previewed. The single-file
+**Normalize raw...** dialog still offers the polynomial, an adjustable
+order and a preview against the template, and remains the place to tune one
+spectrum by eye.
+
+The raw frames are never touched. Each normalized copy is written as
+`<name>_norm.txt` with its own `<name>_normalization.png` continuum check,
+and carries the target metadata and the wavelength-frame evidence in its
+comment header, so the barycentric machinery keeps working on it. The queue
+is then replaced by those copies and the tick clears itself, so a second run
+does not normalize what is already normalized. If your spectra are already
+normalized, leave the box unticked; that is the default.
+
+**The observation time is the one thing not shared.** Each spectrum's own
+header (or file name) supplies its epoch, and with it its BJD, its
+barycentric correction and its orbital phase. If the **Obs. time** box on
+the main window holds a value, the dialog says in orange that it is ignored
+here: one typed timestamp used for ten files would give all ten the same
+BJD, the same v_bary and the same phase, and the RV curve that came out
+would be flat and wrong without looking wrong.
+
+Before the run starts, the queue's wavelength frames are checked together,
+because the **Apply barycentric correction** tick is a single switch and the
+guard behind it looks at the file in the spectrum box — which is not one of
+these. A queue that mixes barycentric and topocentric files is refused
+outright: one setting cannot be right for both, so run them as two batches.
+A queue that is entirely barycentric while the box is ticked offers to
+switch the correction off, since applying it a second time doubles 20–30
+km/s of Earth's motion.
+
+Two method settings are refused for a batch, both for the same reason —
+they are about one epoch, not a series:
+
+- **BF with assumptions.** The starting guesses are read off one BF curve.
+  Between epochs the components move by tens of km/s, so the same guess
+  applied to a whole series pulls every epoch back towards the first one's
+  answer. Switch to the automatic component search.
+- **TODCOR self-calibration.** It builds its composites from the templates
+  and reads no observed spectrum at all, so a list of spectra changes
+  nothing about it.
+
+A progress window names the file being measured and has a **Stop** button;
+stopping keeps everything measured so far. An epoch that fails is not lost
+either — it appears in the results with its error message instead of a
+figure, so a broken file is visible rather than silently missing.
+
+### Reading a batch: the overview and the detail window
+
+The results open as **one big window, as large as the screen allows** — one
+card per spectrum, laid out in as many columns as fit and re-flowed when the
+window is resized. Each card carries a small thumbnail of that epoch's fit,
+the file name, one line per component with the velocity and its error, the
+BJD, the phase, v_bary and a **keep this epoch** tick. The thumbnails are
+deliberately small: a card is there to be *recognised*, not read — whether
+the peaks are where they should be, whether one epoch looks unlike its
+neighbours — and at this size a fifteen-epoch series fits on one screen
+without scrolling. The readable copy is one click away.
+
+**Click a card and it opens at ordinary size**: the full report, the
+full-resolution figure with the matplotlib navigation bar to zoom and pan
+it, and **Previous**/**Next** (or the ← → keys) to walk the series without
+going back and forth. The big overview steps aside while you read a single
+result and **comes back the moment you close the detail window** — the
+Back button, the window's close box or the Esc key — so there is only ever
+one window to look at.
+
+The **keep** tick is the choice you carry to the whole series. Untick the
+epochs whose fit you do not trust — the card shows enough to judge, the
+detail view shows the rest — and the ones left ticked are the ones that
+become the series. It is the same tick in both views: changing it in the
+detail window moves the card, and the header keeps a running count.
+**Keep all** and **Keep none** are in the footer.
+
+- **RV curve...** plots the kept epochs against orbital phase when the
+  window has an ephemeris, and against BJD otherwise, in a zoomable window.
+- **Save all kept...** asks for a second directory — the normalized
+  spectra went into their own, this one is for the results — and writes
+  everything the run produced:
+
+  - **one subdirectory per kept epoch, named after the spectrum**, holding
+    that epoch's own `result_*.txt`, its fit figure and its line-check
+    figure. The naming is not cosmetic: every single-spectrum run calls its
+    files `result_BF.txt` and `result_BF.png` whatever spectrum it measured,
+    so ten epochs written side by side into one folder would be one epoch
+    written ten times.
+  - **`result_batch_report.txt`** — the whole run as one document, and the
+    file to read, keep or send on. Its heading names the **star** the run
+    measured (every star, with its epoch count, when the queue held more
+    than one). It opens with **ALL EPOCHS**, an aligned table carrying one
+    line per spectrum — every queued spectrum, so the table is a record of
+    the run and not only of its successes. The columns are:
+
+    | column | meaning |
+    |---|---|
+    | `star` | the target as given on the window, or as named by that spectrum's own header or file name; written only when at least one spectrum could be attributed |
+    | `spectrum` | the file, its middle cut out when it is too long for the column |
+    | `BJD_TDB` | mid-exposure barycentric Julian date; `-` means the epoch or the coordinates were missing |
+    | `phase` | orbital phase from the ephemeris on the window; `-` when none was given |
+    | `RVn` | the velocity as reported — barycentric when the correction was applied, measured otherwise — with its error |
+    | `v_bary` | the barycentric correction; the heading of the report says whether it was added to the RVs |
+    | `S/N` | continuum signal-to-noise per pixel of the spectrum |
+    | `peak` | significance of the correlation or BF peak (TODCOR: the 2-D peak correlation); below ~4 the velocity is not trustworthy |
+    | `status` | kept, dropped or failed |
+
+    The table carries no legend of its own: the columns mean the same thing
+    in every run, so they are written down here once instead of into every
+    file the program produces. After the table come the settings the run was
+    made with (including the normalization, when one ran), every epoch's
+    full report in the order measured, the epochs dropped or failed with the
+    reason, and the velocity table.
+  - **`result_batch_overview.png`** — the gallery itself as one picture:
+    every kept epoch's figure at readable size, captioned with its file
+    name, velocities, BJD and phase.
+  - **`result_RV_curve.txt`** — the same column layout the command-line
+    [`batch`](#batch--a-time-series-into-an-rv-curve) writes, beginning
+    with a **`star`** column and then the spectrum, so a curve found months
+    later still says which star it belongs to; `wilson --star` and
+    `orbit --star` select on that column by name, matching it on letters
+    and digits, so typing `LL Aqr` finds the `LL_Aqr` in the file (a blank
+    inside a name would split a column, so it is written as an
+    underscore). A spectrum that names no target gets `-`. It feeds
+    [`wilson`](#wilson--mass-ratio-from-the-rv1-vs-rv2-plot) and
+    [`orbit`](#orbit--sb2-orbital-elements-the-last-step-of-the-chain)
+    directly — plus `result_RV_curve.png`, and in BF mode
+    `result_BF_profiles.png`, every epoch's profile stacked by phase.
+
+Nothing is written until you press one of the Save buttons, exactly as for a
+single run. **Save this one...** in the detail window writes just the epoch
+on screen.
+
+The command-line [`batch`](#batch--a-time-series-into-an-rv-curve) command
+is unchanged and still the right tool for an unattended run over a long
+series; the GUI batch is for the case where you want to *look* at every fit
+before deciding which epochs to keep.
+
+Without `tkinter` or without a display, a **terminal wizard** takes over:
+it walks through the target, the files and the settings for **one** spectrum
+and runs `ccf` or `bf` on it. It is not a replacement for the whole window —
+TODCOR, the Wilson plot and the batch are not in it — so for a series
+without a display use the command-line
+[`batch`](#batch--a-time-series-into-an-rv-curve), which needs no display at
+all.
 
 ## 5. Command line
 
@@ -620,7 +825,7 @@ Every run writes a log by default — see [The run log](#the-run-log).
 
 | Command | What it does |
 |---|---|
-| `gui` | Open the widget (same as no arguments) |
+| `gui` | Open the widget (same as no arguments); its **Batch...** button runs a whole series and shows every fit at once |
 | `ccf` | Cross-correlation RV of one spectrum (weighted line mask) |
 | `todcor` | Two-dimensional correlation against two shifted templates at once — for SB2s whose CCF peaks blend (one template file is enough for a twin binary) |
 | `bf` | Broadening-Function RV of one spectrum (SVD; SB1/SB2/SB3) |
@@ -1051,11 +1256,32 @@ It runs the [barycentric header check](#7-barycentric-frame-the-double-correctio
 automatically over the input files and warns when the headers contradict the
 chosen `--no-bary` setting.
 
+`result_RV_curve.txt` begins with a **`star`** column and then the spectrum,
+so a curve found months later still says what it is a curve of. Each epoch
+carries its OWN star: `--object` is your word for the whole series and wins,
+but a name that was merely read off the first file does not, so a queue that
+turns out to hold two targets says so in the table instead of quietly
+averaging them. Blanks inside a name are written as underscores, because a
+blank would split a column.
+
+**This command or the GUI's Batch...?** They run the same measurement on the
+same files and the `result_RV_curve.txt` they write has the same columns, so
+neither result is second-class. Use this one for an unattended run over a
+long series, in a script, or over ssh. Use
+[**Batch...**](#batch-a-whole-series-in-one-run) when you want to *look* at
+every fit before deciding which epochs belong in the curve — it ends in a
+gallery you can click through, per-epoch keep/drop ticks, and a save that
+also writes the run as a readable report. The GUI batch takes its
+continuum model as fixed (a cubic B-spline); `--normalize` here still
+accepts `--fit-method`, `--poly-order`, `--iterations` and `--window`.
+
 ### `normalize` — continuum normalization
 
 `normalize` (and `batch --normalize`) fits the continuum with iterative
 asymmetric sigma-clipping, so the fit converges onto the continuum regions.
-Two continuum models are available (`--fit-method`):
+Two continuum models are available (`--fit-method`) — the GUI's batch is the
+one exception and always uses the B-spline, for the reason given
+[there](#batch-a-whole-series-in-one-run):
 
 - **poly** (default) — a low-order polynomial; segments wider than ~1.5× the
   window (default 20 nm) are fitted in 50%-overlapping windows blended with
@@ -1226,7 +1452,10 @@ With neither, a table that has no such header is read as plain
 **One line belongs to one binary, on one velocity scale.** Two filters matter:
 
 - `--star` — a summary holding several systems must be filtered, or the fit
-  mixes unrelated stars. Rows from more than one star raise a warning.
+  mixes unrelated stars. Rows from more than one star raise a warning. It
+  reads the table's `star` column, which every `result_RV_curve.txt` now
+  has, and matches on letters and digits only — so `--star "LL Aqr"` finds
+  the `LL_Aqr` written in the file, and `HD_105637` finds `HD 105637`.
 - `--dataset` — restricts to one `# ==== <name> ====` section. This is not
   cosmetic: if one instrument's RVs are barycentric and another's are in the
   measured frame, part of the points slide along the line and the slope is
@@ -1988,13 +2217,17 @@ SB2 velocities.
 
 | File | Content |
 |---|---|
-| `result_CCF.txt` / `result_BF.txt` | RVs with errors, uncorrected and barycentric-corrected, amplitudes, areas, widths, light ratios, the continuum S/N of the spectrum; low-S/N and low-significance results carry explicit warnings (low S/N is the dominant source of spurious RVs — Katz et al. 2025) |
+| `result_CCF.txt` / `result_BF.txt` | RVs with errors, uncorrected and barycentric-corrected, amplitudes, areas, widths, light ratios, the continuum S/N of the spectrum. The data table opens with a `star` column, so a velocity is never separated from the star it belongs to; low-S/N and low-significance results carry explicit warnings (low S/N is the dominant source of spurious RVs — Katz et al. 2025) |
 | `result_CCF.png` / `result_BF.png` | Fit figure (BF: one dashed profile per component with `amp` and RV in the legend) |
 | `result_CCF_linecheck.png` / `result_BF_linecheck.png` | Model reliability check at two strong diagnostic lines per 50-nm band over 400–700 nm (Ca I 4226/Fe I 4383, Ba II 4554/Fe II 4583, Fe I 5269/5328, Fe I 5572/Ca I 5588, Ca I 6122/Fe I 6302, Fe I 6663/Ca I 6717); only the lines inside the analyzed range are used |
-| `result_TODCOR.txt` / `.png` | `todcor` mode: both velocities with errors, the fitted α and which component is brighter, the peak correlation, and whether the exact or regular normalization ran. The figure shows the 2-D surface plus the two cuts through the maximum — each cut is what a 1-D CCF would look like if the other component's velocity were already known |
+| `result_TODCOR.txt` / `.png` | `todcor` mode: both velocities with errors, one row per component behind a `star` column, the fitted α and which component is brighter, the peak correlation, and whether the exact or regular normalization ran. The figure shows the 2-D surface plus the two cuts through the maximum — each cut is what a 1-D CCF would look like if the other component's velocity were already known |
 | `result_TODCOR_selfcal.txt` | `todcor --simulate`: recovered velocities, bias, α and the `swap` column at each tested separation |
-| `result_RV_curve.txt` / `.png` | `batch` mode: BJD, phase and per-component RVs for the whole series; components varying by more than 3 km/s peak-to-peak between epochs are flagged as binarity/variability candidates (Katz et al. 2025) |
-| `result_BF_profiles.png` | `batch` mode: all BF profiles stacked by orbital phase |
+| `result_RV_curve.txt` / `.png` | `batch` mode, and the GUI batch's **Save all kept...**: star, spectrum, BJD, phase and per-component RVs for the whole series. In `batch` mode, components varying by more than 3 km/s peak-to-peak between epochs are flagged as binarity/variability candidates (Katz et al. 2025) in a comment above the table. Same columns either way, so both feed `wilson` and `orbit` directly, and `--star` selects one star out of a file that holds two |
+| `result_BF_profiles.png` | `batch` mode and the GUI batch: all BF profiles stacked by orbital phase |
+| `<spectrum name>/result_*.txt` / `.png` | GUI batch only: one subdirectory per kept epoch, holding that epoch's own result files under their usual names. Every single-spectrum run names its output `result_BF.txt` whatever it measured, so the subdirectory is what keeps ten epochs from overwriting each other |
+| `result_batch_report.txt` | GUI batch only: the whole run as one document, headed by the star it measured. Opens with an aligned one-line-per-epoch table (star, spectrum, BJD_TDB, phase, each component's RV with error, v_bary, continuum S/N, peak significance, kept/dropped/failed — the columns are explained under [Reading a batch](#reading-a-batch-the-overview-and-the-detail-window), not in the file), then the settings used including the normalization pass, every epoch's full report, the epochs dropped or failed and why, and the velocity table |
+| `result_batch_overview.png` | GUI batch only: the results gallery as a single picture, every kept epoch's figure captioned with its file name, velocities, BJD and phase |
+| `<name>_norm.txt` / `<name>_normalization.png` | GUI batch normalization pass: one normalized copy and one continuum-check figure per raw spectrum, written to the directory asked for before the run. Always a cubic B-spline continuum, knots every 20 nm. The raw frames are not modified |
 | `result_normalization.png` | `normalize` mode: the spectrum, the fitted continuum and the normalized result |
 | `rv_analysis.log` | **Every** run: the complete console output, with the command line, directory and package versions that produced it |
 
@@ -2061,6 +2294,12 @@ line then reads `run stopped with an error` or `run failed` instead of
 | The BF is noisy / wings do not decay | Check that both spectrum **and** template are continuum-normalized; give `--spectrograph`/`--resolution` so the BF is smoothed properly; try `--svd-rcond` |
 | The CCF peak is at a nonsense velocity | Low S/N is the dominant source of spurious RVs. Check the S/N in the result file; restrict the range with `--wave-min/--wave-max`; for a hot star keep the default mask mode |
 | Hot star gives a broad, biased CCF | Do not pass `--keep-balmer`; the default mask already drops the hydrogen series |
+| Ten RAW spectra to measure | Queue them in **Batch...** and tick **Normalize the queued spectra first**. It asks for a directory for the normalized copies, fits a cubic B-spline continuum to each, then measures those. There is nothing to configure; use **Normalize raw...** if you want to tune one spectrum by eye first |
+| A batch measured the blaze instead of the star | The spectra were raw. Every method here needs a continuum at 1.0 — re-run with the batch normalization ticked, or normalize them beforehand |
+| Ten spectra to measure with one template | Set the window up once, press **Batch...**, queue the files, and read every fit in the results overview — see [Batch](#batch-a-whole-series-in-one-run). For an unattended run over a long series use the command-line `batch` instead |
+| A batch refuses to start: "the queue mixes two wavelength frames" | Some queued files say their wavelengths are already barycentric and others say they are topocentric. The **Apply barycentric correction** tick is one switch and cannot be right for both — run them as two batches; `barycheck` shows the per-file evidence |
+| A batch refuses to start: "a batch needs the automatic component search" | BF assumption mode starts every fit from RVs read off one epoch's curve, which drags a whole series towards that epoch's answer. Open **Method...** and switch to the automatic search |
+| Batch results all share one BJD or phase | Not possible from the GUI batch, which ignores the **Obs. time** box and reads each file's own header. If it happens on the command line, `--obstime` was given one value for the whole series — drop it, or use `--bjd` with one value per file |
 | The GUI does not open | `tkinter` is missing (see [Setup](README.md#setup)) or there is no display — the terminal wizard starts instead with the same steps |
 | A run misbehaved and the terminal is gone | Read `rv_analysis.log` — it holds the whole output of every run, including the command line that produced it ([The run log](#the-run-log)) |
 | No template file at hand | Give `--teff/--logg/--feh` to download a PHOENIX model (needs `expecto`) |
