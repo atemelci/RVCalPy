@@ -9,9 +9,7 @@ velocities on to the **Wilson plot** (mass ratio and systemic velocity with no
 orbit assumed) and to an **SB2 orbit fit**.
 
 Every result file names the **star** it belongs to, in the first column of
-its table: the target you typed, or the `OBJECT` the spectrum's own header or
-file name carried. Explanations of the columns are in
-[`Guide.txt`](Guide.txt), not repeated inside every file.
+its table.
 
 A whole observing series is handled in one go. In the graphical interface,
 **Batch...** takes the settings already on the window — one template, one
@@ -19,8 +17,7 @@ method, one wavelength range — and applies them to as many spectra as you
 queue. Raw frames can be continuum-normalized first, on one tick, into a
 directory of their own; the raw files are never modified. Each spectrum's
 own header supplies its epoch, so every point on the curve gets its own BJD,
-barycentric correction and orbital phase. Each epoch also keeps its own star,
-so a queue that turns out to hold two targets says so in the table.
+barycentric correction and orbital phase.
 
 The results then arrive as **one full-screen gallery**, a card per epoch
 with its fit, its velocities and its time. Clicking a card opens that epoch
@@ -30,15 +27,12 @@ writes:
 
 - each kept epoch's own result files, in a subdirectory named after the
   spectrum
-- **`result_batch_report.txt`** — the run as one readable document, headed
-  by the star it measured and opening with a table of every epoch (star,
-  spectrum, BJD, phase, each component's RV and error, v_bary, S/N, peak
-  significance, kept or dropped or failed; what the columns mean is in
-  `Guide.txt`, not repeated in every file)
+- **`result_batch_report.txt`** — the run as one readable document, opening
+  with a table of every epoch (BJD, phase, each component's RV and error,
+  v_bary, S/N, peak significance, kept or dropped or failed)
 - **`result_batch_overview.png`** — the gallery as a single picture
-- **`result_RV_curve.txt`** and its figure, starting with a `star` column
-  so the series names its own target, ready for the Wilson plot and the
-  orbit fit — `wilson --star` and `orbit --star` select on that column
+- **`result_RV_curve.txt`** and its figure, ready for the Wilson plot and
+  the orbit fit
 
 The command-line `batch` runs the same measurement unattended and writes the
 same RV curve.
