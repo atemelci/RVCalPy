@@ -8,10 +8,46 @@ whose two peaks have merged. For a double-lined binary it carries the
 velocities on to the **Wilson plot** (mass ratio and systemic velocity with no
 orbit assumed) and to an **SB2 orbit fit**.
 
+Every result file names the **star** it belongs to, in the first column of
+its table: the target you typed, or the `OBJECT` the spectrum's own header or
+file name carried. Explanations of the columns are in
+[`Guide.txt`](Guide.txt), not repeated inside every file.
+
+A whole observing series is handled in one go. In the graphical interface,
+**Batch...** takes the settings already on the window — one template, one
+method, one wavelength range — and applies them to as many spectra as you
+queue. Raw frames can be continuum-normalized first, on one tick, into a
+directory of their own; the raw files are never modified. Each spectrum's
+own header supplies its epoch, so every point on the curve gets its own BJD,
+barycentric correction and orbital phase. Each epoch also keeps its own star,
+so a queue that turns out to hold two targets says so in the table.
+
+The results then arrive as **one full-screen gallery**, a card per epoch
+with its fit, its velocities and its time. Clicking a card opens that epoch
+at ordinary size with the full report and a zoomable figure; closing it
+brings the gallery back. Untick the epochs you do not trust, and one save
+writes:
+
+- each kept epoch's own result files, in a subdirectory named after the
+  spectrum
+- **`result_batch_report.txt`** — the run as one readable document, headed
+  by the star it measured and opening with a table of every epoch (star,
+  spectrum, BJD, phase, each component's RV and error, v_bary, S/N, peak
+  significance, kept or dropped or failed; what the columns mean is in
+  `Guide.txt`, not repeated in every file)
+- **`result_batch_overview.png`** — the gallery as a single picture
+- **`result_RV_curve.txt`** and its figure, starting with a `star` column
+  so the series names its own target, ready for the Wilson plot and the
+  orbit fit — `wilson --star` and `orbit --star` select on that column
+
+The command-line `batch` runs the same measurement unattended and writes the
+same RV curve.
+
 **Usage is documented in [`Guide.txt`](Guide.txt)**: preparing data, the
-interactive mode, every command-line command, the barycentric-frame rules, the
-BF sampling guards, the outputs, and troubleshooting. This file covers the
-benchmark, setup, license, references and acknowledgements.
+interactive mode and its batch, every command-line command, the
+barycentric-frame rules, the BF sampling guards, the outputs, and
+troubleshooting. This file covers the benchmark, setup, license, references
+and acknowledgements.
 
 ## Setup
 
@@ -133,7 +169,7 @@ residuals and the phased velocity figures are in the report:
 
 ## Acknowledgements
 
-I am grateful to **Tobias Cornelius Hinse**, **Mehmet Alperen Kul**, **Piercarlo Bonifacio** and
+I am grateful to **Tobias Cornelius Hinse**, **Mehmet Alperen Kul** and
 **Otmar Stahl** for their guidance, discussions and feedback during the
 development of this tool. Their input shaped the methods, the data handling
 and the checks built into `rv_analysis.py`.
