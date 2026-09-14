@@ -249,10 +249,11 @@ python rv_analysis.py todcor --simulate \
 Bias ≤ 0.01 km/s and α recovered to 0.001 at every separation: the template
 and the grid are not what limits this measurement.
 
-On an ordinary laptop `ccf` takes about 7 s, `todcor` about 11 s and `bf`
-about 30 s (it solves an SVD per order over the full 2000 Å overlap). Each
-writes `result_*.txt`, `result_*.png` and a line-check figure into the
-current directory, plus the run log ([section 11](#11-outputs)).
+On an ordinary laptop `ccf` takes about 15 s, `todcor` about 9 s and `bf`
+about 50 s (it solves an SVD per order over the full 2000 Å overlap). Each
+writes `result_*.txt`, `result_*.png`, a line-check figure and the spectrum
+shifted to the star's rest frame (`result_*_shifted*.fits`) into the current
+directory, plus the run log ([section 11](#11-outputs)).
 
 A self-test on synthetic data (no input files needed at all):
 
@@ -349,8 +350,11 @@ taken from the [file name](#metadata-in-the-file-name)) and the common
 FITS layouts:
 
 - ESPRESSO S2D (flux ext 1, wavelength ext 4),
-- phase-3 style binary tables with WAVE/LAMBDA and FLUX columns
-  (FEROS, HARPS, UVES, ...),
+- phase-3 style binary tables with WAVE/WAVELENGTH/LAMBDA/AWAV and
+  FLUX/FLUX_REDUCED/INTENSITY/FLUX_NOR columns (FEROS, HARPS, UVES,
+  PolarBase `.fts`, ...); the wavelength unit comes from the column's
+  `TUNIT` (nm and µm are converted to Å), and a column with no unit and a
+  median below 1500 is taken to be nm, as for ASCII,
 - IRAF echelle **multispec** images (`CTYPE1 = 'MULTISPE'`, WAT2 cards;
   linear, log and Chebyshev/Legendre dispersion solutions, per-order
   Doppler factor applied),
@@ -360,6 +364,31 @@ FITS layouts:
   axes (e.g. UVES/MIDAS `(1, 1, N)` products) are squeezed away and the
   IRAF band axis of onedspec/apall products (`BANDID1 = 'spectrum - ...'`,
   `'raw'`, `'background'`, `'sigma'`) is reduced to the *spectrum* band.
+
+A file is read as FITS when its name ends in `.fits`, `.fit` or `.fts`
+(each also `.gz`); anything else goes to the ASCII reader.
+
+> **PolarBase (ESPaDOnS / NARVAL) downloads.** Each exposure comes as two
+> products, `<odometer>i` (normalized by the pipeline) and `<odometer>i_u`
+> (not normalized). Each product comes as a `.s` table and a `.fts` VO FITS
+> file with the same data, plus a `.meta` and a pipeline log `.out`; the
+> normalized product also has an LSD profile (`.lsd`). What to know:
+>
+> - **Use the `.fts` or the `.s`.** The `.fts` carries its own header. The
+>   `.s` has none: its target, coordinates, epoch and exposure time are read
+>   from the `.meta` beside it, and so are those of a window you cut out of
+>   it, as long as the cut stays in the folder with its `.meta`. A copy moved
+>   to another folder has no epoch unless you normalize it first, because
+>   `normalize` writes everything into the copy's header.
+> - **The wavelengths are already heliocentric**: run with `--no-bary`. The
+>   small helio→barycentric term is then added for you.
+> - **Use one product for every epoch.** The `i` and `i_u` wavelength scales
+>   of one exposure differ by ~0.15 km/s, and `batch` warns when a queue
+>   mixes them. Prefer `i`: the `_u` flux still carries the blaze, so it has
+>   to be normalized before it can be measured.
+>
+> The details, and how each was measured, are in
+> [section 7](#7-barycentric-frame-the-double-correction-guard).
 
 > **Correlation functions, not spectra.** An ESO-MIDAS `xcorr` product
 > (`m..._ln_corr_v.fits`) is the *output* of a cross-correlation: its
@@ -445,7 +474,11 @@ Match the spectral type where you can, but do not overrate it: the same
 [section 2](#2-quick-start), including one about 900 K hotter, and still
 reproduces the published LL Aqr velocities to 0.25 km/s. A mismatch shows up
 in the line-check figure, in the BF/CCF peak shape and — most of all — in
-TODCOR's fitted alpha, long before it moves the velocity.
+TODCOR's fitted alpha, long before it moves the velocity. In the line check
+it looks like lines at the right place with the wrong strength. For a B star
+measured with a template that is too cool, the He I lines come out deeper
+than the model and the Si II / Fe II lines weaker, while the Balmer lines
+still match ([Outputs](#11-outputs)).
 
 ### Observation time
 
@@ -453,7 +486,10 @@ ISOT (`2024-12-03T02:30:00`), a JD/BJD number (full or reduced by 2 400 000
 — see [Julian dates](#julian-dates-full-or-reduced)), the old FITS date
 convention `DD/MM/YY` (combined automatically with the `UT`/`UTMIDDLE` header
 card when only a date is present), or, for a file with no header, the
-[file name](#metadata-in-the-file-name). Note that SOPHIE/HARPS-style `s1d` products are
+[file name](#metadata-in-the-file-name), or, for a PolarBase `.s`, its
+`.meta` file. PolarBase times are exposure **starts**: the `.meta`
+`Observation date`, and also the `.fts` `DATE-OBS`, although its comment
+calls it the middle. Half the exposure is added to both. Note that SOPHIE/HARPS-style `s1d` products are
 already in the barycentric frame — do not apply the correction twice (see
 [section 7](#7-barycentric-frame-the-double-correction-guard)).
 
@@ -529,7 +565,9 @@ down to read a long report in one go.
 
 **Save** asks where first: a directory chooser opens on the folder the run
 would have used, and the result text file and figures are written there
-under their usual names. Cancelling the chooser writes nothing at all. The
+under their usual names, together with the **shifted spectrum**
+(`result_<METHOD>_shifted.fits`, one `_C1`/`_C2` file per component; see
+[Outputs](#11-outputs)). Cancelling the chooser writes nothing at all. The
 result box then lists the paths the files actually went to. On the command
 line nothing changed — each command still writes where its `--output` and
 `--plot` say, immediately after the run.
@@ -689,7 +727,10 @@ these. A queue that mixes barycentric and topocentric files is refused
 outright: one setting cannot be right for both, so run them as two batches.
 A queue that is entirely barycentric while the box is ticked offers to
 switch the correction off, since applying it a second time doubles 20–30
-km/s of Earth's motion.
+km/s of Earth's motion. A queue that mixes the two PolarBase products
+(normalized `i` and not-normalized `i_u`) asks before running, because
+their wavelength zero points differ by ~0.15 km/s and the curve would carry
+that step.
 
 Two method settings are refused for a batch, both for the same reason —
 they are about one epoch, not a series:
@@ -741,8 +782,8 @@ detail window moves the card, and the header keeps a running count.
   everything the run produced:
 
   - **one subdirectory per kept epoch, named after the spectrum**, holding
-    that epoch's own `result_*.txt`, its fit figure and its line-check
-    figure. The naming is not cosmetic: every single-spectrum run calls its
+    that epoch's own `result_*.txt`, its fit figure, its line-check
+    figure and its rest-frame spectrum `result_*_shifted*.fits`. The naming is not cosmetic: every single-spectrum run calls its
     files `result_BF.txt` and `result_BF.png` whatever spectrum it measured,
     so ten epochs written side by side into one folder would be one epoch
     written ten times.
@@ -898,6 +939,13 @@ python rv_analysis.py fetch-adp --spectra 'data/FEROS.*.fits'
 # a whole time series into an RV curve
 python rv_analysis.py batch --spectra 'data/*.fits' --normalize \
     --template template.prf --components 2 --object "*" --varastro
+
+# PolarBase ESPaDOnS/NARVAL: the pipeline-normalized .fts products of every
+# epoch (never mix them with the *_u ones); already heliocentric, so
+# --no-bary, and the helio->barycentric term is added automatically
+python rv_analysis.py batch --spectra 'polarbase/*/[0-9]*i.fts' \
+    --method ccf --template template_17000K.txt --spectrograph ESPaDOnS \
+    --no-bary --wave-min 400 --wave-max 550
 ```
 
 ### Options shared by `ccf`, `bf` and `batch`
@@ -1254,7 +1302,10 @@ when α is wildly implausible.
 
 It runs the [barycentric header check](#7-barycentric-frame-the-double-correction-guard)
 automatically over the input files and warns when the headers contradict the
-chosen `--no-bary` setting.
+chosen `--no-bary` setting. It also warns when the files mix the two
+PolarBase products (`i` and `i_u`). For heliocentric spectrum files run with
+`--no-bary`, each epoch's RVs include the helio→barycentric term, and the
+curve gets a last `helio_to_bary[km/s]` column.
 
 `result_RV_curve.txt` begins with a **`star`** column and then the spectrum,
 so a curve found months later still says what it is a curve of. Each epoch
@@ -1302,7 +1353,10 @@ coordinates straight from the normalized file and can compute the
 barycentric correction without re-entering them. The barycentric-frame
 evidence (INSTRUME, SPECSYS or a BARYFRAME verdict card, BERV) is copied
 too, so `barycheck` and the automatic check in `batch` keep working on
-the normalized ASCII file.
+the normalized ASCII file. For a PolarBase spectrum the metadata comes from
+its `.meta` file when the spectrum has no header, and the product it came
+from is kept as `PBPRODUCT = normalized / not-normalized`. Re-normalizing an
+`i_u` file does not give it the zero point of the pipeline-normalized `i`.
 
 ### `wilson` — mass ratio from the RV1-vs-RV2 plot
 
@@ -1637,13 +1691,14 @@ Each field is filled from the first source that has it:
 |---|---|
 | Instrument | `INSTRUME`, `INSTRUM`, `INSTRUMENT`, `ESO INS ID`, `ESO SEQ ARM`; the `OHP …` keyword prefix identifies SOPHIE, which names itself in no card; the Neo-Narval sequence cards identify Neo-Narval |
 | Telescope | `TELESCOP`, `TELESCOPE`, `ESO TEL NAME` |
-| Target | `OBJECT`, `OBJNAME` (Demetra), `TARGNAME`, `TARGET`, `ESO OBS TARG NAME`, `OHP TARG NAME`, else the file name |
-| DATE-OBS | `DATE-OBS`, `DATE_OBS`, `OHP OBS DATE START`, else the file name |
-| RA/Dec | `RA`/`DEC`, `OBJCTRA`/`OBJCTDEC`, `RA-OBJ`/`DEC-OBJ`, or the packed sexagesimal `OHP TARG ALPHA`/`DELTA`; `--resolve` falls back to SIMBAD |
-| EXPTIME | `EXPTIME`, `EXPOSURE`, `ITIME`, `TELAPSE`, else the file name |
+| Target | `OBJECT`, `OBJNAME` (Demetra), `TARGNAME`, `TARGET`, `ESO OBS TARG NAME`, `OHP TARG NAME`, else the PolarBase `.meta` (`Object name`), else the file name |
+| DATE-OBS | `DATE-OBS`, `DATE_OBS`, `OHP OBS DATE START`, else the PolarBase `.meta` (`Observation date`), else the file name |
+| RA/Dec | `RA`/`DEC`, `OBJCTRA`/`OBJCTDEC`, `RA-OBJ`/`DEC-OBJ`, PolarBase `RA_TARG`/`DEC_TARG`, or the packed sexagesimal `OHP TARG ALPHA`/`DELTA`; else the PolarBase `.meta` (`RA`/`DEC`); `--resolve` falls back to SIMBAD |
+| EXPTIME | `EXPTIME`, `EXPOSURE`, `ITIME`, `TELAPSE`, else the PolarBase `.meta` (`Texposure`), else the file name |
 | Site | `SITE_CARD_SETS`: ESO `TEL GEOLON/…`, Neo-Narval `LONGITUD/…`, `GEOLON/…`, `OBSGEO-L/…`, `LONG-OBS/…`, `SITELON/…` (written by `normalize`), `OBS-LONG/…`, Demetra `GEO_LONG/…` and `BSS_LONG/…`; then the instrument's home observatory; then the file name |
 | Epoch | The note explaining what the timestamp *is* — exposure start, mid-exposure, or the mid-time of a sub-exposure sequence — for the conventions where that differs |
 | Bary frame | The keyword vocabulary of [section 7](#7-barycentric-frame-the-double-correction-guard) |
+| PolarBase | Printed for PolarBase spectra only: `normalized` (`<odo>i`) or `not-normalized` (`<odo>i_u`), from `PBPRODUCT` (written by `normalize`), `FLUX_CAL` (`.fts`), the `.s` title line, `.meta` `Normalized`, or the `_u` in the name, in that order |
 
 The packed sexagesimal cards deserve a note: `OHP TARG ALPHA = 112631.39`
 means 11:26:31.39, not 112631 degrees. Those are decoded by the reader that
@@ -1671,6 +1726,38 @@ survives a project. Free-text lines are carried too: the sentence explaining
 a Neo-Narval sequence epoch (`# Neo-Narval: epoch = mid of the 4-exposure
 sequence …`) is read back as the `Epoch` line rather than being discarded as
 an unrecognized card.
+
+#### Metadata in a sidecar file: PolarBase
+
+A PolarBase `.s` table has a single title line and no header; everything
+else is in the `.meta` file of `Key = value` lines delivered beside it.
+`header`, `ccf`, `bf`, `todcor`, `batch` and `normalize` read that file for
+any ASCII spectrum without a header of its own. That covers the `.s` and
+also a wavelength window cut out of it:
+
+- the `.meta` with the spectrum's own name (`897395i_u.s` →
+  `897395i_u.meta`) is used first;
+- otherwise, when the folder holds exactly one `.meta`, it is taken to
+  describe every spectrum in that folder. A 6-digit `HHMMSS` in the file
+  name that differs from the `.meta` time refuses the match
+  (`4200_4500_073357.txt` matches `Observation date = 2007-02-28 07:33:57`);
+- a card written in the spectrum file itself always wins over the `.meta`.
+
+The source label names the file (`PolarBase 897395i_u.meta: Observation
+date`), and `header` prints the `.meta` in full after the summary block. The
+catalogue `Radial Velocity` line in it is SIMBAD's value for the star, not a
+measurement of this spectrum, and is not read.
+
+```
+Format     : PolarBase / Libre-ESpRIT table ('ESPaDOnS NOTnormalized spectrum'); metadata in 897395i_u.meta
+Target     : HD 47961   (PolarBase 897395i_u.meta: Object name)
+DATE-OBS   : 2007-02-28T07:33:57   (PolarBase 897395i_u.meta: Observation date)
+EXPTIME [s]: 900.0   (PolarBase 897395i_u.meta: Texposure)
+Epoch      : PolarBase .meta: 'Observation date' is the UT START of the exposure (it equals 'Julian Date' = 2454159.8152430556); Texposure = 900 s, so the mid-exposure epoch is 450 s later
+Site used  : Observatory from the instrument (ESPADONS): cfht (lon -155.4685 E, lat +19.8253, 4204 m). …
+Bary frame : corrected (HELIOCEN)
+PolarBase  : not-normalized   (title '*** ESPaDOnS NOTnormalized spectrum')   [no pipeline telluric correction; do not mix with normalized 'i' epochs]
+```
 
 #### Metadata in the file name
 
@@ -1929,6 +2016,75 @@ in the observer frame, and in the O₂ A band (7594–7660 Å) two epochs whose
 BERV differs by 18.5 km/s put them at the same place to 0.2 km/s, where a
 barycentric scale would have moved them by the full 18.5 km/s.
 
+**PolarBase (ESPaDOnS / NARVAL `<odometer>i.s`, `<odometer>i_u.s`)** is the opposite case:
+its wavelengths are **already heliocentric**, so use `--no-bary` (untick the
+box in the GUI). The `.s` table has no header of its own. Target,
+coordinates, `Observation date` (the UT **start** of the exposure),
+`Texposure` and the instrument are in the `.meta` file beside it, and
+`header`, `ccf`/`bf`/`todcor`, `batch` and `normalize` read them from there
+([details](#metadata-in-a-sidecar-file-polarbase)):
+
+- the `.meta` with the same name as the spectrum is used when it exists;
+- otherwise, when a folder holds exactly **one** `.meta`, that file
+  describes every spectrum in the folder, so a window you cut out of the
+  `.s` (e.g. `4200_4500_073357.txt`) gets the same epoch. A 6-digit
+  `HHMMSS` in the file name that differs from the `.meta` time refuses the
+  match;
+- a spectrum copied into a folder with no `.meta` (or with several) has no
+  epoch. Normalize it in its own folder first: the normalized copy carries
+  `OBJECT`, `DATE-OBS`, `EXPTIME`, `RA`/`DEC`, the CFHT site and
+  `SPECSYS = HELIOCEN` in its header, and can then go anywhere.
+
+The frame was measured on HD 47961, not assumed. The O₂ A, B and γ telluric
+bands of `897395i_u.s` (2007-02-28) and `1522826i_u.s` (2012-01-31) are
+offset by +10.04 km/s, and the v_bary difference of the two epochs is
++10.19 km/s. On a topocentric scale they would coincide.
+
+**PolarBase `.fts`** (`<odometer>i.fts`, `<odometer>i_u.fts`) is the same
+spectrum as the `.s`, as a VO FITS table (`AWAV` in nm, `FLUX_NOR`,
+`FLUX_ERR`), and is read directly with no `.meta` needed: `OBJECT`,
+`RA_TARG`/`DEC_TARG`, `DATE-OBS`, `TELAPSE`, `INSTRUME` and
+`SPECSYS = HELIOCENTER`. **Its `DATE-OBS` comment says "Middle date-time of
+acquisition", but the value is the exposure START.** It equals `JDUTC`,
+`TMID` and the "Time of observations" in the pipeline log (`.out`), so
+RVCalPy adds `TELAPSE`/2 as for any start epoch. `HJDUTC`/`HJDTT` only
+repeat the JD and are not used.
+
+**Never mix the two PolarBase products in one RV series.** A download holds
+each exposure twice: `<odo>i` (normalized by the pipeline, which also
+applies its "radial velocity correction from telluric lines") and `<odo>i_u`
+(not normalized). Their wavelength zero points differ: on HD 47961
+2007-02-28 the two scales differ by 0.153 km/s and their telluric bands by
+0.14–0.17 km/s. `header` prints which product a file is (`PolarBase :
+normalized / not-normalized`, with the evidence: `FLUX_CAL`, the `.s` title
+line, `.meta Normalized`, or the `_u` in the name). `normalize` carries it
+forward as `PBPRODUCT`, so a re-normalized `i_u` cut still says what it is.
+`batch` prints a warning, and the GUI batch asks before running, when a
+queue mixes the two. Re-normalizing an `i_u` spectrum yourself does not give
+it the pipeline's telluric zero point.
+
+**Heliocentric is not barycentric, and the difference is added
+automatically.** PolarBase corrects to the Sun, not to the solar-system
+barycentre (Petit et al. 2014, PASP 126, 469). The two differ by the Sun's
+own motion about the barycentre, at most ~13 m/s, and it changes with the
+positions of Jupiter and Saturn. When a spectrum's frame is `HELIOCEN` or
+`HELIOCENTER` and
+the run uses `--no-bary`, `ccf`, `bf`, `todcor`, `batch` and the GUI add
+v_bary − v_helio at mid-exposure to every reported RV. The term is printed
+and written in a `helio_to_bary[km/s]` column. For HD 47961 at CFHT it is
++12.2 m/s on 2007-02-28 and −3.8 m/s on 2012-01-31. The telluric lines cannot
+confirm a term this small: they scatter by 50–220 m/s around the expected
+correction, which is the real zero-point limit of these spectra. With
+`--force-bary` the term is not added, because the full v_bary is.
+
+The PolarBase pipeline log (`<odo>i.out`) states the velocity it applied,
+"Heliocentric velocity of observer towards star". On 897395i it is
+−24.952 km/s, which equals our heliocentric correction at the **end** of the
+900 s exposure (−24.9520), not at mid-exposure (−24.9371). RVCalPy does not
+read the `.out` yet, so that 15 m/s is not corrected. The same log's HJD
+uses a light-travel time 44 s shorter than astropy's, so do not take the HJD
+from it.
+
 **The pipeline's own numbers are used as a check.** When a file carries a
 `BERV`-type card, our barycentric velocity is compared with it, and when a
 Neo-Narval file carries `BTLA`, our BJD is compared with that:
@@ -1975,7 +2131,10 @@ shows up). Every HDU header is scanned, in order of authority:
 
 1. **Reference-frame keywords** `SPECSYS` / `SPECSYS1..3` / `SSYSOBS` /
    `SSYSSRC` / `VFRAME` / `WAVEFRAM` (FITS WCS standard): a value of
-   `BARYCENT` or `HELIOCEN` → the wavelengths are already corrected;
+   `BARYCENT` or `HELIOCEN`/`HELIOCENTER` → the wavelengths are already
+   corrected (a heliocentric value also triggers the helio→barycentric
+   term, see below); `SOURCE` → they are in the star's rest frame, which is
+   what the `result_*_shifted*.fits` files carry;
    `TOPOCENT` / `GEOCENTR` → they are not. Decisive when present.
 2. **Processing switches** proving the correction was applied or
    skipped: HST STIS/COS `HELCORR` (`COMPLETE` = applied, `OMIT` =
@@ -2217,10 +2376,11 @@ SB2 velocities.
 
 | File | Content |
 |---|---|
-| `result_CCF.txt` / `result_BF.txt` | RVs with errors, uncorrected and barycentric-corrected, amplitudes, areas, widths, light ratios, the continuum S/N of the spectrum. The data table opens with a `star` column, so a velocity is never separated from the star it belongs to; low-S/N and low-significance results carry explicit warnings (low S/N is the dominant source of spurious RVs — Katz et al. 2025) |
+| `result_CCF.txt` / `result_BF.txt` | RVs with errors, uncorrected and barycentric-corrected, amplitudes, areas, widths, light ratios, the continuum S/N of the spectrum. A heliocentric spectrum (PolarBase) run with `--no-bary` gets a last `helio_to_bary[km/s]` column holding the term already added to `RV`; `result_TODCOR.txt` and `result_RV_curve.txt` get the same column. The data table opens with a `star` column, so a velocity is never separated from the star it belongs to; low-S/N and low-significance results carry explicit warnings (low S/N is the dominant source of spurious RVs — Katz et al. 2025) |
 | `result_CCF.png` / `result_BF.png` | Fit figure (BF: one dashed profile per component with `amp` and RV in the legend) |
-| `result_CCF_linecheck.png` / `result_BF_linecheck.png` | Model reliability check at two strong diagnostic lines per 50-nm band over 400–700 nm (Ca I 4226/Fe I 4383, Ba II 4554/Fe II 4583, Fe I 5269/5328, Fe I 5572/Ca I 5588, Ca I 6122/Fe I 6302, Fe I 6663/Ca I 6717); only the lines inside the analyzed range are used |
+| `result_CCF_linecheck.png` / `result_BF_linecheck.png` / `result_TODCOR_linecheck.png` | Model reliability check: observed spectrum against the template broadened and shifted to the measured RV, around lines chosen **for this star** from a list of ~90 hydrogen, hot-star (He I/II, Si II–IV, Mg II, C II, N II, O II, Al III, Fe III, Ne I) and cool-star (Fe I/II, Ca I, Mg I, Ti II, Sr II, Ba II) lines. A line is checked only when the model itself shows it: its minimum lies on the catalogue wavelength, it is at least 2 % deep, and at least half as deep as the deepest feature in its window. The strongest **4 per 50-nm band over 400–600 nm** and 2 per band elsewhere are kept, only inside the analysed range, and never two whose windows overlap (Balmer ±30 Å, He ±10–12 Å, metals ±6 Å). Na I D is excluded, since interstellar absorption is in no stellar model. With more than 4 lines the figure has two columns. **CCF:** the CCF measures no line-broadening kernel (its peak width also contains the template's own lines, and for hot stars it is far from Gaussian), so the Gaussian kernel is fitted to the non-hydrogen windows with a free continuum level and depth scale per window. RV and template stay fixed, and the depth ratios printed are those of the unscaled model. **Reading it:** a good RV with a matching template gives r ≈ 1 and depth O/M ≈ 1. A line at the right place but with the wrong strength (He I deeper and metal lines weaker than the model, say) means the template has the wrong temperature, not the wrong RV |
 | `result_TODCOR.txt` / `.png` | `todcor` mode: both velocities with errors, one row per component behind a `star` column, the fitted α and which component is brighter, the peak correlation, and whether the exact or regular normalization ran. The figure shows the 2-D surface plus the two cuts through the maximum — each cut is what a 1-D CCF would look like if the other component's velocity were already known |
+| `result_CCF_shifted.fits` / `result_BF_shifted_C<k>.fits` / `result_TODCOR_shifted_C<k>.fits` | The analysed spectrum moved to the star's rest frame, one file per component (no `_C<k>` when there is one). Every order of the input file is shifted by λ_rest = λ / (1 + RV_raw/c). The shift is the **measured** velocity `RV_raw`, the shift actually present in the file's wavelengths; the barycentric correction moves no pixel, so it is not part of the shift. **Primary HDU:** 1-D flux on a uniform linear grid in Å (`CRVAL1`/`CDELT1`/`CRPIX1`, `CTYPE1 = WAVE`, step = the finest input pixels; overlapping orders averaged), for IRAF `splot`, iSpec or any 1-D FITS viewer. **`SPECTRUM` extension:** binary table `WAVE` [Å], `FLUX`, `ORDER` with the shifted pixels exactly, no resampling; `read_spectrum` reads this table, so a re-run uses the exact pixels. Header cards: `OBJECT`, `DATE-OBS`, `EXPTIME`, `RA`, `DEC`, `INSTRUME` (when known), `RVSHIFT` [km/s], `COMPON`, `METHOD`, `ORIGFILE`, and `SPECSYS = SOURCE`, which makes the frame guard refuse a barycentric correction on the file. Written by Save, by each epoch of the GUI batch's **Save all kept...**, and by `ccf`/`bf`/`todcor` on the command line |
 | `result_TODCOR_selfcal.txt` | `todcor --simulate`: recovered velocities, bias, α and the `swap` column at each tested separation |
 | `result_RV_curve.txt` / `.png` | `batch` mode, and the GUI batch's **Save all kept...**: star, spectrum, BJD, phase and per-component RVs for the whole series. In `batch` mode, components varying by more than 3 km/s peak-to-peak between epochs are flagged as binarity/variability candidates (Katz et al. 2025) in a comment above the table. Same columns either way, so both feed `wilson` and `orbit` directly, and `--star` selects one star out of a file that holds two |
 | `result_BF_profiles.png` | `batch` mode and the GUI batch: all BF profiles stacked by orbital phase |
@@ -2308,6 +2468,11 @@ line then reads `run stopped with an error` or `run failed` instead of
 | A file with no header gives OBJECT/DATE-OBS = None | If its name follows a convention RVCalPy knows (DAO, Demetra — see [metadata in the file name](#metadata-in-the-file-name)) the values are read from the name; `header --resolve` shows what was found. Otherwise pass `--object/--obstime/--site` yourself |
 | A Demetra spectrum picks the wrong observatory | That convention does not encode the site and the run falls back to the default, saying so. Pass `--site` (`kreiken` for the AUKR T80/Whoppshel spectra); the raw `.fit` frames carry it in `GEO_LONG`/`GEO_LAT`/`GEO_ELEV` and are read automatically |
 | RVs offset by 20-25 km/s from a published table | A spectrum whose header does not record the wavelength frame may already be barycentric; the guard cannot see it and the run says so. Compare one epoch both ways and use `--no-bary` if the uncorrected value is the one that matches ([section 7](#7-barycentric-frame-the-double-correction-guard)) |
+| A PolarBase spectrum has no epoch or coordinates | A `.s` (or a window cut out of it) finds its `.meta` only by the same file name, or as the single `.meta` in its folder ([sidecar](#metadata-in-a-sidecar-file-polarbase)). A copy in a folder with no `.meta` (or several) has none. Normalize it in its own folder first, or use the `.fts`, which has its own header |
+| The run stops on a PolarBase file: header says already barycentric | Expected: PolarBase wavelengths are heliocentric. Use `--no-bary` (untick the box). The helio→barycentric term, at most ~13 m/s, is then added and written in the `helio_to_bary[km/s]` column |
+| `batch` warns that the spectra mix the two PolarBase products | Some files are the pipeline-normalized `<odo>i`, others the `<odo>i_u`. Their zero points differ by ~0.15 km/s. Queue one product only, preferably `i` |
+| The same PolarBase exposure gives very different RVs as `i` and `i_u` | The `i_u` flux is not normalized (it still carries the blaze). Normalize it first, or measure the `i` product |
+| The line check shows lines far deeper or shallower than the model | Look at *which* lines. Lines in the right place with the wrong strength (He I deeper and metals weaker in a B star, say) mean the template's temperature is wrong, not the RV. A model with no line where the data have one never appears, because only lines the model shows are checked |
 | The orbital phase looks wrong | Check the two dates against each other. Both `--t0` and `--obstime` may be full or reduced by 2 400 000 and are promoted to full JD with a printed note ([Julian dates](#julian-dates-full-or-reduced)) — but an **MJD** is silently taken as a reduced JD and lands half a day off; give an MJD as `MJD + 2400000.5` |
 
 Run `python rv_analysis.py <command> --help` for the full, authoritative list
