@@ -13,7 +13,7 @@ For installation, license, references and acknowledgements see
 - [4. Interactive mode](#4-interactive-mode)
 - [5. Command line](#5-command-line)
 - [6. Instruments and observatories](#6-instruments-and-observatories)
-- [7. Barycentric frame: the double-correction guard](#7-barycentric-frame-the-double-correction-guard)
+- [7. Barycentric frame: what the headers say, and who decides](#7-barycentric-frame-what-the-headers-say-and-who-decides)
 - [8. BF components: automatic search and your own estimates](#8-bf-components-automatic-search-and-your-own-estimates)
 - [9. BF velocity step and the reliability of the RV errors](#9-bf-velocity-step-and-the-reliability-of-the-rv-errors)
 - [10. Component labels](#10-component-labels)
@@ -148,10 +148,11 @@ blank would split a column. A spectrum that names no target anywhere gets
 `-` and the run still works: the star name is a label, not an input to the
 measurement.
 
-`--no-bary` is **required here, and the run refuses to start without it**:
-the SOPHIE header says the wavelengths are already barycentric, so applying
-the correction again would double it ([section
-7](#7-barycentric-frame-the-double-correction-guard)). v_bary is still
+`--no-bary` is **what this file needs**: the SOPHIE header says the
+wavelengths are already barycentric, so applying the correction again would
+double it. Since RVCalPy-20 the run is not stopped if you leave it out — it
+warns and applies v_bary, because the decision is yours ([section
+7](#7-barycentric-frame-what-the-headers-say-and-who-decides)). v_bary is still
 computed and written to the result file as a note — and cross-checked
 against the pipeline's own BERV (−7.7835 vs −7.8121, +29 m/s: OK).
 
@@ -297,7 +298,7 @@ Two things to know if you edit there:
    about to measure.
 2. **Check the barycentric frame** — `barycheck` decides whether the
    wavelengths are already barycentric, so you know whether to pass
-   `--no-bary` ([section 7](#7-barycentric-frame-the-double-correction-guard)).
+   `--no-bary` ([section 7](#7-barycentric-frame-what-the-headers-say-and-who-decides)).
 3. **Normalize** — `normalize` (or `batch --normalize`, or the GUI batch's
    own tick box) if the spectrum is not yet continuum-normalized.
    Templates must be normalized too.
@@ -388,7 +389,7 @@ A file is read as FITS when its name ends in `.fits`, `.fit` or `.fts`
 >   to be normalized before it can be measured.
 >
 > The details, and how each was measured, are in
-> [section 7](#7-barycentric-frame-the-double-correction-guard).
+> [section 7](#7-barycentric-frame-what-the-headers-say-and-who-decides).
 
 > **Correlation functions, not spectra.** An ESO-MIDAS `xcorr` product
 > (`m..._ln_corr_v.fits`) is the *output* of a cross-correlation: its
@@ -491,7 +492,7 @@ card when only a date is present), or, for a file with no header, the
 `Observation date`, and also the `.fts` `DATE-OBS`, although its comment
 calls it the middle. Half the exposure is added to both. Note that SOPHIE/HARPS-style `s1d` products are
 already in the barycentric frame — do not apply the correction twice (see
-[section 7](#7-barycentric-frame-the-double-correction-guard)).
+[section 7](#7-barycentric-frame-what-the-headers-say-and-who-decides)).
 
 ## 4. Interactive mode
 
@@ -651,7 +652,11 @@ Other GUI features:
   `-03:07:49.8`, or the MIDAS comma style `12,50,39.7`).
 - The barycentric correction is **opt-in, and the checkbox now starts
   unticked**: v_bary is always computed and reported, but only added to the
-  RVs when you tick **Apply barycentric correction** yourself. So a run made
+  RVs when you tick **Apply barycentric correction** yourself. The box is
+  never ticked, unticked or disabled behind your back; when the selected
+  spectrum's header claims a frame, the claim is added to the box's label
+  (*header says already corrected — check first* / *header says
+  topocentric*) and nothing else happens. So a run made
   straight after opening the window reports RVs in the **measured
   (observer) frame** — tick the box when you want them barycentric. The
   figure always quotes the RV of the Gaussian fit exactly as measured —
@@ -722,12 +727,17 @@ would be flat and wrong without looking wrong.
 
 Before the run starts, the queue's wavelength frames are checked together,
 because the **Apply barycentric correction** tick is a single switch and the
-guard behind it looks at the file in the spectrum box — which is not one of
-these. A queue that mixes barycentric and topocentric files is refused
-outright: one setting cannot be right for both, so run them as two batches.
-A queue that is entirely barycentric while the box is ticked offers to
-switch the correction off, since applying it a second time doubles 20–30
-km/s of Earth's motion. A queue that mixes the two PolarBase products
+hint beside it describes the file in the spectrum box — which is not one of
+these. What the check finds is reported, and the run is yours to confirm:
+a queue that mixes barycentric and topocentric files asks whether to go
+ahead as ticked (one setting cannot be right for both unless a header is
+wrong, so two batches are usually the answer), and a queue that is entirely
+barycentric while the box is ticked asks before adding v_bary a second time
+— 20–30 km/s of Earth's motion counted twice. Neither one unticks the box
+for you, and neither one stops the batch: a "corrected" verdict can rest on
+a pipeline rule or on a Julian date, which is a time stamp and no
+statement about wavelengths at all ([section
+7](#7-barycentric-frame-what-the-headers-say-and-who-decides)). A queue that mixes the two PolarBase products
 (normalized `i` and not-normalized `i_u`) asks before running, because
 their wavelength zero points differ by ~0.15 km/s and the curve would carry
 that step.
@@ -801,7 +811,7 @@ detail window moves the card, and the header keeps a running count.
     | `BJD_TDB` | mid-exposure barycentric Julian date; `-` means the epoch or the coordinates were missing |
     | `phase` | orbital phase from the ephemeris on the window; `-` when none was given |
     | `RVn` | the velocity as reported — barycentric when the correction was applied, measured otherwise — with its error |
-    | `v_bary` | the barycentric correction; the heading of the report says whether it was added to the RVs |
+    | `v_bary` | the barycentric correction; the heading of the report says whether it was added to the RVs — the `barycentric` line, and next to it a `wavelength fr.` line with the queue's header verdicts (how many files call themselves already barycentric, topocentric or unknown) and, when v_bary was added to files whose headers say it is already in them, the same warning the run printed |
     | `S/N` | continuum signal-to-noise per pixel of the spectrum |
     | `peak` | significance of the correlation or BF peak (TODCOR: the 2-D peak correlation); below ~4 the velocity is not trustworthy |
     | `status` | kept, dropped or failed |
@@ -827,6 +837,17 @@ detail window moves the card, and the header keeps a running count.
     [`orbit`](#orbit--sb2-orbital-elements-the-last-step-of-the-chain)
     directly — plus `result_RV_curve.png`, and in BF mode
     `result_BF_profiles.png`, every epoch's profile stacked by phase.
+  - **The RV curve figure carries v_bary.** Under the velocities, on the
+    same BJD or phase axis, a second panel plots the barycentric
+    correction of every epoch, each point labelled with its value while
+    the labels can still be read apart (up to twelve epochs, staggered
+    above and below the point). Its legend says which of the two the
+    curve above is — *added to the RVs above*, or *computed, NOT added* —
+    and the RV axis is labelled `(barycentric)` or `(measured frame)` to
+    match. The single-epoch figures have always carried v_bary on their
+    legend; the series is where it matters most, because a v_bary that
+    swings by 50 km/s over a year is exactly what a curve can be mistaken
+    for. The panel is left out when no epoch has a correction to show.
 
 Nothing is written until you press one of the Save buttons, exactly as for a
 single run. **Save this one...** in the detail window writes just the epoch
@@ -963,7 +984,7 @@ python rv_analysis.py batch --spectra 'polarbase/*/[0-9]*i.fts' \
 | `--object/--ra/--dec/--obstime` | Target and time for the barycentric correction (`--object` resolves via SIMBAD) |
 | `--site NAME` | Observatory (built-in name, `lonE,lat,alt`, or an astropy site). **Default: read from the file's own header**, and only then `paranal` |
 | `--no-bary` | Compute v_bary but do **not** add it to the RVs (report only) |
-| `--force-bary` | Apply it anyway when the header check says "already corrected" |
+| `--force-bary` | Only silences the warning printed when the header check says "already corrected". Kept for older command lines: the correction is applied with or without it |
 | `--t0/--period`, `--varastro`, `--t0-to-bjd` | Ephemeris for the orbital phase; fetch it from VarAstro; convert T0 HJD → BJD_TDB. T0 may be written full or reduced — see [Julian dates](#julian-dates-full-or-reduced) |
 | `--output`, `--plot`, `--dpi` | Result file, figure file, figure resolution (default 600 dpi) |
 
@@ -1300,7 +1321,7 @@ when α is wildly implausible.
 | `--bjd B1 B2 ...` | BJD of each spectrum, one value per file in sorted order, when the headers have none |
 | `--obstime` | One time override for all files (default: each file's own `DATE-OBS`) |
 
-It runs the [barycentric header check](#7-barycentric-frame-the-double-correction-guard)
+It runs the [barycentric header check](#7-barycentric-frame-what-the-headers-say-and-who-decides)
 automatically over the input files and warns when the headers contradict the
 chosen `--no-bary` setting. It also warns when the files mix the two
 PolarBase products (`i` and `i_u`). For heliocentric spectrum files run with
@@ -1697,7 +1718,7 @@ Each field is filled from the first source that has it:
 | EXPTIME | `EXPTIME`, `EXPOSURE`, `ITIME`, `TELAPSE`, else the PolarBase `.meta` (`Texposure`), else the file name |
 | Site | `SITE_CARD_SETS`: ESO `TEL GEOLON/…`, Neo-Narval `LONGITUD/…`, `GEOLON/…`, `OBSGEO-L/…`, `LONG-OBS/…`, `SITELON/…` (written by `normalize`), `OBS-LONG/…`, Demetra `GEO_LONG/…` and `BSS_LONG/…`; then the instrument's home observatory; then the file name |
 | Epoch | The note explaining what the timestamp *is* — exposure start, mid-exposure, or the mid-time of a sub-exposure sequence — for the conventions where that differs |
-| Bary frame | The keyword vocabulary of [section 7](#7-barycentric-frame-the-double-correction-guard) |
+| Bary frame | The keyword vocabulary of [section 7](#7-barycentric-frame-what-the-headers-say-and-who-decides) |
 | PolarBase | Printed for PolarBase spectra only: `normalized` (`<odo>i`) or `not-normalized` (`<odo>i_u`), from `PBPRODUCT` (written by `normalize`), `FLUX_CAL` (`.fts`), the `.s` title line, `.meta` `Normalized`, or the `_u` in the name, in that order |
 
 The packed sexagesimal cards deserve a note: `OHP TARG ALPHA = 112631.39`
@@ -1741,6 +1762,25 @@ also a wavelength window cut out of it:
   describe every spectrum in that folder. A 6-digit `HHMMSS` in the file
   name that differs from the `.meta` time refuses the match
   (`4200_4500_073357.txt` matches `Observation date = 2007-02-28 07:33:57`);
+- **failing both, the folders around the file are searched** — its own
+  directory and the one above it, each with their immediate
+  subdirectories, which is the shape of a PolarBase download: one folder
+  per exposure under one star folder. A `.meta` there is accepted only
+  when its `Observation date` matches the `HHMMSS` in the file name and
+  every candidate that matches agrees on epoch, coordinates and exposure
+  time (the `i` and `i_u` sidecars of one exposure agree on all three, so
+  they count as one; two different exposures do not, and the file is left
+  without metadata rather than given the wrong one);
+- **a normalized copy asks the file it was made from.** `normalize`
+  writes `; from <path>` into the comment header of its output, and when
+  the copy is missing a field the source file — and whatever `.meta`
+  sits near *it* — supplies it. This is what makes a cut normalized into
+  a results directory work: `batch` queues
+  `results/Normalization/4200_4500_073357_norm.txt`, the source is
+  `HD47961_EsPaDOnS_All/4200_4500_073357.txt`, and the sidecar is in
+  `2007-02-28 073357/` one level above that. The recovered target, epoch,
+  coordinates, exposure time, instrument (hence the observatory) and
+  wavelength frame are all labelled with where they came from;
 - a card written in the spectrum file itself always wins over the `.meta`.
 
 The source label names the file (`PolarBase 897395i_u.meta: Observation
@@ -1817,8 +1857,8 @@ Two cautions, both because a file name is weaker evidence than a header:
   only after the file's own header and its INSTRUME card have come up empty,
   it is always announced in the output, and `--site` overrides it. A renamed
   or borrowed file would carry it wrongly.
-- **The wavelength frame is unrecorded.** The double-correction guard of
-  [section 7](#7-barycentric-frame-the-double-correction-guard) reads
+- **The wavelength frame is unrecorded.** The header check of
+  [section 7](#7-barycentric-frame-what-the-headers-say-and-who-decides) reads
   headers, and there is no header here, so it can only return *unknown* —
   which is not the same as *topocentric*. A run that applies the correction
   therefore warns that it is doing so on no evidence. Check one epoch
@@ -1989,7 +2029,7 @@ smoothing FWHM **and** the default velocity step, and it defines the
 "unresolved" limit of the sampling guards
 ([section 9](#9-bf-velocity-step-and-the-reliability-of-the-rv-errors)).
 
-## 7. Barycentric frame: the double-correction guard
+## 7. Barycentric frame: what the headers say, and who decides
 
 Whether a reduced spectrum's wavelengths are still topocentric or already
 shifted to the Solar-System barycentre is not always obvious — HARPS and
@@ -2003,9 +2043,10 @@ python rv_analysis.py barycheck --spectra 'HARPS/ADP.*.fits' 'FEROS/ADP.*.fits'
 ```
 
 The bundled examples show both cases: the HARPS and SOPHIE spectra are
-already barycentric, so `ccf`/`bf` **refuse to run** on them without
-`--no-bary`, while the Neo-Narval spectrum is topocentric and the correction
-is applied silently ([section 2](#2-quick-start)). Nothing but the file
+already barycentric, so `ccf`/`bf` **warn** when run on them without
+`--no-bary` (they run, and v_bary is added — see *Who decides* below), while
+the Neo-Narval spectrum is topocentric and the correction is applied
+silently ([section 2](#2-quick-start)). Nothing but the file
 headers decides that.
 
 **Neo-Narval / NARVAL / Libre-ESpRIT** files get a verdict of their own:
@@ -2047,8 +2088,8 @@ spectrum as the `.s`, as a VO FITS table (`AWAV` in nm, `FLUX_NOR`,
 `SPECSYS = HELIOCENTER`. **Its `DATE-OBS` comment says "Middle date-time of
 acquisition", but the value is the exposure START.** It equals `JDUTC`,
 `TMID` and the "Time of observations" in the pipeline log (`.out`), so
-RVCalPy adds `TELAPSE`/2 as for any start epoch. `HJDUTC`/`HJDTT` only
-repeat the JD and are not used.
+RVCalPy adds `TELAPSE`/2 as for any start epoch. The file's other date
+cards only repeat that same JD; none of them is read.
 
 **Never mix the two PolarBase products in one RV series.** A download holds
 each exposure twice: `<odo>i` (normalized by the pipeline, which also
@@ -2084,6 +2125,24 @@ The PolarBase pipeline log (`<odo>i.out`) states the velocity it applied,
 read the `.out` yet, so that 15 m/s is not corrected. The same log's HJD
 uses a light-travel time 44 s shorter than astropy's, so do not take the HJD
 from it.
+
+**v_bary belongs to mid-exposure, like the BJD.** `DATE-OBS` is the moment
+the shutter opened; the velocity the spectrum carries is the one averaged
+over the exposure, so half of `EXPTIME` is added before v_bary is computed —
+the same shift `compute_bjd` makes, so the correction and the BJD printed
+beside it describe the same instant. It is worth having: v_bary drifts by
+up to 2.4 m/s per minute, which is ~15 m/s over half a 900 s ESPaDOnS
+exposure and ~42 m/s over half a 2700 s UVES one. The pipelines' own
+numbers show it directly — measured on the bundled examples, our v_bary
+against the DRS's own BERV:
+
+| example | computed at the start (to RVCalPy-19) | at mid-exposure (RVCalPy-20) |
+|---|---|---|
+| HARPS `example_BF_HARPS_norm.txt` | +11 m/s | **+6 m/s** |
+| SOPHIE `example_CCF_SOPHIE_norm.txt` | +29 m/s | **+4 m/s** |
+
+A time given as a JD/BJD number is already a mid-exposure quantity by
+construction and is never shifted.
 
 **The pipeline's own numbers are used as a check.** When a file carries a
 `BERV`-type card, our barycentric velocity is compared with it, and when a
@@ -2178,6 +2237,18 @@ shows up). Every HDU header is scanned, in order of authority:
    work, fatal for m/s exoplanet work.
 6. **HISTORY/COMMENT** lines mentioning a barycentric or heliocentric
    correction.
+7. **Julian dates are not frame evidence.** `BJD`, `BJD_TDB`,
+   `OHP DRS BJD` and the rest of the `BARY_TIME_KEYS` table say that the
+   **observation time** was referred to the solar-system barycentre. That
+   is a different correction from v_bary, done for a different reason
+   (light travel time, in seconds of date) and it leaves the wavelength
+   scale untouched. `barycheck` lists these cards marked as time stamps —
+   they are listed because RVCalPy uses them, cross-checking its own
+   BJD_TDB against a pipeline's BJD — and they contribute **nothing** to
+   the verdict: they can raise neither "corrected" nor "not-corrected",
+   and they are never read as a velocity. Any other date card in a
+   header is not matched by this table or by any other in this section,
+   so it is neither read nor reported.
 
 **Normalized ASCII spectra keep the evidence.** The `normalize` command
 copies the barycentric-frame evidence of its source file into the
@@ -2205,19 +2276,41 @@ python rv_analysis.py barycheck --spectra '*_norm.txt' \
     --from-fits 'archive_dir/ADP.*.fits'
 ```
 
-**Double-correction guard.** When the header check concludes the
-wavelengths are already barycentric and the correction is about to be
-applied anyway, the run is **blocked** instead of silently
-double-correcting:
+**Who decides: you (since RVCalPy-20).** When the header check concludes
+the wavelengths are already barycentric and the correction is about to be
+applied anyway, every mode **warns and carries on**. Up to RVCalPy-19 the
+run was blocked instead, and that was too strong: the evidence behind a
+"corrected" verdict is often indirect — a pipeline rule (what
+Libre-ESpRIT, the HARPS DRS or PolarBase *usually* do), a `SPECSYS` card
+copied through a reduction, or nothing more than a Julian date, which
+says nothing about wavelengths at all (rule 7 above). A
+program that cannot be overruled by the person holding the data turns a
+guess into a veto.
 
-- `batch` and the single-spectrum `ccf`/`bf` commands stop with an
-  error — re-run with `--no-bary`, or override with `--force-bary` if
-  you are sure;
-- in the **GUI**, the *Apply barycentric correction* checkbox is
-  unticked and disabled (label: *blocked: header says already
-  corrected*) as soon as a recognized spectrum is selected;
-- the **terminal wizard** skips the "Apply?" question and forces
-  no-bary with an explanatory message.
+- `batch` and the single-spectrum `ccf` / `bf` / `todcor` commands print
+  a `WARNING:` naming the double correction, the time-stamp trap and the
+  `barycheck` command, then measure and **add v_bary** as asked.
+  `--force-bary` still exists and now only silences that warning;
+- in the **GUI**, *Apply barycentric correction* stays enabled and keeps
+  whatever you set. Its label reports what the selected spectrum claims:
+  *(header says already corrected — check first)* or *(header says
+  topocentric)*;
+- the **GUI batch** asks once before a queue whose headers disagree with
+  the tick box, and runs as ticked if you confirm. It no longer unticks
+  the box for you, and a queue that mixes frames is a question, not a
+  refusal;
+- the **terminal wizard** always asks "Apply the barycentric correction?"
+  and only changes the *default* answer (`n`) when the header says the
+  spectrum is already corrected.
+
+So a spectrum whose header carries a **BJD** — and nothing else — is
+measured, v_bary is computed for the mid-exposure epoch and added to
+the RV, and both numbers appear in the result file (`RV (uncorrected)`,
+`RV (barycentric corrected)`, `v_bary`), as they do for any topocentric
+file. Check one epoch against an RV you trust before running a series:
+if the header is right after all, the series carries v_bary twice, and a
+doubled correction looks exactly like a 20–30 km/s orbit with a period of
+one year.
 
 Whatever the mode, the header-check verdict is written into the result
 file as an info line, e.g.
@@ -2227,6 +2320,21 @@ v_bary = -28.3379 km/s)` in `result_BF.txt` / `result_CCF.txt`, and
 topocentric, 0 unknown of 25 files` in `result_RV_curve.txt` — so every
 saved result documents that the correction was recognized in the data
 rather than skipped by mistake.
+
+**A batch records the decision as well as the verdict.** Since the run no
+longer stops, the file has to say what was done in spite of what the
+headers claimed. `result_RV_curve.txt` adds, under the verdict line:
+
+```
+# NOTE: v_bary was added to every epoch even though 2 header(s) say the
+# wavelengths are already barycentric - if those headers are right, the
+# correction is counted twice
+```
+
+and the GUI batch's `result_batch_report.txt` carries the same thing in
+its settings block, on a `wavelength fr.` line next to `barycentric`. The
+reverse case is recorded too: with the correction off and topocentric
+files in the queue, the line says the epochs keep the Earth's motion.
 
 The report gives a per-file table (instrument, frame keyword, pipeline
 v_bary, verdict), the evidence cards for each file, and a closing
@@ -2382,10 +2490,10 @@ SB2 velocities.
 | `result_TODCOR.txt` / `.png` | `todcor` mode: both velocities with errors, one row per component behind a `star` column, the fitted α and which component is brighter, the peak correlation, and whether the exact or regular normalization ran. The figure shows the 2-D surface plus the two cuts through the maximum — each cut is what a 1-D CCF would look like if the other component's velocity were already known |
 | `result_CCF_shifted.fits` / `result_BF_shifted_C<k>.fits` / `result_TODCOR_shifted_C<k>.fits` | The analysed spectrum moved to the star's rest frame, one file per component (no `_C<k>` when there is one). Every order of the input file is shifted by λ_rest = λ / (1 + RV_raw/c). The shift is the **measured** velocity `RV_raw`, the shift actually present in the file's wavelengths; the barycentric correction moves no pixel, so it is not part of the shift. **Primary HDU:** 1-D flux on a uniform linear grid in Å (`CRVAL1`/`CDELT1`/`CRPIX1`, `CTYPE1 = WAVE`, step = the finest input pixels; overlapping orders averaged), for IRAF `splot`, iSpec or any 1-D FITS viewer. **`SPECTRUM` extension:** binary table `WAVE` [Å], `FLUX`, `ORDER` with the shifted pixels exactly, no resampling; `read_spectrum` reads this table, so a re-run uses the exact pixels. Header cards: `OBJECT`, `DATE-OBS`, `EXPTIME`, `RA`, `DEC`, `INSTRUME` (when known), `RVSHIFT` [km/s], `COMPON`, `METHOD`, `ORIGFILE`, and `SPECSYS = SOURCE`, which makes the frame guard refuse a barycentric correction on the file. Written by Save, by each epoch of the GUI batch's **Save all kept...**, and by `ccf`/`bf`/`todcor` on the command line |
 | `result_TODCOR_selfcal.txt` | `todcor --simulate`: recovered velocities, bias, α and the `swap` column at each tested separation |
-| `result_RV_curve.txt` / `.png` | `batch` mode, and the GUI batch's **Save all kept...**: star, spectrum, BJD, phase and per-component RVs for the whole series. In `batch` mode, components varying by more than 3 km/s peak-to-peak between epochs are flagged as binarity/variability candidates (Katz et al. 2025) in a comment above the table. Same columns either way, so both feed `wilson` and `orbit` directly, and `--star` selects one star out of a file that holds two |
+| `result_RV_curve.txt` / `.png` | `batch` mode, and the GUI batch's **Save all kept...**: star, spectrum, BJD, phase and per-component RVs for the whole series. In `batch` mode, components varying by more than 3 km/s peak-to-peak between epochs are flagged as binarity/variability candidates (Katz et al. 2025) in a comment above the table. Same columns either way, so both feed `wilson` and `orbit` directly, and `--star` selects one star out of a file that holds two. The figure plots the RVs over a second panel holding every epoch's v_bary, labelled with its value and saying whether it was added to the curve above |
 | `result_BF_profiles.png` | `batch` mode and the GUI batch: all BF profiles stacked by orbital phase |
 | `<spectrum name>/result_*.txt` / `.png` | GUI batch only: one subdirectory per kept epoch, holding that epoch's own result files under their usual names. Every single-spectrum run names its output `result_BF.txt` whatever it measured, so the subdirectory is what keeps ten epochs from overwriting each other |
-| `result_batch_report.txt` | GUI batch only: the whole run as one document, headed by the star it measured. Opens with an aligned one-line-per-epoch table (star, spectrum, BJD_TDB, phase, each component's RV with error, v_bary, continuum S/N, peak significance, kept/dropped/failed — the columns are explained under [Reading a batch](#reading-a-batch-the-overview-and-the-detail-window), not in the file), then the settings used including the normalization pass, every epoch's full report, the epochs dropped or failed and why, and the velocity table |
+| `result_batch_report.txt` | GUI batch only: the whole run as one document, headed by the star it measured. Opens with an aligned one-line-per-epoch table (star, spectrum, BJD_TDB, phase, each component's RV with error, v_bary, continuum S/N, peak significance, kept/dropped/failed — the columns are explained under [Reading a batch](#reading-a-batch-the-overview-and-the-detail-window), not in the file), then the settings used including the normalization pass and the queue's wavelength-frame verdicts, every epoch's full report, the epochs dropped or failed and why, and the velocity table |
 | `result_batch_overview.png` | GUI batch only: the results gallery as a single picture, every kept epoch's figure captioned with its file name, velocities, BJD and phase |
 | `<name>_norm.txt` / `<name>_normalization.png` | GUI batch normalization pass: one normalized copy and one continuum-check figure per raw spectrum, written to the directory asked for before the run. Always a cubic B-spline continuum, knots every 20 nm. The raw frames are not modified |
 | `result_normalization.png` | `normalize` mode: the spectrum, the fitted continuum and the normalized result |
@@ -2441,7 +2549,7 @@ line then reads `run stopped with an error` or `run failed` instead of
 | Symptom | What it means / what to do |
 |---|---|
 | *"raw ESO frame, not a spectrum"* | You downloaded a CCD exposure (`HARPS.*`/`FEROS.*.fits`). Run `fetch-adp` to get the reduced `ADP.*.fits` and analyze those |
-| The run stops: header says already barycentric | The double-correction guard. Re-run with `--no-bary` (or `--force-bary` if you are certain the header is wrong) — see [section 7](#7-barycentric-frame-the-double-correction-guard) |
+| `WARNING: the header of this spectrum says its wavelength scale is already barycentric` | The run continues and v_bary is added (it stopped up to RVCalPy-19). Decide from the evidence: `barycheck` prints it card by card, and a **BJD** among those cards proves nothing about the wavelengths. If the header is right, re-run with `--no-bary`; `--force-bary` only silences the warning — see [section 7](#7-barycentric-frame-what-the-headers-say-and-who-decides) |
 | RV error of 10²–10⁴ km/s, or `nan` | The component is undersampled or the multi-component split is degenerate. See [section 9](#9-bf-velocity-step-and-the-reliability-of-the-rv-errors); pass `--dv`, or trust the reported single-component fit |
 | Two BF peaks merge into one near conjunction | Physical, not a bug: at conjunction the components have the same RV. Use the `# blend_single` value, or drop that epoch |
 | A component sits at the edge of the BF window | Widen `--vel-range` |
@@ -2457,7 +2565,7 @@ line then reads `run stopped with an error` or `run failed` instead of
 | Ten RAW spectra to measure | Queue them in **Batch...** and tick **Normalize the queued spectra first**. It asks for a directory for the normalized copies, fits a cubic B-spline continuum to each, then measures those. There is nothing to configure; use **Normalize raw...** if you want to tune one spectrum by eye first |
 | A batch measured the blaze instead of the star | The spectra were raw. Every method here needs a continuum at 1.0 — re-run with the batch normalization ticked, or normalize them beforehand |
 | Ten spectra to measure with one template | Set the window up once, press **Batch...**, queue the files, and read every fit in the results overview — see [Batch](#batch-a-whole-series-in-one-run). For an unattended run over a long series use the command-line `batch` instead |
-| A batch refuses to start: "the queue mixes two wavelength frames" | Some queued files say their wavelengths are already barycentric and others say they are topocentric. The **Apply barycentric correction** tick is one switch and cannot be right for both — run them as two batches; `barycheck` shows the per-file evidence |
+| A batch asks: "the queue mixes two wavelength frames" | Some queued files say their wavelengths are already barycentric and others say they are topocentric. The **Apply barycentric correction** tick is one switch, so it cannot suit both groups unless one claim is wrong — answer No and run them as two batches, or Yes if you know better than the headers; `barycheck` shows the per-file evidence |
 | A batch refuses to start: "a batch needs the automatic component search" | BF assumption mode starts every fit from RVs read off one epoch's curve, which drags a whole series towards that epoch's answer. Open **Method...** and switch to the automatic search |
 | Batch results all share one BJD or phase | Not possible from the GUI batch, which ignores the **Obs. time** box and reads each file's own header. If it happens on the command line, `--obstime` was given one value for the whole series — drop it, or use `--bjd` with one value per file |
 | The GUI does not open | `tkinter` is missing (see [Setup](README.md#setup)) or there is no display — the terminal wizard starts instead with the same steps |
@@ -2467,9 +2575,10 @@ line then reads `run stopped with an error` or `run failed` instead of
 | The GUI shows the previous spectrum's target | Fixed: the fields the program filled in are cleared when the spectrum path changes, and `Header` refills them from the file now loaded. Fields you typed yourself are kept and reported rather than overwritten — clear them by hand if they belonged to the previous target |
 | A file with no header gives OBJECT/DATE-OBS = None | If its name follows a convention RVCalPy knows (DAO, Demetra — see [metadata in the file name](#metadata-in-the-file-name)) the values are read from the name; `header --resolve` shows what was found. Otherwise pass `--object/--obstime/--site` yourself |
 | A Demetra spectrum picks the wrong observatory | That convention does not encode the site and the run falls back to the default, saying so. Pass `--site` (`kreiken` for the AUKR T80/Whoppshel spectra); the raw `.fit` frames carry it in `GEO_LONG`/`GEO_LAT`/`GEO_ELEV` and are read automatically |
-| RVs offset by 20-25 km/s from a published table | A spectrum whose header does not record the wavelength frame may already be barycentric; the guard cannot see it and the run says so. Compare one epoch both ways and use `--no-bary` if the uncorrected value is the one that matches ([section 7](#7-barycentric-frame-the-double-correction-guard)) |
+| A batch reports `v_bary = +0.0000` and no BJD ("barycentric correction skipped (needs coordinates AND observation time)") | The queued files carry no epoch. If they are copies made by `normalize`, the fix is automatic since RVCalPy-20 — the source file named in their comment header is read, and with it any PolarBase `.meta` near *it* ([section 3](#metadata-in-a-sidecar-file-polarbase)). If they are cuts made by hand with no header at all, give `--obstime` (one file) or `--bjd` (one value per file), or re-cut them from the original product |
+| RVs offset by 20-25 km/s from a published table | A spectrum whose header does not record the wavelength frame may already be barycentric; the header check cannot see it and the run says so. Compare one epoch both ways and use `--no-bary` if the uncorrected value is the one that matches ([section 7](#7-barycentric-frame-what-the-headers-say-and-who-decides)) |
 | A PolarBase spectrum has no epoch or coordinates | A `.s` (or a window cut out of it) finds its `.meta` only by the same file name, or as the single `.meta` in its folder ([sidecar](#metadata-in-a-sidecar-file-polarbase)). A copy in a folder with no `.meta` (or several) has none. Normalize it in its own folder first, or use the `.fts`, which has its own header |
-| The run stops on a PolarBase file: header says already barycentric | Expected: PolarBase wavelengths are heliocentric. Use `--no-bary` (untick the box). The helio→barycentric term, at most ~13 m/s, is then added and written in the `helio_to_bary[km/s]` column |
+| A PolarBase file warns: header says already barycentric | Expected, and the run continues. PolarBase's own documentation says its wavelengths are heliocentric, and its `SPECSYS = HELIOCENTER` says so too; the date cards beside it say nothing either way and are not read. With `--no-bary` (box unticked) the helio→barycentric term, at most ~13 m/s, is added instead and written in the `helio_to_bary[km/s]` column; with the box ticked the full v_bary is added and the run warns |
 | `batch` warns that the spectra mix the two PolarBase products | Some files are the pipeline-normalized `<odo>i`, others the `<odo>i_u`. Their zero points differ by ~0.15 km/s. Queue one product only, preferably `i` |
 | The same PolarBase exposure gives very different RVs as `i` and `i_u` | The `i_u` flux is not normalized (it still carries the blaze). Normalize it first, or measure the `i` product |
 | The line check shows lines far deeper or shallower than the model | Look at *which* lines. Lines in the right place with the wrong strength (He I deeper and metals weaker in a B star, say) mean the template's temperature is wrong, not the RV. A model with no line where the data have one never appears, because only lines the model shows are checked |
