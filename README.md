@@ -145,7 +145,7 @@ residuals and the phased velocity figures are in the report:
 
 ## Acknowledgements
 
-I am grateful to **Tobias Cornelius Hinse**, **Mehmet Alperen Kul** and
+I am grateful to **Tobias Cornelius Hinse**, **Özgür Baştürk**, **Piercarlo Bonifacio**, **Mehmet Alperen Kul** and
 **Otmar Stahl** for their guidance, discussions and feedback during the
 development of this tool. Their input shaped the methods, the data handling
 and the checks built into `rv_analysis.py`.
