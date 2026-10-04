@@ -590,14 +590,26 @@ keeping that size afterwards so nothing is pushed off the bottom. The figure
 takes most of the split and the report opens a few lines tall; drag the sash
 down to read a long report in one go.
 
-**Save** asks where first: a directory chooser opens on the folder the run
-would have used, and the result text file and figures are written there
-under their usual names, together with the **shifted spectrum**
-(`result_<METHOD>_shifted.fits`, one `_C1`/`_C2` file per component; see
-[Outputs](#11-outputs)). Cancelling the chooser writes nothing at all. The
-result box then lists the paths the files actually went to. On the command
-line nothing changed — each command still writes where its `--output` and
-`--plot` say, immediately after the run.
+**Save** asks two things. First **which files**: a small window lists every
+file this result can produce, each with a tick box and its name —
+
+- **Result report** — `result_<METHOD>.txt`;
+- **Figure** and **Line-check figure** — `result_<METHOD>.png`,
+  `result_<METHOD>_linecheck.png`;
+- **Profile table: RV vs CCF / BF / TODCOR** — `result_<METHOD>_profile.txt`,
+  the measured profile as plain columns, to plot it with any other program
+  (see [Outputs](#11-outputs));
+- **Rest-frame spectrum** — `result_<METHOD>_shifted.fits`, one `_C1`/`_C2`
+  file per component.
+
+All are ticked the first time; afterwards the window opens with your last
+choice. Then **where**: a directory chooser opens on the folder the run would
+have used, and the ticked files are written there under their usual names.
+Cancelling either window writes nothing at all. The result box then lists the
+paths the files actually went to. A Wilson or orbit result offers its report
+and figure the same way. On the command line nothing changed — each command
+still writes every file, where its `--output` and `--plot` say, immediately
+after the run (the profile table included).
 
 Other GUI features:
 
@@ -747,13 +759,20 @@ is then replaced by those copies and the tick clears itself, so a second run
 does not normalize what is already normalized. If your spectra are already
 normalized, leave the box unticked; that is the default.
 
+Below the normalization box, **Settings for every spectrum** lists what the
+run takes from the main window, one line each, the way the Method panels do:
+Method (the summary line under **Method...**), Template, Wavelength range,
+R, vsini, Target, Barycentric, Ephemeris and Observation time. Nothing is
+edited there — change a setting on the main window and reopen **Batch...**.
+
 **The observation time is the one thing not shared.** Each spectrum's own
 header (or file name) supplies its epoch, and with it its BJD, its
-barycentric correction and its orbital phase. If the **Obs. time** box on
-the main window holds a value, the dialog says in orange that it is ignored
-here: one typed timestamp used for ten files would give all ten the same
-BJD, the same v_bary and the same phase, and the RV curve that came out
-would be flat and wrong without looking wrong.
+barycentric correction and its orbital phase — the *Observation time* line
+says *from each file's header*. If the **Obs. time** box on the main window
+holds a value, the same line adds in orange that it is ignored here: one
+typed timestamp used for ten files would give all ten the same BJD, the same
+v_bary and the same phase, and the RV curve that came out would be flat and
+wrong without looking wrong.
 
 Before the run starts, the queue's wavelength frames are checked together,
 because the **Apply barycentric correction** tick is a single switch and the
@@ -825,13 +844,30 @@ detail window moves the card, and the header keeps a running count.
   α for TODCOR. The S/N is one value per spectrum over the whole range
   measured, not at a single wavelength. The box is only on screen; the
   saved `result_RV_curve.png` has none.
-- **Save all kept...** asks for a second directory — the normalized
-  spectra went into their own, this one is for the results — and writes
-  everything the run produced:
+- **Save all kept...** first asks what to write, in two boxes of tick
+  boxes:
+
+  - **Each spectrum's folder** — the same choices as **Save** (report,
+    figure, line-check figure, profile table, rest-frame spectrum), one
+    choice for every kept epoch. Untick them all and no spectrum folder
+    is made.
+  - **Combined files** — one box per file of the whole series:
+    **Overview** (`result_batch_overview.png`), **Batch report**
+    (`result_batch_report.txt`), **RV curve figure** (`result_RV_curve.png`),
+    **RV curve table** (`result_RV_curve.txt`) and, for a BF batch with
+    two or more profiles, **BF profiles figure** (`result_BF_profiles.png`).
+    Only files the run can produce are offered: no curve without a kept
+    epoch, no curve figure without a time on one.
+
+  Both boxes open with your last choice (all ticked the first time). Then
+  it asks for a second directory — the normalized spectra went into their
+  own, this one is for the results; a new folder name is created — and
+  writes what was ticked:
 
   - **one subdirectory per kept epoch, named after the spectrum**, holding
-    that epoch's own `result_*.txt`, its fit figure, its line-check
-    figure and its rest-frame spectrum `result_*_shifted*.fits`. The naming is not cosmetic: every single-spectrum run calls its
+    the files ticked for it: its own `result_*.txt`, its fit figure, its
+    line-check figure, its profile table `result_*_profile.txt` and its
+    rest-frame spectrum `result_*_shifted*.fits`. The naming is not cosmetic: every single-spectrum run calls its
     files `result_BF.txt` and `result_BF.png` whatever spectrum it measured,
     so ten epochs written side by side into one folder would be one epoch
     written ten times.
@@ -888,7 +924,7 @@ detail window moves the card, and the header keeps a running count.
 
 Nothing is written until you press one of the Save buttons, exactly as for a
 single run. **Save this one...** in the detail window writes just the epoch
-on screen.
+on screen, after the same question about which files.
 
 The command-line [`batch`](#batch--a-time-series-into-an-rv-curve) command
 is unchanged and still the right tool for an unattended run over a long
@@ -2611,10 +2647,11 @@ SB2 velocities.
 | `result_CCF.png` / `result_BF.png` | Fit figure (BF: one dashed profile per component with `amp` and RV in the legend) |
 | `result_CCF_linecheck.png` / `result_BF_linecheck.png` / `result_TODCOR_linecheck.png` | Model reliability check: observed spectrum against the template broadened and shifted to the measured RV, around lines chosen **for this star** from a list of ~90 hydrogen, hot-star (He I/II, Si II–IV, Mg II, C II, N II, O II, Al III, Fe III, Ne I) and cool-star (Fe I/II, Ca I, Mg I, Ti II, Sr II, Ba II) lines. A line is checked only when the model itself shows it: its minimum lies on the catalogue wavelength, it is at least 2 % deep, and at least half as deep as the deepest feature in its window. The strongest **4 per 50-nm band over 400–600 nm** and 2 per band elsewhere are kept, only inside the analysed range, and never two whose windows overlap (Balmer ±30 Å, He ±10–12 Å, metals ±6 Å). Na I D is excluded, since interstellar absorption is in no stellar model. With more than 4 lines the figure has two columns. **CCF:** the CCF measures no line-broadening kernel (its peak width also contains the template's own lines, and for hot stars it is far from Gaussian), so the Gaussian kernel is fitted to the non-hydrogen windows with a free continuum level and depth scale per window. RV and template stay fixed, and the depth ratios printed are those of the unscaled model. **Reading it:** a good RV with a matching template gives r ≈ 1 and depth O/M ≈ 1. A line at the right place but with the wrong strength (He I deeper and metal lines weaker than the model, say) means the template has the wrong temperature, not the wrong RV |
 | `result_TODCOR.txt` / `.png` | `todcor` mode: both velocities with errors, one row per component behind a `star` column, the fitted α and which component is brighter, the peak correlation, and whether the exact or regular normalization ran. The figure shows the 2-D surface plus the two cuts through the maximum — each cut is what a 1-D CCF would look like if the other component's velocity were already known. The line under it gives the plotted (measured) v1/v2 and, when the barycentric correction was applied, v_bary and the **REPORTED (barycentric)** v1/v2 |
-| `result_CCF_shifted.fits` / `result_BF_shifted_C<k>.fits` / `result_TODCOR_shifted_C<k>.fits` | The analysed spectrum moved to the star's rest frame, one file per component (no `_C<k>` when there is one). Every order of the input file is shifted by λ_rest = λ / (1 + RV_raw/c). The shift is the **measured** velocity `RV_raw`, the shift actually present in the file's wavelengths; the barycentric correction moves no pixel, so it is not part of the shift. **Primary HDU:** 1-D flux on a uniform linear grid in Å (`CRVAL1`/`CDELT1`/`CRPIX1`, `CTYPE1 = WAVE`, step = the finest input pixels; overlapping orders averaged), for IRAF `splot`, iSpec or any 1-D FITS viewer. **`SPECTRUM` extension:** binary table `WAVE` [Å], `FLUX`, `ORDER` with the shifted pixels exactly, no resampling; `read_spectrum` reads this table, so a re-run uses the exact pixels. Header cards: `OBJECT`, `DATE-OBS`, `EXPTIME`, `RA`, `DEC`, `INSTRUME` (when known), `RVSHIFT` [km/s], `COMPON`, `METHOD`, `ORIGFILE`, and `SPECSYS = SOURCE`, which the header check reads as "already corrected", so applying a barycentric correction to the file draws the double-correction warning. Written by Save, by each epoch of the GUI batch's **Save all kept...**, and by `ccf`/`bf`/`todcor` on the command line |
+| `result_CCF_profile.txt` / `result_BF_profile.txt` / `result_TODCOR_profile.txt` | The measured profile as plain whitespace-separated columns, for plotting it outside the program — one row per velocity sample. Columns: `star`; `RV[km/s]`, the velocity axis in the frame of the **reported** RVs (v_bary added when the correction is applied, the helio→barycentric term for a heliocentric spectrum, otherwise equal to `RV_raw`), so the peak sits at the RV in `result_*.txt`; `RV_raw[km/s]`, the measured frame the figure is drawn in; then **CCF**: `CCF` (the combined correlation) and `fit` (the fitted Gaussian on its baseline); **BF**: `BF` (the smoothed broadening function) and `fit` (the sum of the fitted component profiles); **TODCOR**: `corr_v1` (the 2-D correlation along v₁ at the fitted v₂) and `corr_v2` (along v₂ at the fitted v₁) — the two cuts the figure plots, on one axis. The header line names the columns; plot e.g. column 2 against column 4 (`gnuplot: plot "result_BF_profile.txt" u 2:4`, or `numpy.loadtxt(..., usecols=(1, 3))`). Written by Save when ticked, by each kept epoch of **Save all kept...**, and always by `ccf`/`bf`/`todcor` on the command line |
+| `result_CCF_shifted.fits` / `result_BF_shifted_C<k>.fits` / `result_TODCOR_shifted_C<k>.fits` | The analysed spectrum moved to the star's rest frame, one file per component (no `_C<k>` when there is one). Every order of the input file is shifted by λ_rest = λ / (1 + RV_raw/c). The shift is the **measured** velocity `RV_raw`, the shift actually present in the file's wavelengths; the barycentric correction moves no pixel, so it is not part of the shift. **Primary HDU:** 1-D flux on a uniform linear grid in Å (`CRVAL1`/`CDELT1`/`CRPIX1`, `CTYPE1 = WAVE`, step = the finest input pixels; overlapping orders averaged), for IRAF `splot`, iSpec or any 1-D FITS viewer. **`SPECTRUM` extension:** binary table `WAVE` [Å], `FLUX`, `ORDER` with the shifted pixels exactly, no resampling; `read_spectrum` reads this table, so a re-run uses the exact pixels. Header cards: `OBJECT`, `DATE-OBS`, `EXPTIME`, `RA`, `DEC`, `INSTRUME` (when known), `RVSHIFT` [km/s], `COMPON`, `METHOD`, `ORIGFILE`, and `SPECSYS = SOURCE`, which the header check reads as "already corrected", so applying a barycentric correction to the file draws the double-correction warning. Written by Save when ticked, by each epoch of the GUI batch's **Save all kept...**, and by `ccf`/`bf`/`todcor` on the command line |
 | `result_TODCOR_selfcal.txt` | `todcor --simulate`: recovered velocities, bias, α and the `swap` column at each tested separation |
 | `result_RV_curve.txt` / `.png` | `batch` mode, and the GUI batch's **Save all kept...**: star, spectrum, BJD, phase and per-component RVs for the whole series. In `batch` mode, components varying by more than 3 km/s peak-to-peak between epochs are flagged as binarity/variability candidates (Katz et al. 2025) in a comment above the table. Same columns either way, so both feed `wilson` and `orbit` directly, and `--star` selects one star out of a file that holds two. The figure is a single panel, `RV [km/s]` against `Phase` (or `BJD_TDB` without an ephemeris), titled with the frame the curve is in |
-| `result_BF_profiles.png` | `batch` mode and the GUI batch: all BF profiles stacked by orbital phase |
+| `result_BF_profiles.png` | `batch` mode and the GUI batch: all BF profiles stacked by orbital phase (one picture of the series; each epoch's own profile as numbers is its `result_BF_profile.txt`) |
 | `<spectrum name>/result_*.txt` / `.png` | GUI batch only: one subdirectory per kept epoch, holding that epoch's own result files under their usual names. Every single-spectrum run names its output `result_BF.txt` whatever it measured, so the subdirectory is what keeps ten epochs from overwriting each other |
 | `result_batch_report.txt` | GUI batch only: the whole run as one document, headed by the star it measured. Opens with an aligned one-line-per-epoch table (star, spectrum, BJD_TDB, phase, each component's RV with error, v_bary, continuum S/N, peak significance, kept/dropped/failed — the columns are explained under [Reading a batch](#reading-a-batch-the-overview-and-the-detail-window), not in the file), then the settings used including the normalization pass and the queue's wavelength-frame verdicts, every epoch's full report, the epochs dropped or failed and why, and the velocity table |
 | `result_batch_overview.png` | GUI batch only: the results gallery as a single picture, every kept epoch's figure with its file name above it; the velocities, BJD and phase are read off the figures themselves |
