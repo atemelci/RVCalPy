@@ -145,15 +145,12 @@ RV = -35.7994 ± 0.0069 km/s  (no barycentric correction applied)
 v_bary = -7.8077 km/s (for information only, not applied)
 ```
 
-Every run names the **star** at the top of its report and writes it as the
-first column of the result file's table — never as a `#` note, so a velocity
-is never separated from the star it belongs to. The name is `--object` when
-you give one (the GUI's **Target** box), and otherwise the `OBJECT` the
-spectrum's own header carries, or, for a convention that puts the target in
-the file name, the name read from there. In the table a blank inside a name
-is written as an underscore (`TYC 3844-385-1` → `TYC_3844-385-1`), because a
-blank would split a column. A spectrum that names no target anywhere gets
-`-` and the run still works: the star name is a label, not an input to the
+Every run names the **star** at the top of its report (`Star : ...`). The
+result tables carry no star column — they hold the measured values only. The
+name is `--object` when you give one (the GUI's **Target** box), and otherwise
+the `OBJECT` the spectrum's own header carries, or, for a convention that puts
+the target in the file name, the name read from there. A spectrum that names
+no target anywhere still runs: the star name is a label, not an input to the
 measurement.
 
 `--no-bary` is **what this file needs**: the SOPHIE header says the
@@ -319,24 +316,28 @@ Two things to know if you edit there:
    to look at every fit and choose which epochs to keep, and the
    command-line [`batch`](#batch--a-time-series-into-an-rv-curve) when you
    want it unattended.
-7. **Check the series** — `wilson` plots RV1 against RV2. For a real SB2 the
+7. **Check the series** — `wilson` plots RV2 against RV1. For a real SB2 the
    points fall on a straight line whose slope is the mass ratio, so a
    mis-identified pair stands out at once and the primary is identified
    without an orbit.
-8. **Solve the orbit** — `orbit` folds the same velocities on time and adds
-   P, e, ω, K₁, K₂ and the minimum masses.
+8. **Solve the orbit** — `orbit` folds the same velocities on time, finds
+   any swapped epochs against the orbit itself, and adds P, e, ω, K₁, K₂ and
+   the minimum masses, each with errors from an emcee posterior (median and
+   16th/84th percentiles).
 
 The whole chain, which is the order the analysis is meant to run in:
 
 ```
-   spectra  ->  TODCOR / BF  ->  RV1, RV2  ->  Wilson plot  ->  q, γ  ->  orbit
-   (§3)         (§5)             per epoch     (§5 wilson)              (§5 orbit)
+   spectra  ->  TODCOR / BF  ->  RV1, RV2  ->  orbit             (§5 orbit)
+   (§3)         (§5)             per epoch
+                                    |
+                                    +------->  Wilson plot: q, γ  (§5 wilson)
 ```
 
 Each arrow is checkable on its own, and that is the point of splitting it
-this way. The Wilson step in particular assumes **no orbit at all**, so the
-mass ratio it returns is an independent check on the one the orbit fit
-produces later: if the two disagree, the period is wrong. The same division
+this way. The Wilson plot assumes **no orbit at all** and the orbit does not
+use it, so the mass ratio it returns is an independent check on the one the
+orbit fit produces: if the two disagree, the period is wrong. The same division
 of labour is what
 [MESS](https://ui.adsabs.harvard.edu/abs/2026MNRAS.546.....N) (Nachmani,
 Faigler & Mazeh 2026, MNRAS 546) uses — it extends TODCOR to a global
@@ -502,13 +503,101 @@ calls it the middle. Half the exposure is added to both. Note that SOPHIE/HARPS-
 already in the barycentric frame — do not apply the correction twice (see
 [section 7](#7-barycentric-frame-what-the-headers-say-and-who-decides)).
 
+**The exposure start comes from `MJD-OBS` when `DATE-OBS` is not enough.**
+Some headers carry only a date in `DATE-OBS` — the 1998–99 FEROS-DRS files
+write `DATE-OBS = 16/10/98`, the OM products `1999-07-15`. Read alone, that is
+00:00 UT, and the BJD, the orbital phase and v_bary would belong to the wrong
+hour of the night (up to 8.5 h and 0.6 km/s for those FEROS files). So, in
+order:
+
+1. a full timestamp in `DATE-OBS` is used as it is;
+2. a date-only `DATE-OBS` takes its time from a full `DATE-BEG`/`DATE-FIT`,
+   or from a `UT`/`TIME-OBS`-style card;
+3. failing those, from **`MJD-OBS`**, the exposure start as a number (ESO,
+   CFHT, the FEROS DRS), or from the ESO-MIDAS `TM-START` (seconds after 0 UT);
+4. when a full `DATE-OBS` and `MJD-OBS` disagree by more than a second,
+   `MJD-OBS` wins.
+
+The run says which it used, on the line under `DATE-OBS = ...`, e.g.
+*Exposure start: MJD-OBS = 51102.0736458 (01:46:02 UT); DATE-OBS (16/10/98)
+has no time of day*. For ESO phase-3 products (HARPS, FEROS, UVES) the two
+cards agree to the millisecond and nothing changes. The instrument rules
+that know better still come first: the Neo-Narval sequence mid-time, the
+SOPHIE `OHP OBS DATE START` card and the PolarBase `.meta`.
+
+**Every epoch is the middle of the exposure.** Whatever card gives the start,
+the BJD, v_bary and the orbital phase are computed for the middle of the
+exposure:
+
+| Source of the time | What the time is | Added by RVCalPy |
+|---|---|---|
+| ESO phase-3 (HARPS, FEROS, UVES), `DATE-OBS` or `MJD-OBS` | start | + EXPTIME/2 |
+| SOPHIE `OHP OBS DATE START` | start | + EXPTIME/2 (the DRS's own BJD is within about 1 min of the result) |
+| PolarBase `.meta` / `.fts` | start | + EXPTIME/2 |
+| Neo-Narval sequence | middle of the 4-exposure sequence (exposure meter) | nothing (EXPTIME is set to 0) |
+| DAO, `JD...` in the file name | middle | nothing (EXPTIME is set to 0); `DO...` is the start |
+| a JD/BJD number (`--bjd`, `--obstime 2461...`) | taken as a mid-exposure BJD | nothing |
+
+A calendar time with **no exposure time** anywhere cannot be moved to the
+middle. RVCalPy then uses it as given and says so —
+*WARNING: no exposure time (EXPTIME) is known for this spectrum ...* — on the
+screen, in the result file and in the report. Give the middle of the
+exposure as a BJD in that case.
+
+A normalized copy is written with the full start time. An older copy that
+holds only a date takes the time from the file it was normalized from, when
+that file is still where the copy says; if it is not, the run prints — and
+writes into the result — *WARNING: the observation time '1999-07-25' is a
+date with no time of day ...*. Re-normalize from the original, or give
+`--obstime` (one spectrum) or `--bjd` (a batch).
+
 ## 4. Interactive mode
 
 ```bash
 python rv_analysis.py          # same as: python rv_analysis.py gui
 ```
 
-A small window opens: resolve the target via SIMBAD (or enter RA/Dec), pick
+The windows use a light, flat look modelled on the Qt "Fusion" style of
+PyWD2015 — light-grey window, white fields and selected tabs, thin grey
+borders (Tk's `clam` theme, recoloured; it has no rounded corners).
+
+A small window opens (about 790 × 610 pixels) with everything on one page,
+in PyWD2015's manner — each section a title line over its groups side by
+side — and one row of small buttons at the very bottom:
+
+- **Spectrum** — **Files** (Spectrum and Template, each with
+  **Browse...**, and Template 2 for TODCOR; under a line **Normalize
+  raw...**, **Header** and **Spectrum**), **Instrument** (Spectrograph,
+  Resolution (R), vsini [km/s] with the smallest resolvable v sin i ≈ c/R
+  under it, then
+  the wavelength **Range [nm]**, empty for the full range) and **Method**
+  (a large **Method...** button with the summary of what is set under it);
+- **Target**, right under it — three groups laid out alike, fields at the
+  top and the group's buttons under a line at the bottom, the buttons of
+  all three on one row: **Identifier** (Name, RA, Dec, and after a lookup the
+  spectral type and one magnitude — V, or for a star SIMBAD has no V for,
+  the first of G, R, B, K it has; button **SIMBAD**), **Observation** (Obs
+  time — ISOT, BJD or DD/MM/YY — and Observatory; button **Custom
+  observatory...**) and **Ephemeris** (T0 with its unit, Period in days;
+  buttons **VarAstro** and **HJD -> BJD**), and under the three, on a row
+  of its own, the **Apply barycentric correction** box with, on the same
+  line, what the spectrum's header claims about its frame.
+  It is optional, for the barycentric correction, and **Header fills it
+  from the spectrum's own header** — the two sections sit one above the
+  other so that what the file says is seen landing in these fields, and
+  the blanks the header could not fill are the ones left to type or to
+  fetch with SIMBAD;
+- the bottom row: **Batch...**, **Run**, **Save**, then after a short
+  line **Wilson plot...** and **Orbit...**, which work on a finished table
+  of velocities, not on a spectrum.
+
+The window follows its contents: it grows a row when TODCOR adds
+Template 2.
+
+Check boxes are round, like the radio buttons of the method choice, with
+a dot when ticked.
+
+Resolve the target via SIMBAD (or enter RA/Dec), pick
 the normalized observed spectrum and the template, and choose the method via
 the **Method...** button — like **Normalize raw...**, it opens a small
 sub-window offering **CCF (Cross Correlation)**, **TODCOR (CCF-SB2)** or
@@ -544,9 +633,9 @@ grid, km/s) and **Exclude hydrogen lines**. The hydrogen box only acts on the
 line mask, so it is greyed out under *Full template*.
 
 Choosing **TODCOR** is for an SB2 whose two peaks blend. It reveals a
-second file row in the main window, right under the first — **Template 2
-(secondary)**, empty = same as template 1, with the first row relabelled
-**Template 1 (primary)**. Its **TODCOR settings** panel lists one setting
+third file row in the **Files** group, right under Template — **Template
+2**, the secondary's template, with the grey hint *empty: same as template
+1*; Template is then the primary's. Its **TODCOR settings** panel lists one setting
 per line: **Velocity step** (km/s per pixel of the log-λ grid, `--dv`),
 **Velocity window ±** (the search half-width, `--max-rv`), **Light ratio
 α (F2/F1)** (empty = fitted, `--alpha`) and **vsini of template 2**
@@ -574,21 +663,86 @@ of a correlation, and no method here can use it. You do not have to spot
 this yourself: an orange note appears beside the file as soon as it is
 selected, and **Run** stops with the same explanation.
 
-Press **Run** in the main window: the fit is shown with one dashed profile
-per component, labelled `C1: amp = ..., RV = ... km/s` — `amp` is the peak
-height read off the BF axis (the profile integrals/areas and the light
-ratios stay in the text summary). **Nothing is written to disk until you
-press Save** next to Run.
+Press **Run** in the main window: the result opens in a window of its own,
+**RV result**, beside the main window — the main window stays the form it
+is. The fit is shown with one dashed profile per component, labelled `C1:
+amp = ..., RV = ... km/s` in the legend — `amp` is the peak height read off
+the BF axis (the profile integrals/areas and the light ratios stay in the
+text summary). The legend is shown on screen and in the saved
+`result_BF.png` / `result_CCF.png`; untick **Figure options... → Legend
+shown** to close it, and the PNG then matches the screen. **Nothing is written to disk until you press Save** — in the
+result window, or beside Run.
 
-The report and the figure share the lower half of the window through a
-**draggable sash**: drag it down to read a long report in full, up to see the
-figure large. The report box does not wrap lines — the epoch tables are
-column-aligned — and has its own scrollbars, vertical and horizontal. The
-window opens at the size the form needs — no figure pane is held open while
-there is nothing to plot — and grows to full screen height on the first run,
-keeping that size afterwards so nothing is pushed off the bottom. The figure
-takes most of the split and the report opens a few lines tall; drag the sash
-down to read a long report in one go.
+In the RV result window the report sits above the figure, the two sharing the
+height through a **draggable sash**: drag it down to read a long report in
+full, up to see the figure large. The report does not wrap lines — the epoch
+tables are column-aligned — and has its own scrollbars. The next Run (or
+Wilson plot) reuses the same window.
+
+**Every graph is drawn and handled as in PyWD2015.** The look is the same
+everywhere: observed velocities in royal blue (star 1) and maroon (star
+2), as small plain dots; the orbit's model curves in light steel blue
+(star 1) and light coral (star 2); a black dashed line for γ and a black zero line under
+the residuals; no grid. Every colour can be changed in **Figure options...**
+(Curves tab — each colour is a drop-down list of colour names, like Line
+style, showing the colour's name, `royalblue`, `lightcoral`, or its hex
+value; any name or hex can also be typed in, and **...** opens a colour
+picker). The measured
+**profiles are grey** — the BF (raw light, smoothed thick) and the CCF;
+TODCOR's two cuts are thin black, as in RVCalPy-21 — and their **peaks look
+the same in every method**: component 1 (RV1) royal blue, component 2 (RV2)
+maroon (a third green) — the colours of the two stars' points on the orbit's
+Solution Curve and the RV curve — each fitted peak dashed and its RV a dotted
+vertical line in the same colour (TODCOR: the dotted v1 and v2 lines), the
+total fit thin black. The orbit's **Solution Curve**
+draws every velocity with its **error bar**, on the curve and in the
+residual panel, the repeated points included; the other velocity plots
+(RV curve, Wilson plot) carry no error bars — their errors are in the
+hover boxes and the result tables. A curve folded on the
+period runs from phase −0.25 to 1.25, every point drawn once more one cycle
+to either side, and the orbit fit puts its residual panel straight under the
+data at 1.5 : 1, with no gap. Tick labels never use an offset (`+2.455e6`):
+a BJD axis shows the whole number. Every graph opens **with its legend**
+(since 2026-10-14, the user's choice; from 2026-10-12 they opened hidden),
+and it stays until you close it with **Figure options... → Legend shown**.
+**Save** writes the graph as you see it: a legend you closed is not in the
+PNG either. The BF/CCF legends quote the measured RVs, as described below.
+
+Under every graph — the RV result, the orbit window's pages, the batch
+detail window, **RV curve...** and **Spectrum** — come the toolbar of
+PyWD2015's graphs (matplotlib's Qt toolbar): **Home**, **Back**,
+**Forward** | **Pan**, **Zoom** | **Subplots**, **Customize** | **Save**,
+and on its right the **cursor position**, named after the axes — `Phase =
+0.523   RV [km/s] = -12.31`, with the precision the current zoom needs (a
+panel without a label of its own, such as the orbit fit's upper panel,
+takes the label of the panel it shares the axis with; over the TODCOR
+surface the correlation under the cursor follows on a second line). Pan:
+left button drags, right button zooms; Zoom: a rectangle; x or y held down
+fixes that axis. Then PyWD2015's row of three:
+
+| Control | What it does |
+|---|---|
+| **Pop Plot Window** | A copy of the graph in a window of its own, with its own toolbar, row, menu and hover boxes. The copy stays open beside the next result, and zooming or editing it leaves the original as it was |
+| **Export Currently Plotted Data** | Every curve of every panel, as drawn now, to a tab-separated text file (`.dat`): a `# Data exported from a matplotlib figure` line, then per panel `# Axis k: title`, a `# x = ...  y = ...` line with the axis labels and, per curve, `# label` followed by x (5 decimals) and y (10 decimals). Lines drawn across a whole panel (γ, zero) are left out — their x is not data. On a folded curve the repeated points are exported too |
+| **Enable Grid** | The grid on or off, on every panel at once |
+
+**Every graph also has a right-click menu**, as in PyWD2015:
+
+| Item | What it does |
+|---|---|
+| **Zoom in** / **Zoom out** | Zoom by 1.5× around the point clicked, in the panel clicked (log axes zoom in log); each step goes on the toolbar's history, so **Back** / **Forward** step through it and **Home** returns to the opening view |
+| **Reset view** | The limits the graph opened with |
+| **Bigger** / **Smaller** | The graph's window 1.2× larger or smaller |
+| **Larger text** / **Smaller text** | Every text of the figure — titles, labels, ticks, legend — 1.15× larger or smaller |
+| **Configure subplots...** | The same window as the toolbar's **Subplots**, laid out as in the Qt toolbar: **Borders** (top, bottom, left, right) with **Export values** under it (the six numbers as `top=0.88, bottom=0.1, …`, to copy into a script), **Spacings** (hspace, wspace) with **Tight layout**, **Reset** (the values the window opened with) and **Close**. Fractions of the figure from 0 to 1 in steps of 0.005, applied as they change; a border cannot be moved past the one opposite it |
+| **Figure options...** | The same window as the toolbar's **Customize**, after the Qt figure editor. **Axes** tab: title; X-Axis and Y-Axis min, max, label and scale (linear, log, symlog, logit); *(Re-)Generate automatic legend*; plus tick-label size, grid and **Legend shown** (unticked when the graph opens, since legends start hidden on screen). **Curves** tab: label; *Line* — line style (Solid, Dashed, DashDot, Dotted, None), draw style (Default, Steps), width, colour (RGBA, with a picker); *Marker* — style, size, face colour, edge colour; plus shown or hidden. **Images** tab, for a panel with an image (the TODCOR surface): label, colour map, min and max value, interpolation. Above the tabs the **Figure title** and, for a figure with several panels, the panel to edit. The orbit fit and the Wilson plot (both the **Wilson plot...** result and the orbit window's Wilson tab) open with the figure title **blank** — type one here if you want it; it is drawn above the panels, in the room kept for it. Edits of several curves wait until **Apply** or **OK**; **Cancel** drops what was not applied, and only the fields that were changed are written |
+| **Save figure as...** | The graph as it is now — zoomed, edited — as PNG, PDF, SVG or EPS |
+
+The menu stays out of the way while the toolbar's pan or zoom tool is
+active, since those use the right button themselves. Changes made this way
+are on screen and in **Save figure as...**; the Save button writes the
+result's figures as the program drew them, at the size they were made
+with — never at the size of the window they were shown in.
 
 **Save** asks two things. First **which files**: a small window lists every
 file this result can produce, each with a tick box and its name —
@@ -600,14 +754,21 @@ file this result can produce, each with a tick box and its name —
   the measured profile as plain columns, to plot it with any other program
   (see [Outputs](#11-outputs));
 - **Rest-frame spectrum** — `result_<METHOD>_shifted.fits`, one `_C1`/`_C2`
-  file per component.
+  file per component;
+- **Corner plot (orbit posterior)**, **Wilson plot (orbit)** and
+  **Posterior table: orbit parameters** — `result_orbit_corner.png`,
+  `result_orbit_wilson.png` and `result_orbit_posterior.txt`, offered only
+  for an orbit result (see
+  [Reading the corner plot](#reading-the-corner-plot)).
 
 All are ticked the first time; afterwards the window opens with your last
-choice. Then **where**: a directory chooser opens on the folder the run would
+choice, and a choice it has not offered before (the corner plot, the first
+time an orbit is saved) starts ticked. Then **where**: a directory chooser opens on the folder the run would
 have used, and the ticked files are written there under their usual names.
-Cancelling either window writes nothing at all. The result box then lists the
-paths the files actually went to. A Wilson or orbit result offers its report
-and figure the same way. On the command line nothing changed — each command
+Cancelling either window writes nothing at all. The RV result window then
+lists the paths the files actually went to. A Wilson result offers its report and
+figure the same way; an orbit result its report, orbit figure, corner plot and
+posterior table. On the command line nothing changed — each command
 still writes every file, where its `--output` and `--plot` say, immediately
 after the run (the profile table included).
 
@@ -617,15 +778,24 @@ Other GUI features:
   every fit shown at once afterwards. It has [two sections of its
   own](#batch-a-whole-series-in-one-run) below.
 - **Normalize raw...** — continuum-normalize **one** raw spectrum, with a
-  preview: choose the continuum model (**Polynomial** in blended windows, or
-  a cubic **B-spline** with knots every window — the polynomial order applies
-  to the polynomial model only, the clipping iterations to both), press
+  preview: choose the continuum model (a cubic **B-spline** with knots
+  every window — the one selected when the window opens — or **Polynomial**
+  in blended windows; the **Polynomial order** box appears only when
+  Polynomial is chosen, as Template 2 appears only for TODCOR, and the
+  clipping **Iterations** apply to both),
+  press
   **Preview** to overlay the result on the template, and adjust until they
   match. This is the place to settle the continuum on one file; the batch
   normalizes a whole queue with a fixed B-spline and no preview.
-- **Header** — opens the selected spectrum in its own **plot window** and
-  prints the [standard summary block](#the-standard-summary-block) into the
-  result box, filling the Target fields from **the file that is loaded now**.
+- **Header** — opens the **Header** window of the selected file, with two
+  side tabs: **Cards**, the header exactly as it is written in the file
+  (every HDU of a FITS file, each under a `--- HDU k: NAME (type) ---` line;
+  for an ASCII table its comment header and, for PolarBase, the `.meta`
+  sidecar), and **Summary**, the [standard summary
+  block](#the-standard-summary-block) — what the program reads from those
+  cards. It also fills the Target fields from **the file that is loaded
+  now**. Each press opens a window of its own, so two files' headers can be
+  compared side by side.
 
   Load a different spectrum and the fields the program filled in for the
   previous one are cleared the moment the path changes — including **T0 and
@@ -638,19 +808,21 @@ Other GUI features:
   Values *you* typed are not cleared, because you put them there on purpose.
   They are kept, listed in a note when the spectrum changes, and if the new
   file disagrees with one, `Header` says so — with both values — instead of
-  overwriting it. The plot window carries the full matplotlib navigation
-  bar, so it can be zoomed, panned, sent back **Home** and saved as a PNG,
-  and the cursor position is read out in wavelength and flux as it moves —
-  the same interactive look a MIDAS plot gives you. One line is drawn per
-  echelle order.
+  overwriting it.
+- **Spectrum** — plots the selected spectrum in a window of its own. The
+  window carries the full matplotlib navigation bar, so it can be zoomed,
+  panned, sent back **Home** and saved as a PNG, and the cursor position is
+  read out in wavelength and flux as it moves — the same interactive look a
+  MIDAS plot gives you — plus the Pop / Export / Grid row of every graph.
+  One line is drawn per echelle order.
 
   What it draws is what the analysis will actually read, not the raw file:
   orders the reader discards are absent. On a Libre-ESpRIT `st3`, where
   roughly half the orders have no continuum solution at this S/N, the window
   therefore shows ~17 of the 41 orders. Use it as a check on what the fit
   will see.
-- **Wilson plot...** — in its own box, **RV results**, the last row of the
-  window and separate from the analysis fields: it uses no spectrum, no
+- **Wilson plot...** — in the bottom row, after the line that separates
+  it from Batch... / Run / Save: it uses no spectrum, no
   template, no method and not the Run button — it works on a finished table
   of velocities. It gives the mass ratio from that RV series: pick a
   table and then **one column per axis**, chosen by **column number counted
@@ -659,29 +831,100 @@ Other GUI features:
   names: the velocities may be called anything, sit in either order, or come
   from different methods (`ccf_rv1` against `bf_rv2`), and a table with no
   header at all is selected from just the same way. Each axis has an error
-  dropdown of its own, `(auto)` by default — which takes an error column only
-  when the RV column's own name implies one that exists (`ccf_rv1` →
-  `ccf_err1`), and otherwise leaves the fit unweighted. The RV1-vs-RV2 line
-  gives M₂/M₁, the systemic velocity and which component is the primary, with
-  mis-identified epochs swapped back. The dialog has no star or dataset
+  dropdown of its own. When the table names its columns, the dialog opens
+  with the matching error column already chosen — `ccf_err1` for `ccf_rv1`,
+  `RV1_err` for `RV1[km/s]`, and since 2026-10-14 also `sigma_RV1` for
+  `RV1` (the PSL summaries) and the other spellings listed under
+  [`wilson`](#wilson--mass-ratio-from-the-rv1-vs-rv2-plot). Otherwise it
+  shows `(auto)`, and a table with no error column is fitted unweighted.
+  **Check the error dropdowns before comparing two runs**: the same table
+  with and without its errors gives a different slope, rms and robust σ. The RV1-vs-RV2 line
+  gives M₂/M₁, the systemic velocity and which component is the primary.
+  **Swap mis-identified pairs** starts **unticked**: the pairs are fitted
+  as the table gives them, and a mis-identified epoch shows up as an
+  outlier (leave it out with a click, see below); tick it to have
+  decidable swaps found and exchanged as `wilson` does by default on the
+  command line. **Add v_bary** (unticked) adds each row's v_bary to both
+  velocities. **Plot** shows it in the RV result
+  window, with the right-click menu on the graph and, beside **Pop Plot
+  Window**, a **Swap axes: V₁ ↔ V₂** button: it redraws the plot with V₂
+  across and V₁ up (and back), axis names included. The fit and the report
+  do not change, only the drawing: with V₁ across the legend's slope is
+  −M₁/M₂ = −1/q, with V₂ across it is −M₂/M₁ = −q, the number in the title
+  ([why](#wilson--mass-ratio-from-the-rv1-vs-rv2-plot)). A click on a
+  point keeps the orientation chosen. The dialog has no star or dataset
   filter: it reads the whole table and **warns in the result** when the rows
   hold more than one star or more than one dataset. Those filters are still
   there on the command line, and a table covering several systems should be
   run there. See [`wilson`](#wilson--mass-ratio-from-the-rv1-vs-rv2-plot).
+- **Orbit...** — beside **Wilson plot...**, the same table and column
+  choice, plus an **Orbit** box: **Period** [d] (taken from the window's
+  ephemeris when one is filled in; empty: the period is searched),
+  **Prior width** (× the least-squares error, default 10), **Steps** (per
+  walker, default 5000; 64 walkers), **Eccentric orbit** and **Posterior
+  errors (emcee)**. The orbit runs in its **basic mode**: there is no
+  **Swap mis-identified pairs** and no **Add v_bary** here — the velocities
+  go into the fit as the table gives them, in their order and frame, and
+  no pair is exchanged. For a swap repair or v_bary added, use the main
+  window's **Wilson plot...** (the detailed tool), or the `orbit` command,
+  whose swap check is on by default. A swapped epoch left in shows at once
+  — far off both curves, and as the outlier of the Wilson tab's residuals
+  — and inflates the errors: LL Aqr's one blended epoch at conjunction
+  raises the RV error scale from 1.8 to 16. **Fit orbit** runs the
+  least-squares fit and the posterior, which takes about ten seconds, and
+  opens the result in a window of its own with its pages as side tabs,
+  captions written upwards: **Orbit fit** (the folded
+  curve with the model of the posterior medians, and the residuals of the fit
+  underneath; **hold the mouse over any point** — on the curve or in the
+  residuals — and a box shows that epoch's name, BJD and phase, both
+  velocities with their errors and residuals, the component under the cursor
+  marked `>`, and whether the pair was swapped; the window opens on this
+  page), **Corner plot**, **Wilson plot** and **Report** — the same report
+  Save writes to `result_orbit.txt`, which ends with the Wilson plot's
+  numbers. The **Wilson plot** tab is a basic one: the same pairs, in the
+  order the orbit used them, with the fitted line, γ, q and the primary,
+  and the residuals about the line beside it — no swap repair of its own,
+  and it does not enter the orbit fit; the hover box gives each epoch's
+  name, orbital phase and velocities. The window
+  opens at about 1040 × 660 pixels, the size of PyWD2015's plot windows;
+  resize it freely — the orbit fit fills its page as PyWD2015's plots do,
+  and the corner and Wilson plots keep their shape. The PNGs are written
+  at their own size whatever the window's.
+  That window's **Save...** asks which of the five files to write (report,
+  orbit figure, corner plot, Wilson plot, posterior table). See
+  [`orbit`](#orbit--sb2-orbital-elements-the-last-step-of-the-chain).
 - **VarAstro / HJD → BJD** — fetch the eclipsing-binary ephemeris (T0, P)
   from var.astro.cz and convert T0 to BJD_TDB for the orbital phase. The
   lookup handles VarAstro's GCVS spelling automatically (a name like
   `V563 Lyr` is retried as the zero-padded `V0563 Lyr`) and, if the name
   is still not found, retries the target's **SIMBAD cross-identifiers**,
   matching the returned star by label so a fuzzy near-name is not accepted.
-- **Observatory** — the dropdown opens on **Automatic (from the file
-  header)**, which reads the position out of the selected spectrum and
+- **How a star name is written does not matter.** SIMBAD, the coordinate
+  lookup (`--object`) and VarAstro try the name as typed first and then its
+  standard forms: `KX-Aqr`, `kx-aqr`, `KX_Aqr`, `KXAqr` and `kxaqr` all
+  find **KX Aqr**, `v563-lyr` finds V563 Lyr, and an ESO header OBJECT with
+  a programme number in front, such as `2234_LL-Aqr`, finds LL Aqr. A
+  hyphen or underscore becomes a space only before a letter, so the sign
+  in `BD-12 345` or a 2MASS `J…-…` name is never dropped (that would name a
+  different star), and a variable-star designation gets its capitals back
+  (`ll aqr` → `LL Aqr`).
+- **The lookup is quick.** It goes through CDS's **Sesame** name
+  resolver (SIMBAD's own data), which answers in well under a second,
+  with every spelling in one request — the likeliest one (`KX Aqr`) alone
+  first, the rest only if that misses; SIMBAD's script service, which can
+  take 15 s to a minute or time out, is asked only when Sesame cannot be
+  reached. A name found once is kept for the rest of the session, so a
+  second lookup or a Run that needs the same star costs nothing. In the GUI
+  the search runs in the background — *searching SIMBAD ...* shows under
+  the fields and the window stays usable; an unknown name says so within
+  about a second.
+- **Observatory** — the dropdown opens on **(from Header)**, which reads the position out of the selected spectrum and
   falls back to the default site only when the file gives none; the rest of
   the list is the built-in sites (ESO VLT/La Silla/NTT/ALMA/
   ELT, OHP (Saint-Michel), CTIO, Las Campanas, SOAR, Gemini, CFHT, Keck,
-  LBT, TBL, TNG, TUG, Kreiken, …). The site coordinates stay stored behind
+  LBT, TBL, TNG, TUG, DAG, Kreiken, …). The site coordinates stay stored behind
   the selection (not shown on the widget); an observatory not in the list is
-  entered through the **Custom...** button, which opens a small window for
+  entered through the **Custom observatory...** button, which opens a small window for
   lon [°E], lat [°] and alt [m]. These coordinates drive the barycentric
   correction — including the diurnal (Earth-rotation) term — the way the
   MIDAS `comp/bary` command takes the observatory longitude and latitude
@@ -692,20 +935,24 @@ Other GUI features:
   unticked**: v_bary is always computed and reported, but only added to the
   RVs when you tick **Apply barycentric correction** yourself. The box is
   never ticked, unticked or disabled behind your back; when the selected
-  spectrum's header claims a frame, the claim is added to the box's label
-  (*header says already corrected — check first* / *header says
+  spectrum's header claims a frame, the claim appears in grey beside the
+  box (*header says already corrected — check first* / *header says
   topocentric*) and nothing else happens. So a run made
   straight after opening the window reports RVs in the **measured
-  (observer) frame** — tick the box when you want them barycentric. The
-  figure always quotes the RV of the Gaussian fit exactly as measured —
-  the fit is never altered — and, with the checkbox on, lists **v_bary on
-  the legend line right below the fitted RVs**; the result text file
-  contains the star, the raw RV, the corrected RV and v_bary side by side,
-  on one line per component. **TODCOR** has no fit legend, so its figure
-  carries the same information in the line under it: the plotted
-  (measured) v1 and v2, v_bary, and the **REPORTED (barycentric)** v1 and
-  v2 — the surface and the marked maximum stay in the observed frame,
-  since shifting them would misplace the peak on its own surface.
+  (observer) frame** — tick the box when you want them barycentric. **With the box ticked,
+  every figure is drawn on the corrected velocity axis** (v → v + v_bary,
+  relativistically): the smoothed BF or CCF, the fitted peaks, their RV
+  lines and labels, and for TODCOR the surface's axes with its marked
+  maximum, both cuts and the v1/v2 lines all show the **reported
+  (barycentric)** values; the axis is labelled `(barycentric)` (TODCOR:
+  `(bary.)`) and the BF/CCF legend adds `v_bary = … (applied)`. Unticked, the axis is the measured
+  frame, which is then also the reported one. The fit itself is always
+  made in the measured frame and never altered — shifting the axes moves
+  every curve and its peak together. The result text file contains the
+  star, the raw RV, the corrected RV and v_bary side by side, one line per
+  component, and the profile table has both velocity axes (`RV` and
+  `RV_raw`). TODCOR's line under the figure says which frame is plotted
+  — `plotted = reported (barycentric)`, v_bary and the measured v1/v2.
 
 ### Batch: a whole series in one run
 
@@ -802,7 +1049,7 @@ they are about one epoch, not a series:
   and reads no observed spectrum at all, so a list of spectra changes
   nothing about it.
 
-A progress window names the file being measured and has a **Stop** button;
+A progress window (its bar in midnight blue) names the file being measured and has a **Stop** button;
 stopping keeps everything measured so far. An epoch that fails is not lost
 either — it appears in the results with its error message instead of a
 figure, so a broken file is visible rather than silently missing.
@@ -844,6 +1091,17 @@ detail window moves the card, and the header keeps a running count.
   α for TODCOR. The S/N is one value per spectrum over the whole range
   measured, not at a single wavelength. The box is only on screen; the
   saved `result_RV_curve.png` has none.
+- **Orbit solution...** — right after **RV curve...** — fits the orbit
+  of the kept epochs **directly from the batch's RVs** (RV1 and RV2 of
+  each kept card, with their errors and BJDs, in the frame the curve is
+  in), so no RV table has to be saved and read back first. It needs two
+  components. It opens the same **Orbit** box as the main window, with the
+  batch's period filled in, in the same basic mode (no swap repair). The
+  result opens in the orbit window (Orbit fit / Corner plot / Wilson plot /
+  Report tabs, its own **Save...**), and from then on **Save all
+  kept...** offers its five files too. Tick or untick an epoch afterwards
+  and the orbit no longer matches the kept set: it is then not offered
+  until **Orbit solution...** is run again.
 - **Save all kept...** first asks what to write, in two boxes of tick
   boxes:
 
@@ -855,9 +1113,15 @@ detail window moves the card, and the header keeps a running count.
     **Overview** (`result_batch_overview.png`), **Batch report**
     (`result_batch_report.txt`), **RV curve figure** (`result_RV_curve.png`),
     **RV curve table** (`result_RV_curve.txt`) and, for a BF batch with
-    two or more profiles, **BF profiles figure** (`result_BF_profiles.png`).
+    two or more profiles, **BF profiles figure** (`result_BF_profiles.png`),
+    and after an **Orbit solution...** fit **Orbit report** (`result_orbit.txt`),
+    **Orbit figure** (`result_orbit.png`), **Corner plot (orbit
+    posterior)** (`result_orbit_corner.png`), **Wilson plot (orbit)**
+    (`result_orbit_wilson.png`) and **Posterior table: orbit parameters**
+    (`result_orbit_posterior.txt`).
     Only files the run can produce are offered: no curve without a kept
-    epoch, no curve figure without a time on one.
+    epoch, no curve figure without a time on one, no orbit file without an
+    orbit fitted to the epochs kept now.
 
   Both boxes open with your last choice (all ticked the first time). Then
   it asks for a second directory — the normalized spectra went into their
@@ -880,7 +1144,6 @@ detail window moves the card, and the header keeps a running count.
 
     | column | meaning |
     |---|---|
-    | `star` | the target as given on the window, or as named by that spectrum's own header or file name; written only when at least one spectrum could be attributed |
     | `spectrum` | the file, its middle cut out when it is too long for the column |
     | `BJD_TDB` | mid-exposure barycentric Julian date; `-` means the epoch or the coordinates were missing |
     | `phase` | orbital phase from the ephemeris on the window; `-` when none was given |
@@ -904,19 +1167,18 @@ detail window moves the card, and the header keeps a running count.
     — so a caption would only repeat them.
   - **`result_RV_curve.txt`** — the same column layout the command-line
     [`batch`](#batch--a-time-series-into-an-rv-curve) writes, beginning
-    with a **`star`** column and then the spectrum, so a curve found months
-    later still says which star it belongs to; `wilson --star` and
-    `orbit --star` select on that column by name, matching it on letters
-    and digits, so typing `LL Aqr` finds the `LL_Aqr` in the file (a blank
-    inside a name would split a column, so it is written as an
-    underscore). A spectrum that names no target gets `-`. It feeds
+    with the spectrum (no star column; the batch report's heading names the
+    star). It feeds
     [`wilson`](#wilson--mass-ratio-from-the-rv1-vs-rv2-plot) and
     [`orbit`](#orbit--sb2-orbital-elements-the-last-step-of-the-chain)
     directly — plus `result_RV_curve.png`, and in BF mode
     `result_BF_profiles.png`, every epoch's profile stacked by phase.
   - **The RV curve figure is one panel: `RV [km/s]` over `Phase`.**
-    The x axis is the orbital phase when an ephemeris was given, and
-    `BJD_TDB` when it was not; the y axis is the velocity. Nothing else
+    The x axis is the orbital phase when an ephemeris was given (from
+    −0.25 to 1.25, each epoch drawn once more one cycle to either side),
+    and `BJD_TDB` when it was not; the y axis is the velocity, component 1
+    in royal blue, component 2 in maroon and a third in green, without error
+    bars. Nothing else
     is drawn — v_bary is a column of `result_RV_curve.txt`, where the
     value can be read exactly rather than off a strip of plot. The
     title names the frame, `(barycentric)` or `(measured frame)`, so a
@@ -933,7 +1195,9 @@ before deciding which epochs to keep.
 
 Without `tkinter` or without a display, a **terminal wizard** takes over:
 it walks through the target, the files and the settings for **one** spectrum
-and runs `ccf` or `bf` on it. It is not a replacement for the whole window —
+(a raw one is normalized first: continuum model, B-spline by default, with a
+polynomial order asked only for the polynomial, and the clipping
+iterations) and runs `ccf` or `bf` on it. It is not a replacement for the whole window —
 TODCOR, the Wilson plot and the batch are not in it — so for a series
 without a display use the command-line
 [`batch`](#batch--a-time-series-into-an-rv-curve), which needs no display at
@@ -988,7 +1252,8 @@ python rv_analysis.py wilson --rv-file summary_rv_values.txt \
 python rv_analysis.py wilson --rv-file rv_pairs.txt --rv1-col 3 --rv2-col 1 \
        --err1-col 4 --err2-col 2
 
-# ... and the orbit from the same velocities (Wilson runs first inside it)
+# ... and the orbit from the same velocities (its report ends with a basic
+# Wilson plot of the same pairs)
 python rv_analysis.py orbit --rv-file summary_rv_values.txt \
        --star TYC_3805-923-1 --period 6.1234
 
@@ -1019,7 +1284,8 @@ python rv_analysis.py todcor --simulate --template1 template.prf \
 python rv_analysis.py todcor --spectrum spectrum.fits --template1 template.prf \
     --spectrograph NARVAL --dv 1
 
-# continuum-normalize a raw spectrum first
+# continuum-normalize a raw spectrum first (cubic B-spline; --fit-method poly
+# for the windowed polynomial)
 python rv_analysis.py normalize --spectrum raw.fits --output spectrum_norm.txt
 
 # is the barycentric correction already applied in these FITS files?
@@ -1054,7 +1320,7 @@ python rv_analysis.py batch --spectra 'polarbase/*/[0-9]*i.fts' \
 | `--spectrograph NAME` | Built-in instrument; sets the resolving power R |
 | `--resolution R` | R entered by hand (overrides `--spectrograph`) |
 | `--vsini`, `--epsilon` | Rotationally broaden the template before the measurement; linear limb darkening (default 0.6) |
-| `--object/--ra/--dec/--obstime` | Target and time for the barycentric correction (`--object` resolves via SIMBAD) |
+| `--object/--ra/--dec/--obstime` | Target and time for the barycentric correction (coordinates: `--ra/--dec`, else SIMBAD for `--object` — in any spelling, `KX-Aqr` or `kx-aqr` finds KX Aqr —, else the file header; a SIMBAD lookup prints them with the spectral type and one magnitude — V, or for a star without V the first of G, R, B, K SIMBAD has) |
 | `--site NAME` | Observatory (built-in name, `lonE,lat,alt`, or an astropy site). **Default: read from the file's own header**, and only then `paranal` |
 | `--no-bary` | Compute v_bary but do **not** add it to the RVs (report only) |
 | `--force-bary` | Only silences the warning printed when the header check says "already corrected". Kept for older command lines: the correction is applied with or without it |
@@ -1135,7 +1401,7 @@ pass the same template twice, and that is the usual case:
 rv_analysis.py todcor --spectrum star.fits --template1 5215K.prf --dv 1
 ```
 
-In the widget, leave **"Template 2 (empty = same as template 1)"** blank.
+In the widget, leave **Template 2** (grey hint *empty: same as template 1*) blank.
 
 **What actually happens when Template 2 is empty.** Nothing is skipped and no
 component is dropped — `--template1` is simply loaded a second time and used as
@@ -1329,6 +1595,100 @@ honest statement is "the two stars are roughly equally bright", not
 km/s across that whole range. If you need a real light ratio, fix it from an
 eclipse depth with `--alpha` rather than reading it off the fit.
 
+#### Reading the TODCOR figure
+
+`result_TODCOR.png` (and the figure in the RV result window) has three
+panels. The numbers below are those of the example spectrum,
+`example_TODCOR_NeoNarval_norm.txt` run with `--no-bary`, where TODCOR
+reports **v1 = 55.042 km/s, v2 = 33.149 km/s, α = 0.868**, peak
+correlation 0.105.
+
+**1. The TODCOR surface (left).** TODCOR correlates the spectrum with the
+two-template model t1(v1) + α·t2(v2) for **every pair** (v1, v2) on the grid,
+at the best α for that pair. The panel shows that correlation as an image:
+the x axis is the primary velocity v1, the y axis the secondary velocity v2,
+and the colour is the correlation (colour bar beside it). The result is the
+**single highest point** of this surface, marked with a red **+**. What
+to look for:
+
+- one clear, compact maximum — a bright island at (55, 33) in the example;
+- a vertical bright band through the + (all pairs with the right v1: the
+  primary alone already correlates well) and a weaker horizontal band (the
+  secondary). Their crossing is where both are right;
+- with **one template for both stars** the surface is mirror-symmetric about
+  the diagonal v1 = v2, so a second, equal maximum sits at the swapped pair
+  (33, 55); which one is called 1 is a convention (see
+  [Component labels are a convention, not a measurement](#component-labels-are-a-convention-not-a-measurement)).
+  The diagonal itself is excluded from the search
+  ([The v₁ = v₂ ridge is excluded](#the-v₁--v₂-ridge-is-excluded)).
+
+**2. "cut at v2 = …" (middle) — this panel measures v1.** It is a
+*slice* of the surface: a horizontal line through the + at the fitted
+secondary velocity, i.e. v2 **held fixed** at its result and v1 run along the
+x axis (labelled *primary velocity*). The title names the fixed value — in the
+example **"cut at v2 = 33.15 km/s"** — and the curve shows how the
+correlation changes with **v1**, so its peak is at **v1 = 55.04 km/s**, where
+the **royal-blue** dotted line stands. Read it as "the primary's correlation
+function once the secondary has been put at its right velocity".
+
+**3. "cut at v1 = …" (right) — this panel measures v2.** The other slice: a
+vertical line through the + at the fitted primary velocity, v1 held fixed and
+v2 run along the x axis (labelled *secondary velocity*). In the example the
+title is **"cut at v1 = 55.04 km/s"**, the curve peaks at **v2 = 33.15
+km/s**, and the **maroon** dotted line marks it.
+
+So **each title quotes the velocity that is held fixed, and each panel's
+peak and dotted line is the other velocity** — the usual "cut at y =
+constant" wording, the same as in the TODCOR papers (Zucker et al. 2003, A&A
+404, 775, Fig. 2) and in the TODCOR code's own example. The order is not
+swapped: the panel titled with v2 measures v1. The dotted lines use the
+components' colours everywhere in RVCalPy — v1 (component 1) royal blue,
+v2 (component 2) maroon.
+
+**Why the cuts, and not the 1-D CCF.** Each cut is what an ordinary 1-D CCF
+would look like *if the other star's velocity were already known*: the other
+star has been taken out by the model, so a peak that the 1-D CCF shows only as
+a shoulder of a blend stands alone here. Both cuts peak **exactly** on their
+dotted lines by construction — they are slices through the maximum — so a
+cut whose peak is broad, flat or not clearly above its side lobes means that
+velocity is poorly determined (compare the errors in the report). The two
+cuts share the surface's correlation scale, and the right-hand one (the cut
+along v2) usually runs higher everywhere: there the brighter primary is
+already at its right velocity, so the correlation stays high even away from
+v2, while in the middle panel only the fainter secondary is in place. Both
+reach the same top value, the peak correlation, at the +. No Gaussians are fitted or
+drawn: two Gaussians fitted to a blended 1-D CCF are not a measurement at
+small separations (Halbwachs et al. 2017, SF2A, arXiv:1710.02301: reliable
+only beyond about 6 × (σ₁ + σ₂)), and their centres can sit several km/s
+from the true velocities — a synthetic test with broadened lines put the
+weaker one 9 km/s off while TODCOR recovered the input.
+
+**The line under the figure** says which frame is plotted. Without the
+barycentric correction it reads `plotted = reported: v1 = 55.042, v2 = 33.149
+km/s` (and v_bary, computed but not applied). With the correction applied,
+every axis is shifted to barycentric velocities (labels end in `(bary.)`,
+the surface and its + move together, so the peak stays on its surface) and
+the line reads `plotted = reported (barycentric): v1 = 44.229, v2 = 22.337
+km/s    v_bary = -10.811    measured: 55.042, 33.149 km/s`. A heliocentric
+spectrum (PolarBase) is plotted as measured and the line gives the
+helio → bary term.
+
+**The same curves as numbers.** `result_TODCOR_profile.txt` holds, on one
+velocity axis (`RV` in the reported frame, `RV_raw` measured): `corr_v1` =
+the middle panel (the surface along v1 at the fitted v2), `corr_v2` = the
+right panel (along v2 at the fitted v1), and, not drawn, `ccf_1d` (the
+ordinary 1-D CCF against template 1) and `ccf_fit` (a two-Gaussian fit to it).
+
+**When the picture says "check the templates".** The stars' lines must be as
+broad as the templates': if the cuts' peaks are much wider than the
+template's own correlation peak, give the templates a *v* sin *i* (main window
+**vsini** for template 1, TODCOR settings **vsini of template 2**) and keep the
+value that gives the highest **Peak correlation** in the report. A template
+sharper than the stars biases v2 by several km/s at small separations
+(Mazeh et al. 2001, Gliese 644); for the Neo-Narval epoch
+NEO_20260312_195303 of TYC 1917-1311-1, a template vsini of 10–15 km/s raised
+the peak correlation from 0.106 to 0.120 and moved v2 by −2 to −3 km/s.
+
 #### `--simulate`: check the templates before trusting the RVs
 
 Following Zucker (2012, sect. 3) after Torres et al. (2009), this builds
@@ -1395,9 +1755,10 @@ when α is wildly implausible.
 | Option | Meaning |
 |---|---|
 | `--method {bf,ccf}` | Which measurement to run (default `bf`) |
-| `--normalize` | Continuum-normalize every raw spectrum first (with `--poly-order`, `--iterations`, `--window`, `--fit-method`) |
+| `--normalize` | Continuum-normalize every raw spectrum first — cubic B-spline by default (with `--fit-method`, `--iterations`, `--window`, and `--poly-order` for `--fit-method poly`) |
 | `--bjd B1 B2 ...` | BJD of each spectrum, one value per file in sorted order, when the headers have none |
 | `--obstime` | One time override for all files (default: each file's own `DATE-OBS`) |
+| `--orbit {circular,eccentric}` | Also fit the orbit of the series — swap check, least squares, emcee posterior, exactly as `orbit` does — and write `result_orbit.txt`, `result_orbit.png`, `result_orbit_corner.png`, `result_orbit_wilson.png` and `result_orbit_posterior.txt` next to the curve file. Needs two components; uses `--period` when given, otherwise searches the period |
 
 It runs the [barycentric header check](#7-barycentric-frame-what-the-headers-say-and-who-decides)
 automatically over the input files and warns when the headers contradict the
@@ -1406,13 +1767,9 @@ PolarBase products (`i` and `i_u`). For heliocentric spectrum files run with
 `--no-bary`, each epoch's RVs include the helio→barycentric term, and the
 curve gets a last `helio_to_bary[km/s]` column.
 
-`result_RV_curve.txt` begins with a **`star`** column and then the spectrum,
-so a curve found months later still says what it is a curve of. Each epoch
-carries its OWN star: `--object` is your word for the whole series and wins,
-but a name that was merely read off the first file does not, so a queue that
-turns out to hold two targets says so in the table instead of quietly
-averaging them. Blanks inside a name are written as underscores, because a
-blank would split a column.
+`result_RV_curve.txt` begins with the spectrum, then BJD, phase and the
+velocities; it has no star column. Keep one star per curve: a queue that
+holds two targets is not split for you.
 
 **This command or the GUI's Batch...?** They run the same measurement on the
 same files and the `result_RV_curve.txt` they write has the same columns, so
@@ -1422,27 +1779,31 @@ long series, in a script, or over ssh. Use
 every fit before deciding which epochs belong in the curve — it ends in a
 gallery you can click through, per-epoch keep/drop ticks, and a save that
 also writes the run as a readable report. The GUI batch takes its
-continuum model as fixed (a cubic B-spline); `--normalize` here still
-accepts `--fit-method`, `--poly-order`, `--iterations` and `--window`.
+continuum model as fixed (a cubic B-spline); `--normalize` here also
+defaults to the B-spline and accepts `--fit-method`, `--poly-order`,
+`--iterations` and `--window`.
 
 ### `normalize` — continuum normalization
 
 `normalize` (and `batch --normalize`) fits the continuum with iterative
 asymmetric sigma-clipping, so the fit converges onto the continuum regions.
-Two continuum models are available (`--fit-method`) — the GUI's batch is the
-one exception and always uses the B-spline, for the reason given
-[there](#batch-a-whole-series-in-one-run):
+Two continuum models are available (`--fit-method`), and the **B-spline is
+the default everywhere** — `normalize`, `batch --normalize`, the terminal
+wizard and the GUI's **Normalize raw...** (which shows the polynomial order
+only when Polynomial is chosen); the GUI's batch always uses the B-spline,
+for the reason given [there](#batch-a-whole-series-in-one-run):
 
-- **poly** (default) — a low-order polynomial; segments wider than ~1.5× the
-  window (default 20 nm) are fitted in 50%-overlapping windows blended with
-  triangular weights;
-- **bspline** — a cubic B-spline with interior knots every window
-  (the saphires `cont_norm` model).
+- **bspline** (default) — a cubic B-spline with interior knots every
+  window (default 20 nm; the saphires `cont_norm` model);
+- **poly** — a low-order polynomial (`--poly-order`, default 3); segments
+  wider than ~1.5× the window are fitted in 50%-overlapping windows
+  blended with triangular weights.
 
-Tuning: `--poly-order` (polynomial model only), `--iterations` (default 20),
+Tuning: `--poly-order` (`--fit-method poly` only), `--iterations` (default 20),
 `--low-clip` / `--high-clip` (rejection thresholds in σ, asymmetric on
-purpose), `--window` (window width in nm; `0` = a single polynomial over the
-whole segment; for `bspline` it is the knot spacing). Pass `--template` to
+purpose), `--window` (default 20 nm: the B-spline's knot spacing, or for
+`poly` the window width, where `0` = a single polynomial over the whole
+segment). Pass `--template` to
 overlay a synthetic spectrum on the check figure.
 
 `normalize` copies the target metadata (OBJECT, DATE-OBS, RA, Dec) from the
@@ -1512,6 +1873,66 @@ sign, so it is not free to be anything:
 | **b ≥ 0** | both stars moving the same way | impossible for a bound pair — **warning** |
 | **−0.1 < b < 0, or b < −10** | one star barely moves next to the other (q < 0.1) | **warning**: probably not a plain SB2 |
 
+**Which way round the plot is drawn is a choice; the line is the same.**
+`wilson --swap-axes` (the GUI's **Swap axes: V₁ ↔ V₂** button) draws V₂
+across and V₁ up: the fitted relation V₁ = a + b·V₂ appears as it is, and
+the legend reads `slope = -0.799 ± 0.040` for TYC 3805-923-1, which is
+−M₂/M₁ = −q, the same number as the title. The default, below, draws V₁ across and shows
+its reciprocal. Seeing both is the quickest way to convince yourself that
+the legend and the title are one line, not two answers.
+
+**The plot is drawn the other way round by default** (V₁ across, V₂ up — the user's
+choice): the line is fitted by orthogonal distance, so it is the same line
+whichever axis is which, and drawn this way it has the slope **1/b =
+−M₁/M₂**, which is what its legend quotes: `slope = -1.157 ± 0.000` for
+LL Aqr is −M₁/M₂ = −1/q, where the report's b is −0.86453 and the panel
+title reads `M₂/M₁ = 0.8645`. The legend gives the number only (the user's
+choice, 2026-10-14); the formula is here. The table above,
+the report and q all use b; **read the legend as the reciprocal of the
+title, not as a second measurement of the same thing.** The two agree only
+for a near-twin pair: KX Aqr (q = 0.9859) has a plotted slope of −1.0143,
+LL Aqr (q = 0.8645) −1.1567, and TYC 3805-923-1 (q = 0.5839) −1.7125.
+
+**How each number is computed.** Take TYC 3429-458-1
+(`~/Documents/PSL/summary_TYC_3429-458-1.txt`: 4 epochs, two SOPHIE and two
+Neo-Narval, errors in `sigma_RV1`/`sigma_RV2`, swaps not repaired — the GUI
+default):
+
+1. **The line** V₁ = a + b·V₂ is fitted with the errors of *both*
+   velocities (orthogonal distance regression). For a straight line that
+   minimises
+
+   ```
+       χ² = Σ (V₁ − a − b·V₂)² / (σ₁² + b²·σ₂²)
+   ```
+
+   → b = −0.97442 ± 0.01005, a = 1.32845 ± 0.23464 km/s. The errors are the
+   fit's covariance scaled by χ²/(n − 2). A precise epoch weighs more: the
+   SOPHIE pairs (σ ≈ 0.07 km/s) count about a hundred times more than the
+   Neo-Narval ones (σ ≈ 0.6–1.0 km/s), which is why the line passes almost
+   exactly through them.
+2. **γ** = a / (1 − b) = 1.32845 / 1.97442 = **0.67283 km/s** — where the
+   line meets V₁ = V₂. Its error is propagated from a and b with their
+   covariance.
+3. **q** = |b| = **0.97442** (1/|b| when |b| > 1), and component 1 is the
+   primary because |b| < 1.
+4. **Residual** of each epoch = its perpendicular distance from the line,
+   r = (b·V₂ − V₁ + a) / √(1 + b²) → −0.022, +0.017, +0.632, −2.320 km/s.
+   Perpendicular, not vertical, because both axes are measured velocities.
+5. **rms** = √(mean r²) = **1.2022 km/s**. Every residual is squared, so
+   the worst epoch dominates it.
+6. **Robust σ** = 1.4826 × median|r − median r| = 1.4826 × 0.3268 =
+   **0.4845 km/s** — the median absolute deviation, scaled to equal σ for
+   Gaussian noise. One bad epoch hardly moves it, so an rms well above the
+   robust σ means one or two epochs do not fit. The robust σ is also the
+   scale of the swap test (`--nsigma` of it) and of the grey bands in the
+   figure's residual panel (±1 and ±`--nsigma` robust σ).
+
+With the swap repair on (the command-line default) row 4 is exchanged and
+everything above is recomputed: b = −0.97088, rms 0.5112, robust σ
+0.4018 km/s. Read without its error columns (equal weights) the same table
+gives b = −1.00369, rms 0.9580, robust σ 1.0409 km/s.
+
 Two consequences worth keeping in mind. First, **the reported `q` is always
 between 0 and 1**: b = −0.5 and b = −2.0 give the same q = 0.5 and differ only
 in which component is called the primary. So it is the *distance of the slope
@@ -1538,9 +1959,26 @@ V₁ = V₂ diagonal**, so it sits far off the line and stands out at a glance,
 while its mirror image falls straight back onto it. That is both how the swap
 is recognised and how it is undone. Repaired epochs are listed as `SWAPPED`
 and drawn on the figure with a dashed line back to where they used to be; pass
-`--no-fix-swaps` to flag them without touching the values. An epoch is tested
-for a swap once it lies more than `--nsigma` robust sigma from the line
-(default 3); `orbit` takes the same two options for its own Wilson step.
+`--no-fix-swaps` to flag them without touching the values. An epoch is
+repaired only when the swap is **decidable**: it lies more than `--nsigma`
+robust sigma from the line (default 3), its mirror image lies within
+`--nsigma` of it and three times closer, **and** the swap moves the point
+across the line by at least `--nsigma` sigma. (`orbit` has options of the
+same names, but for its own swap check against the orbit — it does not use
+the Wilson plot.)
+
+When anything was repaired, the result also gives the fit **before the
+repair** — the velocities exactly as measured, on a line of their own (what
+`--no-fix-swaps` would return) — so the effect of the repair can be read off:
+
+```
+Scatter           : rms 1.8538 km/s, robust sigma 1.6002 km/s   (after repair)
+Before repair     : rms 2.1789 km/s, robust sigma 2.2918 km/s, slope -1.04591, q 0.95611
+```
+
+The residual panel of the figure carries both pairs of numbers in its title
+(*before repair* on the first line, *after repair* on the second) and draws
+the before-repair residuals as grey crosses beside the repaired ones.
 
 This is not ordinary outlier rejection, and it cannot be done with ordinary
 robust regression: a swap is a *structured* displacement, and with two epochs
@@ -1553,12 +1991,40 @@ cannot change, and it tolerates half the set being wrong. Only then is the
 line refined by orthogonal distance regression with the errors on **both**
 axes.
 
-**Epochs near conjunction are reported as `NEAR-CONJ`, not repaired.** When
-V₁ ≈ V₂ the reflection moves the point by less than the noise (it travels
-√2·|V₁ − V₂|), so which component is which is not a measurable thing there.
-Those epochs are left in the order they came in, rather than "repaired" with
-a swap that means nothing. On the figure
-they are the gray dots marked *near conjunction*.
+**Epochs whose swap cannot be tested are reported as `NOT-TESTABLE`, not
+repaired.** A swap reflects the point in V₁ = V₂, but only part of that jump
+crosses the line: it moves the point's distance from the line by
+
+```
+    |1 + b| · |V₁ − V₂| / √(1 + b²)          (b = the slope)
+```
+
+Where that is less than `--nsigma` sigma, which component is which is not a
+measurable thing, and the epoch is left in the order it came in rather than
+"repaired" with a swap that means nothing. That happens in two cases:
+
+- **near conjunction** (V₁ ≈ V₂), for any mass ratio;
+- **at every epoch when q is close to 1** (slope near −1). The equal-mass
+  line V₁ + V₂ = 2γ is its own mirror image, so a swapped pair lands on it
+  again. A warning then says how many epochs could not be tested. In such a
+  system a swap and a velocity offset of a few km/s of that epoch shift the
+  point identically, so the Wilson plot cannot tell them apart even where
+  the formula above allows a test. **For near-twins, identify the
+  components by orbital phase**: `orbit` re-tests every epoch against the
+  fitted orbit, where a swap changes each velocity by the whole |V₁ − V₂|
+  (see [`orbit`](#orbit--sb2-orbital-elements-the-last-step-of-the-chain)).
+
+Until 2026-10-06 the swap test had no such limit, and its robust start flagged every
+epoch whose mirror happened to lie closer: for a near-twin that is noise,
+about half the epochs. KX Aqr (q ≈ 0.99, HARPS) had 12 of 25 epochs
+"repaired" that way, and its orbit came out with 63 km/s rms residuals. Results of
+`wilson` or `orbit` on a binary with q above about 0.9 from earlier versions
+should be re-run.
+
+On the figure they look like every other epoch: since 2026-10-14 all the
+epochs that entered the fit are drawn in one style (the user's choice), so
+the not-testable ones are only named in the report and in the tooltip that
+the GUI shows over a point. They are part of the scatter either way.
 
 **3. Whether it is a binary at all.** A **positive slope** is impossible for a
 bound pair — the components must move in opposite directions about the centre
@@ -1569,6 +2035,22 @@ warning of its own: Kovalev, Chen & Han
 1830) traced exactly such "suspicious mass ratios from the Wilson method" to
 triples and to a field star aligned by chance with an SB1. A component whose
 velocity barely moves is flagged too, since the slope is then unconstrained.
+
+**The error columns are found by name too**, on the command line and in
+the GUI dialog alike. When the two RV columns are named, their errors are
+taken from the first of these that the table has:
+`ccf_rv1` → `ccf_err1` (this program's own), `RV1[km/s]` → `RV1_err`, and
+since 2026-10-14 also the **`sigma_` form** the PSL summaries use
+(`RV1` → `sigma_RV1`), plus `sig_`, `e_`, `err_`, `_error`, `_sigma`. Pick
+them by hand with `--err1-col`/`--err2-col` (the GUI's *error* drop-downs)
+when a table spells them otherwise.
+
+**This matters more than it looks.** A table read with no errors is fitted
+unweighted, and every number moves: TYC 3805-923-1 read without its
+`sigma_RV*` columns gives slope −0.247, rms 16.8 km/s, robust σ 25.3 km/s,
+and with them −0.584, rms 31.5 km/s, robust σ 14.7 km/s. The per-epoch rows
+of `<star>_mass_ratio.txt` show `nan` in the error columns when that happened —
+check them before comparing two runs.
 
 **Choosing the two columns.** There are four ways, tried in this order.
 
@@ -1587,9 +2069,11 @@ The number is what really counts, and it is what the GUI dropdowns store, so
 this works on **any** table: one whose columns are called `V_A`/`V_B` or
 nothing at all, one that lists the secondary first, one carrying six velocity
 columns of which two are wanted. `--err1-col` / `--err2-col` point at the two
-error columns the same way. Left out, an error column is taken **only** when
-the RV column's own name implies one that the table really has (`ccf_rv1` →
-`ccf_err1`); otherwise the errors are NaN and the line is fitted unweighted.
+error columns the same way. Left out, the error column is looked up from the
+RV column's name, using the spellings listed
+[above](#wilson--mass-ratio-from-the-rv1-vs-rv2-plot) (`ccf_err1`,
+`RV1_err`, `sigma_RV1`, …); when the table has none of them the errors are
+NaN and the line is fitted unweighted.
 The columns actually used are echoed at the top of the result text. The
 figure's axes carry the plain component labels (V₁, V₂ in km/s), so the
 result text is where you check which columns a plot was made from.
@@ -1628,9 +2112,11 @@ With none of these, a table that has no such header is read as plain
 
 - `--star` — a summary holding several systems must be filtered, or the fit
   mixes unrelated stars. Rows from more than one star raise a warning. It
-  reads the table's `star` column, which every `result_RV_curve.txt` now
-  has, and matches on letters and digits only — so `--star "LL Aqr"` finds
-  the `LL_Aqr` written in the file, and `HD_105637` finds `HD 105637`.
+  reads the table's `star` column and matches on letters and digits only —
+  so `--star "LL Aqr"` finds the `LL_Aqr` written in the file, and
+  `HD_105637` finds `HD 105637`. Only `summary_rv_values.txt` and RV curves
+  written before 2026-10-06 have that column; the result tables written now
+  do not, so give them without `--star`, one star per file.
 - `--dataset` — restricts to one `# ==== <name> ====` section. This is not
   cosmetic: if one instrument's RVs are barycentric and another's are in the
   measured frame, part of the points slide along the line and the slope is
@@ -1651,19 +2137,59 @@ python rv_analysis.py wilson --rv1 103.3 72.1 37.1 --rv2 31.8 63.7 -34.6
 
 (`--err1` / `--err2` give their errors, one per value.)
 
-Outputs are `result_wilson.txt` and `result_wilson.png` — the plot on the
-left with the fitted line, the V₁ = V₂ diagonal and γ marked at their
-crossing, the residuals about the line on the right. In the widget the same
-thing sits behind the **Wilson plot...** button.
+Outputs are named after the star: **`<star>_mass_ratio.txt`** and
+**`<star>_mass_ratio.png`** (`KX_Aqr_mass_ratio.txt`, `TYC_3805-923-1_mass_ratio.png`;
+before 2026-10-14 `result_wilson.*`). The star is taken from `--star`, else
+from the table's star column when it holds one star, else from the
+`star(s)` line of a `result_batch_report.txt` beside the table (an RV curve
+names no star itself, its batch report does), else from the table's file
+name without its generic parts (`summary_TYC_3805-923-1.txt` →
+`TYC_3805-923-1`, `KX_Aqr_RV_curve.txt` → `KX_Aqr`); with none of these the
+files are `mass_ratio.*`. `--output` / `--plot` still choose the names
+outright, and the GUI's Save uses the same names. The plot is on the
+left (V₂ up, V₁ across) with the fitted line, the V₁ = V₂ diagonal and γ marked at their
+crossing, the residuals about the line on the right. In the GUI the same
+thing sits behind the **Wilson plot...** button and opens in the RV result
+window. There, move the mouse over a
+point — on either panel — and a box shows that epoch's spectrum name, its
+orbital phase (when the table has a `phase` column, as `result_RV_curve.txt`
+does), RV1 and RV2 with their errors, its distance from the line and whether
+it was repaired; over a grey cross or a *before repair* square it shows the
+values before the repair. Choosing an RV curve in the dialog selects its
+`RV1[km/s]`/`RV2[km/s]` columns (or the `_bary` pair) by itself.
 
-**Where this sits in the analysis.** The Wilson step is the checkpoint
-between the velocities and the orbit:
+**Leaving a point out by hand.** In the GUI's Wilson plot a **left click
+on a point** — on the plot or in the residual panel — leaves that epoch
+out of the fit: the line, q, γ, the scatter and the report are made again
+at once, the report gains an `Excluded by hand : <epochs>` line under
+`Epochs used`, and the point stays on the plot as a **grey ✕** (*excluded
+(click to restore)*). Click the ✕ to take the epoch back. **Save...**
+writes the result as it is on screen, exclusions included; the table
+itself is not changed. At least 3 epochs must stay in. Clicks are ignored
+while the toolbar's pan or zoom tool is on. Exclude as many epochs as you
+like, one click each: every ✕ stays on the plot (the axes always span the
+excluded points too), and a zoomed view is kept from one click to the
+next, so a crowded part of the line can be worked through close up. The
+toolbar's history survives the clicks as well: **Back** and **Forward**
+step through the zooms made before and after them, and **Home** goes back
+to the full view. (A click on a point does nothing while the toolbar's
+**Zoom** or **Pan** tool is on — switch it off to exclude.) For LL Aqr, leaving out the
+blended epoch at conjunction (ADP.2014-09-24T09:43:51.650) brings the rms
+about the line from 0.334 to 0.059 km/s, with q 0.8651 → 0.8653. Only the
+main window's **Wilson plot...** has this; the orbit window's Wilson tab
+is the basic one.
+
+**Where this sits in the analysis.** The Wilson plot is a checkpoint beside
+the orbit: it reads the same velocities and needs no period at all.
 
 ```
-   spectra -> TODCOR/BF -> RV1, RV2 -> WILSON PLOT -> q, γ -> orbit
+   spectra -> TODCOR/BF -> RV1, RV2 -> orbit
+                              |
+                              +-----> WILSON PLOT -> q, γ
 ```
 
-That ordering is not ours. MESS (Nachmani, Faigler & Mazeh
+Looking at the velocities this way before an orbit is fitted is not our
+idea. MESS (Nachmani, Faigler & Mazeh
 [2026](https://arxiv.org/abs/2602.05610), MNRAS 546) extends TODCOR to a
 global multi-epoch fit — optimising both components' templates jointly across
 all epochs, and choosing between single star / SB1 / SB2 by BIC — and then
@@ -1682,20 +2208,40 @@ Note the **convention** when comparing with those papers: here q = M₂/M₁ =
 K₁/K₂ ≤ 1, with the primary the more massive star. Some authors quote the
 reciprocal, so check which amplitude is on top before comparing numbers.
 
-Once the plot is clean, `orbit` takes the same velocities the rest of the
-way — see [`orbit`](#orbit--sb2-orbital-elements-the-last-step-of-the-chain).
+`orbit` then takes the same velocities on its own — it does not use the
+Wilson plot, so the Wilson q and the orbit's K₁/K₂ are two independent
+measurements of the mass ratio, and their agreement is a check worth making.
+`orbit` makes that check for you: its report ends with a basic Wilson plot
+of the same pairs (no swap repair of its own), drawn in
+`result_orbit_wilson.png` — see
+[`orbit`](#orbit--sb2-orbital-elements-the-last-step-of-the-chain).
 
 ### `orbit` — SB2 orbital elements, the last step of the chain
 
 ```
-   spectra -> TODCOR/BF -> RV1, RV2 -> Wilson plot -> q, γ -> ORBIT
+   spectra -> TODCOR/BF -> RV1, RV2 -> ORBIT
 ```
 
-The Wilson plot already gives q and γ with no orbit assumed. What it cannot
-give is the period, the eccentricity or the individual masses — for those the
-velocities have to be folded on time. `orbit` does that, and **always runs the
-Wilson step first**: it fixes the component identification, repairs swapped
-epochs and hands its q and γ to the fit as starting values.
+The period, the eccentricity and the masses need the velocities folded on
+time; `orbit` does that. It stands on its own — the Wilson plot is a separate
+tool (`wilson`, the main window's **Wilson plot...**), not a step of the
+orbit. Swapped epochs (RV1 and RV2 exchanged) are found against the orbit
+itself, where a swap changes each velocity by the whole |V₁ − V₂|, so it is
+decidable for any mass ratio, near-twins included:
+
+1. a first, **swap-blind** fit counts every epoch in whichever order fits
+   better, so even a quarter of the epochs swapped cannot drag it off; its
+   two curves are named after the table's own components;
+2. each epoch is then swapped where it is off that orbit by more than
+   `--nsigma` robust sigma (default 3) as it stands and three times closer
+   exchanged — a blended epoch at conjunction fits neither order well, and
+   the closer one is still the right identification;
+3. ordinary fits follow, the check repeated until nothing changes.
+
+`--no-fix-swaps` fits the velocities in the order the table gives them —
+what the GUI's **Orbit...** always does (its basic mode). On synthetic SB2s the
+check found every swapped epoch with no false ones — at q = 0.97–1.00 with
+2–5 km/s scatter, and at q = 0.6 with 6 of 25 epochs swapped.
 
 ```bash
 python rv_analysis.py orbit --rv-file summary_rv_values.txt \
@@ -1706,38 +2252,104 @@ It reads its velocities exactly as `wilson` does, so `--method`, or
 `--rv1-col`/`--rv2-col` (with `--err1-col`/`--err2-col`) for one column per
 component by number or by name, apply here too.
 
+| Option | Meaning |
+|---|---|
+| `--rv-file` | The RV table: `result_RV_curve.txt`, `summary_rv_values.txt` or any table with a time column and both components |
+| `--method`, `--rv1-col`/`--rv2-col`, `--err1-col`/`--err2-col` | Which columns hold the velocities and their errors (as for `wilson`) |
+| `--star`, `--dataset` | Only the rows of one star / one `# ==== <name> ====` section of a summary table |
+| `--add-vbary` | Add the table's `v_bary` column to both components first |
+| `--period` | The orbital period [d]; the fit may move it within ±0.1 % |
+| `--period-range MIN MAX` | Without `--period`: the range of the period search |
+| `--varastro` | Take the period from var.astro.cz for `--star` |
+| `--eccentric` | Free e and ω (default: circular) |
+| `--no-fix-swaps` | Fit the velocities in the order given; no swap check |
+| `--nsigma` | Swap check: how far off the orbit, in robust sigma, an epoch must be before it is tested (default 3) |
+| `--no-mcmc` | No posterior: report the least-squares values and errors |
+| `--prior-scale` | Half-width of each uniform prior, × the least-squares error (default 10) |
+| `--mcmc-steps` | Steps per walker, 64 walkers (default 5000) |
+| `--output`, `--plot`, `--dpi` | Report file (`result_orbit.txt`), figure (`result_orbit.png`; the corner plot and posterior table are named after them) and PNG resolution |
+
 Both components are fitted **jointly**, sharing P, T₀, e, ω and γ, each
 keeping its own amplitude. Circular by default — the model Kovalev & Straumit
 ([2022](https://doi.org/10.1093/mnras/stab3365), MNRAS 510, 1515) used for the
 M11 binaries, two sinusoids sharing P, t₀ and γ — with `--eccentric` freeing e
 and ω for a full Keplerian.
 
+The report holds values only — the explanations are here. For LL Aqr (HARPS
+BF velocities, `--period 20.178321 --eccentric`; the GUI's Report tab shows
+the same):
+
 ```
--- Wilson (1941), no orbit assumed --
-  slope        : -0.69828  (= -K1/K2 = -M2/M1)
-  q = M2/M1    : 0.69828
-  gamma        : 25.00119 km/s
-  primary      : component 1
-  swapped epochs repaired before fitting: ep05, ep14
+============ SB2 ORBIT ============
 
--- Orbit --
-  P            : 6.123821 +- 0.000486 d
-  K1           : 54.9776 +- 0.1095 km/s
-  K2           : 78.7599 +- 0.1628 km/s
-  gamma        : 24.9657 +- 0.0647 km/s
-  q = K1/K2    : 0.69804   (Wilson gave 0.69828)
-  rms O-C      : 0.2639 / 0.5248 km/s, reduced chi2 = 0.733 (35 dof)
+-- Orbit: Bayesian posterior (emcee) --
+  model            : eccentric
+  epochs           : 17
+  swapped epochs   : ADP.2014-09-24T09:43:51.650.fits
+  RV error scale   : 1.774
 
--- Derived (inclination not known from RVs alone) --
-  M1 sin^3 i   : 0.8938 Msun
-  M2 sin^3 i   : 0.6239 Msun
-  a  sin i     : 16.1878 Rsun
+  parameter                      median        -err        +err
+  P [d]                       20.178325    0.000325    0.000326
+  T0 [BJD]               2454818.067923    0.014662    0.014414
+  e                              0.3180      0.0009      0.0010
+  omega [deg]                  155.4805      0.1987      0.1931
+  K1 [km/s]                     49.9408      0.0478      0.0462
+  K2 [km/s]                     57.7438      0.0772      0.0791
+  gamma [km/s]                  -9.4977      0.0339      0.0340
+  q = M2/M1                      0.8649      0.0014      0.0014
+  M1 sin^3 i [Msun]              1.1930      0.0036      0.0038
+  M2 sin^3 i [Msun]              1.0318      0.0026      0.0026
+  a1 sin i [Rsun]               18.8842      0.0187      0.0182
+  a2 sin i [Rsun]               21.8348      0.0301      0.0304
+  a sin i [Rsun]                40.7187      0.0364      0.0374
+
+-- Sampling --
+  walkers x steps  : 64 x 5000
+  burn-in, thin    : 224, 14
+  samples          : 21824
+  autocorr. time   : 75
+  acceptance       : 0.49
+  prior width      : 10 x LSQ error
+
+-- Wilson plot --
+  parameter                       value        -err        +err
+  slope                         -0.8652      0.0007      0.0007
+  gamma [km/s]                  -9.4590      0.0187      0.0187
+  q = M2/M1                      0.8652
+  rms [km/s]                     0.1234
+  robust sigma [km/s]            0.0268
+  primary                   component 1
+===================================
 ```
 
-**The two mass ratios are printed side by side on purpose.** Wilson's uses no
-period whatsoever; the orbit's comes out of the folded fit. They are
-independent, so agreement is real evidence and a disagreement above 10 % is
-flagged — it almost always means the period is wrong, not the velocities.
+| Line | Meaning |
+|---|---|
+| `swapped epochs` | Epochs whose two velocities the swap check exchanged (see above; `--no-fix-swaps` turns it off, and the GUI's **Orbit...** never runs it) |
+| `model` | `circular` (default) or `eccentric` (`--eccentric`) |
+| `epochs` | Epochs with a time and both velocities, i.e. what was fitted |
+| `RV error scale` | √(reduced χ²) of the best fit. Every RV error is multiplied by it before the errors are computed, so RV errors that are too small (scatter larger than they claim) or too large do not make the parameter errors wrong in the same way |
+| parameter table | **median** = the value; **-err / +err** = the distance from the median down to the 16th and up to the 84th percentile of the posterior (68 % of it, ±1σ for a Gaussian). Each parameter is explained in [What the parameters mean](#what-the-parameters-mean) |
+| `walkers x steps` | 64 emcee walkers, each taking `--mcmc-steps` (5000) steps: 320 000 models |
+| `burn-in, thin` | Steps discarded at the start of each walker (3 autocorrelation times), and the step between the models kept after that (a fifth of one) |
+| `samples` | Models kept — what the medians, percentiles and the corner plot are made of |
+| `autocorr. time` | Steps after which a walker has "forgotten" where it was. The chain should be at least 50 of them long |
+| `acceptance` | Fraction of proposed steps accepted; about 0.2–0.5 is healthy |
+| `prior width` | Half-width of each uniform prior, in units of that parameter's least-squares error (`--prior-scale`) |
+| `-- Wilson plot --` | The basic Wilson plot of the same pairs, in the order the orbit used them, with no swap repair of its own: slope and intercept-at-the-diagonal γ with their errors (symmetric, from the line fit), q = −slope, the rms and robust sigma of the points about the line, and which component is the primary. It does not enter the orbit fit; compare its q and γ with the orbit's. Here the swapped epoch was already repaired by the orbit's swap check — in the GUI, where the orbit runs without one, that epoch stays as given and shows as the one outlier of the Wilson residuals |
+
+A `WARNING:` line follows the table only when something needs attention:
+
+| Warning | Meaning, and what to do |
+|---|---|
+| `chain shorter than 50 autocorrelation times` | The percentiles are not yet stable: raise `--mcmc-steps` |
+| `posterior at the prior edge: P, e` | The posterior of that parameter reaches the edge of its prior box, so its error is set partly by the prior. Real at a physical limit (e consistent with 0; P constrained worse than the ±0.1 % window of `--period`); otherwise raise `--prior-scale` |
+| `period searched, not given` | No `--period`: the period came from a grid search, and a handful of epochs often admits several aliases. Check it against a light curve before trusting the masses |
+| `emcee not installed - least-squares errors` | The posterior was skipped; the table is the least-squares one |
+| `corner not installed - no corner plot` | `pip install corner` |
+
+With `--no-mcmc` the section is headed `-- Orbit: least squares --`, the
+column `value` is the least-squares best fit and -err = +err its error from
+the covariance matrix; q, M sin³i and a sin i then have no error at all.
 
 Minimum masses and the projected separation follow from
 
@@ -1751,14 +2363,156 @@ are minimum masses**: radial velocities alone never give the inclination, so
 true masses need an eclipsing light curve or astrometry.
 
 **The period is the weak point.** With `--period` (or `--varastro` to pull the
-ephemeris from var.astro.cz) it is held fixed. Without one, a grid of trial
-periods is scanned and the best χ² kept — but a handful of epochs rarely
-defines a period uniquely, so the result carries an explicit warning about
-aliases. `--period-range MIN MAX` bounds the search. Prefer a period from a
-light curve whenever there is one.
+ephemeris from var.astro.cz) it may move only within ±0.1 % of that value.
+Without one, a grid of trial periods is scanned and the best χ² kept — but a
+handful of epochs rarely defines a period uniquely, hence the warning above.
+`--period-range MIN MAX` bounds the search. Prefer a period from a light curve
+whenever there is one.
 
-Outputs are `result_orbit.txt` and `result_orbit.png` (both components folded
-on the fitted period, with the O−C residuals underneath).
+#### How the errors are found (emcee), since v22
+
+**Every number in the orbit table is from the Bayesian posterior.** A
+least-squares fit still runs first, but only as the starting point the method
+needs — its values are not reported:
+
+1. **Least squares** — finds the best fit and the error of each parameter
+   from the curvature of χ² at its minimum. These errors assume every
+   parameter's error is symmetric and Gaussian, which few epochs, a small e or
+   a poorly covered phase range break; that is why they are not the answer.
+2. **Priors** — uniform, centred on each least-squares value and ±10 × its
+   least-squares error wide (`--prior-scale`), cut to the physical limits:
+   P inside the ±0.1 % window when `--period` was given,
+   |T₀ − T₀,LSQ| < P/2, 0 ≤ e ≤ 0.95, |ω − ω_LSQ| < 180°, K ≥ 0. Flat priors
+   do not pull the result towards the least-squares value; they only limit
+   where the sampler may go.
+3. **Likelihood** — Gaussian, with every RV error multiplied by the `RV error
+   scale` above.
+4. **Sampling** — [emcee](https://emcee.readthedocs.io/en/stable/)
+   (Foreman-Mackey et al. [2013](https://doi.org/10.1086/670067), PASP 125,
+   306): 64 walkers start in a small ball around the least-squares solution
+   and take 5000 steps each; every step proposes a new orbit and keeps it
+   with a probability set by its likelihood. The random seed is fixed, so a
+   re-run gives the same numbers.
+5. **Result** — for every parameter, and for q, M sin³i and a sin i computed
+   from every kept model: the **median is the value**, and the distances to
+   the **16th and 84th percentiles are the −/+ errors**.
+
+For a well-covered orbit the posterior agrees with least squares — LL Aqr
+above changes only in the last digit. A synthetic test of 60 circular and 60
+eccentric orbits gave the 16th–84th interval containing the true value 57–70 %
+of the time, as it should. The posterior differs where least squares cannot be
+trusted: asymmetric errors on T₀ and ω for a nearly circular orbit, errors on
+the masses with few epochs, a parameter running into a physical limit.
+`Error_approaches_v21_vs_v22.txt`, beside this guide, lists the differences
+from v21 point by point.
+
+Outputs are `result_orbit.txt` (the report), `result_orbit.png` (both
+components folded on the period from phase −0.25 to 1.25 — royal blue
+and maroon dots, the model curves of the posterior medians in light steel
+blue and light coral, γ
+dashed — and the residuals of the fit, observed minus model velocity, in
+a panel straight underneath, 1.5 : 1; the upper panel is always titled
+**Solution Curve**, as in PyWD2015, with the elements in the report, and
+the figure title above it is left blank),
+`result_orbit_corner.png` (the corner plot), `result_orbit_wilson.png`
+(the basic Wilson plot of the same pairs: V₂ against V₁ with the fitted
+line and γ, and the residuals about the line) and
+`result_orbit_posterior.txt` (the posterior table). The report ends with a
+`-- Wilson plot --` block: slope and γ with their errors, q, the rms and
+robust sigma about the line, and the primary. The Wilson numbers are
+computed on the pairs in the order the orbit used them (after its swap
+check) and never feed back into the fit; a difference between the two q
+values is the independent check described under
+[`wilson`](#wilson--mass-ratio-from-the-rv1-vs-rv2-plot). The command line
+writes all five; the GUI's orbit window and the batch's **Save all
+kept...** ask which.
+
+#### Reading the corner plot
+
+The corner plot is drawn with the corner package (Foreman-Mackey
+[2016](https://doi.org/10.21105/joss.00024), JOSS 1, 24), in the layout
+journals use for it — e.g. Hinse et al. 2024, A&A 687, A116, Fig. C.1. Every
+kept model is a complete orbit (P, T₀, e, ω, K₁, K₂, γ) that fits the
+velocities about as well as the errors allow; the plot shows that cloud of
+models from every side at once.
+
+- **Diagonal: one histogram per parameter.** It counts the models at each
+  value of that parameter, whatever the others do — the parameter's
+  *marginal* posterior. The **three dashed lines are the 16th, 50th and 84th
+  percentiles**: the middle one is the median, the reported value, and 68 %
+  of the models lie between the outer two, whose distances from the middle
+  one are the −/+ errors in the report. A narrow, symmetric, single-peaked
+  histogram is a well-measured parameter; if one side is longer, the error
+  is asymmetric and the report quotes two different numbers.
+- **Below the diagonal: every pair of parameters.** The grey map is the
+  density of models (darker = more), and the **three contours are the 1σ, 2σ
+  and 3σ regions** — they hold 39 %, 86 % and 99 % of the models, the 2-D
+  equivalents of ±1, 2, 3σ. The dots outside the outer contour are single
+  models. A **round** contour means the two parameters are measured
+  independently; a **tilted** one means they are **correlated**: changing one
+  can be compensated by changing the other, so their errors are not
+  independent. Two such correlations are normal:
+  - **P and T₀** (tilted downwards when T₀ lies before the middle of the
+    data, as for LL Aqr): a slightly longer period with a slightly earlier
+    T₀ puts the middle of the data at the same phase.
+  - **T₀ and ω** (tilted upwards) in an eccentric orbit: periastron a little
+    later in time and a little further on in angle leaves the times the
+    stars pass each other, which the curve fixes best, nearly unchanged.
+- **P and T₀ are drawn relative to a reference value**, their median rounded
+  to 4 decimals, which the axis label gives (`P - 20.1783 [d]`). ω is in
+  degrees. The values themselves are not printed on the plot: they are in the
+  report and the posterior table.
+
+What a problem looks like:
+
+- **A histogram cut off sharply on one side** — the posterior has run into
+  the edge of its prior box, and the report warns. At a physical limit this
+  is real: e cut at 0 means the data are consistent with a circular orbit.
+  Elsewhere the box was too narrow — raise `--prior-scale`.
+- **Two separate islands of contours, or a histogram with two peaks** — two
+  different solutions fit about equally well (a period alias, two possible
+  ω). The median then lies between them and describes neither. Fix the
+  period, or add epochs.
+- **Curved (banana-shaped) contours** — the model depends on the parameters
+  non-linearly here, so a least-squares ± would be wrong; the posterior's is
+  right. Typical for e and ω when e is small.
+- **Ragged histograms and wobbly contours** — too few independent models;
+  the report also warns that the chain is shorter than 50 autocorrelation
+  times. Raise `--mcmc-steps`.
+
+The derived quantities (q, M sin³i, a sin i) are not drawn, but they are
+computed **from every model** and summarised the same way in the report and
+the posterior table. That is why their errors are right even where the
+parameters are correlated: M sin³i depends on (K₁+K₂)², on K of the other star,
+on P and on e, and the models carry those dependencies along, where adding
+the separate errors in quadrature would not.
+
+#### What the parameters mean
+
+| Parameter | Unit | Meaning |
+|---|---|---|
+| P | d | **Orbital period**: the time for one full orbit. With `--period` it may only move within ±0.1 % of the value given. |
+| T₀ | BJD_TDB | **Reference time** — reported for the first cycle at or after the first epoch (T₀ is defined only up to whole periods; its error follows the shift). Eccentric orbit: the time of **periastron**, when the stars are closest. Circular orbit: there is no periastron; ω is held at 90°, so T₀ is the time the primary passes γ going from redshift to blueshift — the conjunction with the primary behind its companion, i.e. the **primary eclipse** when the primary is the star eclipsed at Min I. It can then be compared with a photometric T₀: the difference should be a whole number of periods. |
+| e | — | **Eccentricity**: 0 is a circle, near 1 a very elongated ellipse. Close binaries are often circularised by tides. It makes the RV curve lopsided rather than a sine. |
+| ω | deg | **Argument of periastron of the primary**: the angle, in the orbital plane and in the direction of motion, from the point where the primary crosses the sky plane receding from us (the ascending node) to periastron. The secondary's ω is 180° more. It sets *which way* the curve is lopsided. Poorly defined when e is small (see the T₀–ω correlation above). |
+| K₁, K₂ | km/s | **Semi-amplitudes**: half the peak-to-peak RV variation of each star. The more massive star moves less, so K₁/K₂ = M₂/M₁. |
+| γ | km/s | **Systemic velocity**: the velocity of the binary's centre of mass, in the frame of the fitted RVs (barycentric when the correction was applied or the spectra were already barycentric). It also absorbs the template's zero point and the stars' small gravitational-redshift and convective-shift difference. |
+| q = M₂/M₁ | — | **Mass ratio**, K₁/K₂ from the orbit. The Wilson plot gives an independent value with no period at all; agreement between the two is a check worth making. |
+| M₁ sin³i, M₂ sin³i | M☉ | **Minimum masses**, P (K₁+K₂)² K_other (1−e²)^{3/2} / (2πG). The true mass is M sin³i / sin³i, which needs the inclination i; for an eclipsing binary i is near 90°, so sin³i is close to 1 — 0.989 at i = 85°, 0.955 at 80°, 0.901 at 75° — but take i from the light curve. |
+| a₁ sin i, a₂ sin i | R☉ | **Projected semi-major axis of each star's orbit** around the centre of mass, K P √(1−e²) / (2π). |
+| a sin i | R☉ | **Projected semi-major axis of the relative orbit** (star around star), the sum of the two above. Needed with the radii from a light curve, which come out as fractions of a. |
+
+#### The posterior table
+
+`result_orbit_posterior.txt` holds the numbers behind the corner plot, one row
+per parameter (the derived ones too), as plain columns to read with any
+program:
+
+| Column | Content |
+|---|---|
+| `parameter` | Name with unit: `P[d]`, `T0[BJD]`, `e`, `omega[deg]`, `K1[km/s]`, `K2[km/s]`, `gamma[km/s]`, `q`, `M1sin3i[Msun]`, `M2sin3i[Msun]`, `a1sini[Rsun]`, `a2sini[Rsun]`, `asini[Rsun]`; `e` and `omega` only for an eccentric fit |
+| `median`, `err_minus`, `err_plus` | The posterior median — the value to quote — and its distances down to the 16th and up to the 84th percentile |
+| `prior_min`, `prior_max` | The edges of the uniform prior box the sampler was confined to (`nan` for a derived quantity, which has no prior of its own) |
 
 ### `header` — what is actually in the file
 
@@ -1766,9 +2520,16 @@ on the fitted period, with the O−C residuals underneath).
 python rv_analysis.py header --spectrum ADP.xxxx.fits --site lasilla
 ```
 
+The output is the standard summary block below, followed by the header
+cards themselves: every HDU of a FITS file, each under a `--- HDU k: NAME
+(type) ---` line, or the comment header of an ASCII table and its PolarBase
+`.meta` sidecar. (The GUI's **Header** window puts the two on separate tabs,
+**Cards** and **Summary**.)
+
 `--output` saves everything to a text file; `--resolve` asks SIMBAD for the
 coordinates of the OBJECT the file names, when the file itself gives none
-(the command is otherwise offline). Without coordinates there is no BJD_TDB
+(the command is otherwise offline); an ESO OBJECT such as `2234_LL-Aqr`
+is looked up as LL Aqr. Without coordinates there is no BJD_TDB
 and no v_bary to print, so `--resolve` is what completes the summary for a
 file that carries a target and a time but no position.
 
@@ -1796,8 +2557,8 @@ EXPTIME [s]: 300.0019   (EXPTIME)
 Site       : lon -70.7345 E, lat -29.2584, 2400 m   (HIERARCH ESO TEL GEOLON/…)
 Site used  : Observatory from the file header (…)  [ESO La Silla]
 BJD_TDB    : 2455449.520562   (mid-exposure, computed here)
-v_bary     : -4.2639 km/s   (computed here)
-cross-check: pipeline BERV = -4.2699 km/s, ours -4.2639 (+6 m/s) - OK
+v_bary     : -4.2672 km/s   (computed here)
+cross-check: pipeline BERV = -4.2699 km/s, ours -4.2672 (+3 m/s) - OK
 Bary frame : corrected (BARYCENT), v_bary = -4.2699 km/s
 =============================================
 ```
@@ -2106,7 +2867,7 @@ connections.
   the full table with `python rv_analysis.py --list-spectrographs`, or set R
   directly with `--resolution`.
 - **Observatory** — `--site` accepts a built-in observatory name
-  (`paranal`, `lasilla`, `ctio`, `ohp`, `tug`, `kreiken`, `lco`, `soar`,
+  (`paranal`, `lasilla`, `ctio`, `ohp`, `tug`, `dag`, `kreiken`, `lco`, `soar`,
   `tng`, `dao`, …), a `lonE,lat,alt` string in degrees/metres for a site not
   in the list, or an astropy `of_site` name. The coordinates (longitude
   East-positive) drive the barycentric correction, including the diurnal
@@ -2397,9 +3158,9 @@ guess into a veto.
   `barycheck` command, then measure and **add v_bary** as asked.
   `--force-bary` still exists and now only silences that warning;
 - in the **GUI**, *Apply barycentric correction* stays enabled and keeps
-  whatever you set. Its label reports what the selected spectrum claims:
-  *(header says already corrected — check first)* or *(header says
-  topocentric)*;
+  whatever you set. The grey note beside it reports what the selected
+  spectrum claims: *header says already corrected — check first* or
+  *header says topocentric*;
 - the **GUI batch** asks once before a queue whose headers disagree with
   the tick box, and runs as ticked if you confirm. It no longer unticks
   the box for you, and a queue that mixes frames is a question, not a
@@ -2579,8 +3340,9 @@ python rv_analysis.py batch ... --varastro --ecc 0.3180 --omega 155.48
 
 `--ecc` is the eccentricity and `--omega` the argument of periastron **of the
 primary** in degrees — the two numbers `orbit --eccentric` prints. So the
-usual order is: run the series once, let `orbit` (whose Wilson step repairs
-the swapped epochs) fit e and ω, then run the series again with them. A
+usual order is: run the series once, let `orbit` (which finds and repairs
+the swapped epochs against the orbit itself) fit e and ω, then run the
+series again with them. A
 literature orbit works too, as long as its ω is the primary's; some papers
 quote the secondary's, 180° away. With `--ecc 0` the rule is the circular one,
 exactly as before.
@@ -2643,17 +3405,22 @@ SB2 velocities.
 
 | File | Content |
 |---|---|
-| `result_CCF.txt` / `result_BF.txt` | RVs with errors, uncorrected and barycentric-corrected, amplitudes, areas, widths, light ratios, the continuum S/N of the spectrum. A heliocentric spectrum (PolarBase) run with `--no-bary` gets a last `helio_to_bary[km/s]` column holding the term already added to `RV`; `result_TODCOR.txt` and `result_RV_curve.txt` get the same column. The data table opens with a `star` column, so a velocity is never separated from the star it belongs to; low-S/N and low-significance results carry explicit warnings (low S/N is the dominant source of spurious RVs — Katz et al. 2025) |
+| `result_CCF.txt` / `result_BF.txt` | RVs with errors, uncorrected and barycentric-corrected, amplitudes, areas, widths, light ratios, the continuum S/N of the spectrum. A heliocentric spectrum (PolarBase) run with `--no-bary` gets a last `helio_to_bary[km/s]` column holding the term already added to `RV`; `result_TODCOR.txt` and `result_RV_curve.txt` get the same column. The data table holds the values only (no star column; the star is named in the report); low-S/N and low-significance results carry explicit warnings (low S/N is the dominant source of spurious RVs — Katz et al. 2025) |
 | `result_CCF.png` / `result_BF.png` | Fit figure (BF: one dashed profile per component with `amp` and RV in the legend) |
-| `result_CCF_linecheck.png` / `result_BF_linecheck.png` / `result_TODCOR_linecheck.png` | Model reliability check: observed spectrum against the template broadened and shifted to the measured RV, around lines chosen **for this star** from a list of ~90 hydrogen, hot-star (He I/II, Si II–IV, Mg II, C II, N II, O II, Al III, Fe III, Ne I) and cool-star (Fe I/II, Ca I, Mg I, Ti II, Sr II, Ba II) lines. A line is checked only when the model itself shows it: its minimum lies on the catalogue wavelength, it is at least 2 % deep, and at least half as deep as the deepest feature in its window. The strongest **4 per 50-nm band over 400–600 nm** and 2 per band elsewhere are kept, only inside the analysed range, and never two whose windows overlap (Balmer ±30 Å, He ±10–12 Å, metals ±6 Å). Na I D is excluded, since interstellar absorption is in no stellar model. With more than 4 lines the figure has two columns. **CCF:** the CCF measures no line-broadening kernel (its peak width also contains the template's own lines, and for hot stars it is far from Gaussian), so the Gaussian kernel is fitted to the non-hydrogen windows with a free continuum level and depth scale per window. RV and template stay fixed, and the depth ratios printed are those of the unscaled model. **Reading it:** a good RV with a matching template gives r ≈ 1 and depth O/M ≈ 1. A line at the right place but with the wrong strength (He I deeper and metal lines weaker than the model, say) means the template has the wrong temperature, not the wrong RV |
-| `result_TODCOR.txt` / `.png` | `todcor` mode: both velocities with errors, one row per component behind a `star` column, the fitted α and which component is brighter, the peak correlation, and whether the exact or regular normalization ran. The figure shows the 2-D surface plus the two cuts through the maximum — each cut is what a 1-D CCF would look like if the other component's velocity were already known. The line under it gives the plotted (measured) v1/v2 and, when the barycentric correction was applied, v_bary and the **REPORTED (barycentric)** v1/v2 |
-| `result_CCF_profile.txt` / `result_BF_profile.txt` / `result_TODCOR_profile.txt` | The measured profile as plain whitespace-separated columns, for plotting it outside the program — one row per velocity sample. Columns: `star`; `RV[km/s]`, the velocity axis in the frame of the **reported** RVs (v_bary added when the correction is applied, the helio→barycentric term for a heliocentric spectrum, otherwise equal to `RV_raw`), so the peak sits at the RV in `result_*.txt`; `RV_raw[km/s]`, the measured frame the figure is drawn in; then **CCF**: `CCF` (the combined correlation) and `fit` (the fitted Gaussian on its baseline); **BF**: `BF` (the smoothed broadening function) and `fit` (the sum of the fitted component profiles); **TODCOR**: `corr_v1` (the 2-D correlation along v₁ at the fitted v₂) and `corr_v2` (along v₂ at the fitted v₁) — the two cuts the figure plots, on one axis. The header line names the columns; plot e.g. column 2 against column 4 (`gnuplot: plot "result_BF_profile.txt" u 2:4`, or `numpy.loadtxt(..., usecols=(1, 3))`). Written by Save when ticked, by each kept epoch of **Save all kept...**, and always by `ccf`/`bf`/`todcor` on the command line |
+| `result_CCF_linecheck.png` / `result_BF_linecheck.png` / `result_TODCOR_linecheck.png` | Model reliability check: observed spectrum against the template broadened and shifted to the measured RV, around lines chosen **for this star** from a list of ~95 hydrogen, hot-star (He I/II, Si II–IV, Mg II, C II, N II, O II, Al III, Fe III, Ne I) and cool-star (Ca II H & K, Fe I/II, Ca I, Mg I, Ti II, Sr II, Ba II, and past 700 nm the Ca II infrared triplet 8498/8542/8662) lines. A line is checked only when the model itself shows it: its minimum lies on the catalogue wavelength, it is at least 2 % deep, and at least half as deep as the deepest feature in its window. The strongest **4 per 50-nm band over 400–600 nm** and 2 per band elsewhere are kept, only inside the analysed range, and never two whose windows overlap (Balmer ±30 Å, He ±10–12 Å, metals ±6 Å). Na I D is excluded, since interstellar absorption is in no stellar model. With more than 4 lines the figure has two columns. **Strong-line fallback** (2026-10-14, the user's order): when the metal lines of the window are poor — fewer than 2, or their median r below 0.5 — the check adds the first two of **Ca II H & K → Mg I b triplet → Hβ → Hα** that can be checked, so **Hα is the last option**. They are looked for in the **whole spectrum**, mostly outside the RV window, so they test the same model where the RV was not measured. A line counts as available only where the data fill its panel, the template covers it and the observed pixel-to-pixel S/N is at least 3 (a noise-only panel judges the noise, not the solution). Observed and model are both normalized locally, by a straight line through each panel's upper envelope, so a raw spectrum and the never-reached continuum around Ca II H & K are compared fairly. These panels are titled "(fallback)" and their rows in `result_*.txt` carry the same name. On the PSL Neo-Narval epochs in 634–653 nm the result is usually Hα alone: Ca II H & K are not in the 5215 K template (it starts at 450 nm), Hβ falls in orders the pipeline could not normalize, and the Mg b orders sit at S/N ≈ 2. **CCF:** the CCF measures no line-broadening kernel (its peak width also contains the template's own lines, and for hot stars it is far from Gaussian), so the Gaussian kernel is fitted to the non-hydrogen windows with a free continuum level and depth scale per window. RV and template stay fixed, and the depth ratios printed are those of the unscaled model. **Reading it:** a good RV with a matching template gives r ≈ 1 and depth O/M ≈ 1. A line at the right place but with the wrong strength (He I deeper and metal lines weaker than the model, say) means the template has the wrong temperature, not the wrong RV |
+| `result_TODCOR.txt` / `.png` | `todcor` mode: both velocities with errors, one row per component — with the correction applied as `RV_raw`, `RV_raw_err`, `RV_bary`, `RV_bary_err` and `bary_corr` (the v_bary added), like `result_CCF.txt` / `result_BF.txt` (before 2026-10-14 only the corrected RV was written, and v_bary was in the run log alone); with `--no-bary` as `RV`, `RV_err` and a `# v_bary` comment line — the fitted α and which component is brighter, the peak correlation, and whether the exact or regular normalization ran. The figure has three panels, as in RVCalPy-21: the **2-D surface** with its maximum marked, the **cut at v2** (the surface along the primary velocity at the fitted v2) and the **cut at v1** (along the secondary velocity at the fitted v1), each cut peaking on its dotted line by construction — **v1 in royal blue, v2 in maroon**, the components' colours everywhere else. This is the display of the TODCOR papers (Zucker et al. 2003, A&A 404, 775, Fig. 2) and of the TODCOR code's own example. No Gaussians are drawn: two Gaussians fitted to the ordinary 1-D CCF are not a measurement at small separations — Halbwachs et al. (2017, SF2A, arXiv:1710.02301) find such fits reliable only when the dips are more than about **6 × (σ₁ + σ₂)** apart, because of side lobes — and their centres can lie several km/s from the true velocities (a synthetic test with LL Aqr-like broadening put the weaker one 9 km/s off while TODCOR recovered the input); the 1-D CCF and that fit are kept in the profile table (`ccf_1d`, `ccf_fit`). The reported RVs are TODCOR's. **The template must match the stars' line width**: a template sharper than the stars biases TODCOR too (Mazeh et al. 2001, Gliese 644); give the templates a *v* sin *i* (main window **vsini**, TODCOR settings **vsini of template 2**) and keep the value that gives the highest **Peak correlation** in the report. With the barycentric correction applied the whole figure is on the corrected axis, and the line under it reads `plotted = reported (barycentric)` with v_bary and the measured v1/v2; otherwise it gives the plotted v1/v2, which are then the reported ones |
+| `result_CCF_profile.txt` / `result_BF_profile.txt` / `result_TODCOR_profile.txt` | The measured profile as plain whitespace-separated columns, for plotting it outside the program — one row per velocity sample. Columns: `RV[km/s]`, the velocity axis in the frame of the **reported** RVs (v_bary added when the correction is applied, the helio→barycentric term for a heliocentric spectrum, otherwise equal to `RV_raw`), so the peak sits at the RV in `result_*.txt`; `RV_raw[km/s]`, the measured frame (the figure is drawn on `RV` — corrected when the correction is applied); then **CCF**: `CCF` (the combined correlation) and `fit` (the fitted Gaussian on its baseline); **BF**: `BF` (the smoothed broadening function) and `fit` (the sum of the fitted component profiles); **TODCOR**: `corr_v1` (the 2-D correlation along v₁ at the fitted v₂) and `corr_v2` (along v₂ at the fitted v₁) — the two cuts through the peak — then `ccf_1d` (the 1-D CCF against template 1, not drawn in the figure) and `ccf_fit` (its two-Gaussian fit; neither is drawn — the figure shows `corr_v1` and `corr_v2`, the two cuts), on one axis. The header line names the columns; plot e.g. column 1 against column 3 (`gnuplot: plot "result_BF_profile.txt" u 1:3`, or `numpy.loadtxt(...)` and columns 0 and 2). Written by Save when ticked, by each kept epoch of **Save all kept...**, and always by `ccf`/`bf`/`todcor` on the command line |
 | `result_CCF_shifted.fits` / `result_BF_shifted_C<k>.fits` / `result_TODCOR_shifted_C<k>.fits` | The analysed spectrum moved to the star's rest frame, one file per component (no `_C<k>` when there is one). Every order of the input file is shifted by λ_rest = λ / (1 + RV_raw/c). The shift is the **measured** velocity `RV_raw`, the shift actually present in the file's wavelengths; the barycentric correction moves no pixel, so it is not part of the shift. **Primary HDU:** 1-D flux on a uniform linear grid in Å (`CRVAL1`/`CDELT1`/`CRPIX1`, `CTYPE1 = WAVE`, step = the finest input pixels; overlapping orders averaged), for IRAF `splot`, iSpec or any 1-D FITS viewer. **`SPECTRUM` extension:** binary table `WAVE` [Å], `FLUX`, `ORDER` with the shifted pixels exactly, no resampling; `read_spectrum` reads this table, so a re-run uses the exact pixels. Header cards: `OBJECT`, `DATE-OBS`, `EXPTIME`, `RA`, `DEC`, `INSTRUME` (when known), `RVSHIFT` [km/s], `COMPON`, `METHOD`, `ORIGFILE`, and `SPECSYS = SOURCE`, which the header check reads as "already corrected", so applying a barycentric correction to the file draws the double-correction warning. Written by Save when ticked, by each epoch of the GUI batch's **Save all kept...**, and by `ccf`/`bf`/`todcor` on the command line |
 | `result_TODCOR_selfcal.txt` | `todcor --simulate`: recovered velocities, bias, α and the `swap` column at each tested separation |
-| `result_RV_curve.txt` / `.png` | `batch` mode, and the GUI batch's **Save all kept...**: star, spectrum, BJD, phase and per-component RVs for the whole series. In `batch` mode, components varying by more than 3 km/s peak-to-peak between epochs are flagged as binarity/variability candidates (Katz et al. 2025) in a comment above the table. Same columns either way, so both feed `wilson` and `orbit` directly, and `--star` selects one star out of a file that holds two. The figure is a single panel, `RV [km/s]` against `Phase` (or `BJD_TDB` without an ephemeris), titled with the frame the curve is in |
+| `result_RV_curve.txt` / `.png` | `batch` mode, and the GUI batch's **Save all kept...**: spectrum, BJD, phase and per-component RVs for the whole series. In `batch` mode, components varying by more than 3 km/s peak-to-peak between epochs are flagged as binarity/variability candidates (Katz et al. 2025) in a comment above the table. Same columns either way, so both feed `wilson` and `orbit` directly, and `--star` selects one star out of a file that holds two. The figure is a single panel, `RV [km/s]` against `Phase` (or `BJD_TDB` without an ephemeris), titled with the frame the curve is in |
+| `<star>_mass_ratio.txt` / `.png` (was `result_wilson.*`) | `wilson` (and the GUI's **Wilson plot...**): slope, q, γ and the primary from the RV1-vs-RV2 line, the epochs excluded by hand in the GUI, the scatter before and after any repair, the swapped and not-testable epochs, and one row per epoch; the plot with the fitted line and γ, and the residuals about the line. Every epoch of the fit is one blue dot of the same size and colour in both panels — the only markers that differ are the ones that are not ordinary epochs: a repaired swap (open green square, with a dashed line back to where it sat), an epoch excluded by hand (grey cross), the before-repair residuals (grey crosses) and γ (black tri_down marker) |
+| `result_orbit.txt` / `.png` | `orbit` (and `batch --orbit`, the GUI's **Orbit...**): the report — the orbital elements and the derived minimum masses as posterior medians with their 16th/84th-percentile errors, any swapped epochs, the sampling settings and the basic Wilson plot's slope, γ, q, scatter and primary — and both components folded on the period with the model curves, the residuals of the fit underneath |
+| `result_orbit_wilson.png` | The basic Wilson plot of the orbit's pairs: V₂ against V₁ (V₁ across) with the fitted line, the V₁ = V₂ diagonal and γ, and the residuals about the line per epoch; no swap repair of its own |
+| `result_orbit_corner.png` | The corner plot of the orbit posterior: one histogram per fitted parameter with the 16th, 50th and 84th percentiles dashed, every pair of parameters below with its 1σ, 2σ and 3σ contours — see [Reading the corner plot](#reading-the-corner-plot) |
+| `result_orbit_posterior.txt` | The posterior as plain columns, one row per parameter: `median err_minus err_plus prior_min prior_max` — see [The posterior table](#the-posterior-table) |
 | `result_BF_profiles.png` | `batch` mode and the GUI batch: all BF profiles stacked by orbital phase (one picture of the series; each epoch's own profile as numbers is its `result_BF_profile.txt`) |
 | `<spectrum name>/result_*.txt` / `.png` | GUI batch only: one subdirectory per kept epoch, holding that epoch's own result files under their usual names. Every single-spectrum run names its output `result_BF.txt` whatever it measured, so the subdirectory is what keeps ten epochs from overwriting each other |
-| `result_batch_report.txt` | GUI batch only: the whole run as one document, headed by the star it measured. Opens with an aligned one-line-per-epoch table (star, spectrum, BJD_TDB, phase, each component's RV with error, v_bary, continuum S/N, peak significance, kept/dropped/failed — the columns are explained under [Reading a batch](#reading-a-batch-the-overview-and-the-detail-window), not in the file), then the settings used including the normalization pass and the queue's wavelength-frame verdicts, every epoch's full report, the epochs dropped or failed and why, and the velocity table |
+| `result_batch_report.txt` | GUI batch only: the whole run as one document, headed by the star it measured. Opens with an aligned one-line-per-epoch table (spectrum, BJD_TDB, phase, each component's RV with error, v_bary, continuum S/N, peak significance, kept/dropped/failed — the columns are explained under [Reading a batch](#reading-a-batch-the-overview-and-the-detail-window), not in the file), then the settings used including the normalization pass and the queue's wavelength-frame verdicts, every epoch's full report, the epochs dropped or failed and why, and the velocity table |
 | `result_batch_overview.png` | GUI batch only: the results gallery as a single picture, every kept epoch's figure with its file name above it; the velocities, BJD and phase are read off the figures themselves |
 | `<name>_norm.txt` / `<name>_normalization.png` | GUI batch normalization pass: one normalized copy and one continuum-check figure per raw spectrum, written to the directory asked for before the run. Always a cubic B-spline continuum, knots every 20 nm. The raw frames are not modified |
 | `result_normalization.png` | `normalize` mode: the spectrum, the fitted continuum and the normalized result |
@@ -2677,7 +3444,7 @@ rv_analysis.py run started 2026-08-10 22:03:11
 command    : rv_analysis.py bf --spectrum examples/example_BF_HARPS_norm.txt --template examples/template_*.txt --spectrograph HARPS --components 2 --dv 1 --no-bary
 directory  : /home/user/work/*
 python     : 3.12.3 (/home/user/RV_testing/bin/python)
-packages   : numpy 2.5.1, scipy 1.18.0, astropy 8.0.1, matplotlib 3.11.0, PyAstronomy 0.25.0
+packages   : numpy 2.5.1, scipy 1.18.0, astropy 8.0.1, matplotlib 3.11.0, PyAstronomy 0.25.0, emcee 3.1.6, corner 2.3.0
 platform   : Linux-7.0.0-28-generic-x86_64-with-glibc2.39
 ======================================================================
 
@@ -2731,10 +3498,12 @@ line then reads `run stopped with an error` or `run failed` instead of
 | The GUI does not open | `tkinter` is missing (see [Setup](README.md#setup)) or there is no display — the terminal wizard starts instead with the same steps |
 | A run misbehaved and the terminal is gone | Read `rv_analysis.log` — it holds the whole output of every run, including the command line that produced it ([The run log](#the-run-log)) |
 | No template file at hand | Give `--teff/--logg/--feh` to download a PHOENIX model (needs `expecto`) |
-| VarAstro finds nothing | The lookup already retries the zero-padded GCVS spelling and the SIMBAD cross-identifiers; if it still fails, pass `--t0/--period` yourself |
+| VarAstro finds nothing | The lookup already retries the standard spelling (`kx-aqr` → `KX Aqr`), the zero-padded GCVS spelling and the SIMBAD cross-identifiers; if it still fails, pass `--t0/--period` yourself |
+| SIMBAD does not find the star | Hyphens, underscores, lower case, a missing space and an ESO programme number (`2234_LL-Aqr`) are already handled; a name that still fails is not a SIMBAD identifier — try a catalogue name (HD, TYC, Gaia) or give `--ra/--dec` |
 | The GUI shows the previous spectrum's target | Fixed: the fields the program filled in are cleared when the spectrum path changes, and `Header` refills them from the file now loaded. Fields you typed yourself are kept and reported rather than overwritten — clear them by hand if they belonged to the previous target |
 | A file with no header gives OBJECT/DATE-OBS = None | If its name follows a convention RVCalPy knows (DAO, Demetra — see [metadata in the file name](#metadata-in-the-file-name)) the values are read from the name; `header --resolve` shows what was found. Otherwise pass `--object/--obstime/--site` yourself |
 | A Demetra spectrum picks the wrong observatory | That convention does not encode the site and the run falls back to the default, saying so. Pass `--site` (`kreiken` for the AUKR T80/Whoppshel spectra); the raw `.fit` frames carry it in `GEO_LONG`/`GEO_LAT`/`GEO_ELEV` and are read automatically |
+| The BJDs of a series all sit near the start of their day (`.50…`), the phases are scattered and v_bary differs from the header's by tenths of km/s | The files' `DATE-OBS` holds only a date. Since RVCalPy-21 the time comes from `MJD-OBS` (or `TM-START`) instead; a normalized copy made before that, whose original has moved, still carries only the date and says so with a WARNING. Re-normalize from the original, or give `--bjd` — see [Observation time](#observation-time) |
 | A batch reports `v_bary = +0.0000` and no BJD ("barycentric correction skipped (needs coordinates AND observation time)") | The queued files carry no epoch. If they are copies made by `normalize`, the fix is automatic since RVCalPy-20 — the source file named in their comment header is read, and with it any PolarBase `.meta` near *it* ([section 3](#metadata-in-a-sidecar-file-polarbase)). If they are cuts made by hand with no header at all, give `--obstime` (one file) or `--bjd` (one value per file), or re-cut them from the original product |
 | RVs offset by 20-25 km/s from a published table | A spectrum whose header does not record the wavelength frame may already be barycentric; the header check cannot see it and the run says so. Compare one epoch both ways and use `--no-bary` if the uncorrected value is the one that matches ([section 7](#7-barycentric-frame-what-the-headers-say-and-who-decides)) |
 | A PolarBase spectrum has no epoch or coordinates | A `.s` (or a window cut out of it) finds its `.meta` only by the same file name, or as the single `.meta` in its folder ([sidecar](#metadata-in-a-sidecar-file-polarbase)). A copy in a folder with no `.meta` (or several) has none. Normalize it in its own folder first, or use the `.fts`, which has its own header |
@@ -2742,6 +3511,8 @@ line then reads `run stopped with an error` or `run failed` instead of
 | `batch` warns that the spectra mix the two PolarBase products | Some files are the pipeline-normalized `<odo>i`, others the `<odo>i_u`. Their zero points differ by ~0.15 km/s. Queue one product only, preferably `i` |
 | The same PolarBase exposure gives very different RVs as `i` and `i_u` | The `i_u` flux is not normalized (it still carries the blaze). Normalize it first, or measure the `i` product |
 | The line check shows lines far deeper or shallower than the model | Look at *which* lines. Lines in the right place with the wrong strength (He I deeper and metals weaker in a B star, say) mean the template's temperature is wrong, not the RV. A model with no line where the data have one never appears, because only lines the model shows are checked |
+| Two Wilson runs of the same table give a different slope, rms and robust σ | Compare three things in the two `<star>_mass_ratio.txt` files. **The error columns**: the lines `Error on V1/V2: column …` at the top, and the per-epoch rows — `nan` there means the fit ran unweighted. **The swap repair**: on by default from the command line, off by default in the GUI dialog (`--no-fix-swaps` matches the GUI); a `SWAPPED` row means it changed the data. **Epochs left out** by a click in the GUI: the `Excluded by hand` line under `Epochs used`. Same columns, same swap setting and same epochs give the same numbers to the last digit ([how they are computed](#wilson--mass-ratio-from-the-rv1-vs-rv2-plot)) |
+| The Wilson legend's slope does not match the M₂/M₁ in the title | It is not supposed to: the figure has V₁ across, so its line has slope −M₁/M₂ = −1/q, the reciprocal of the title's q (the Swap axes button draws it the other way, slope −q). The two look alike only for a near-twin, q ≈ 1. The report's `Slope` is −q |
 | The orbital phase looks wrong | Check the two dates against each other. Both `--t0` and `--obstime` may be full or reduced by 2 400 000 and are promoted to full JD with a printed note ([Julian dates](#julian-dates-full-or-reduced)) — but an **MJD** is silently taken as a reduced JD and lands half a day off; give an MJD as `MJD + 2400000.5` |
 
 Run `python rv_analysis.py <command> --help` for the full, authoritative list
