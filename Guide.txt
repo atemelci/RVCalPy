@@ -532,7 +532,7 @@ exposure:
 | Source of the time | What the time is | Added by RVCalPy |
 |---|---|---|
 | ESO phase-3 (HARPS, FEROS, UVES), `DATE-OBS` or `MJD-OBS` | start | + EXPTIME/2 |
-| SOPHIE `OHP OBS DATE START` | start | + EXPTIME/2 (the DRS's own BJD is within about 1 min of the result) |
+| SOPHIE `OHP OBS DATE START` | start | + `OHP CCD DKTM`/2 (the DRS's own BJD agrees within about a second, after converting its UTC time to TDB) |
 | PolarBase `.meta` / `.fts` | start | + EXPTIME/2 |
 | Neo-Narval sequence | middle of the 4-exposure sequence (exposure meter) | nothing (EXPTIME is set to 0) |
 | DAO, `JD...` in the file name | middle | nothing (EXPTIME is set to 0); `DO...` is the start |
@@ -550,6 +550,32 @@ that file is still where the copy says; if it is not, the run prints — and
 writes into the result — *WARNING: the observation time '1999-07-25' is a
 date with no time of day ...*. Re-normalize from the original, or give
 `--obstime` (one spectrum) or `--bjd` (a batch).
+
+**How the BJD_TDB is computed.** The BJD in every result is computed by
+RVCalPy, not copied from the header:
+
+1. **Mid-exposure time (UTC).** For Neo-Narval, the flux-weighted mean time
+   of the exposure-meter data stored in the file (HDU 4, `Time Photometry`
+   and `Photometry`). The header's Julian date (`DATE_JUL`) is not used,
+   because it is only the start of the first of the four sub-exposures
+   combined in each spectrum. For SOPHIE, half the exposure time
+   (`OHP CCD DKTM` / 2) is added to the start time (`OHP OBS DATE START`).
+2. **Conversion to BJD_TDB (astropy).**
+
+       BJD_TDB = JD_UTC(mid) + (TDB − UTC) + light-travel time to the solar-system barycentre
+
+   The light-travel time uses the star's RA/Dec from the header and the
+   observatory position (TBL from the Neo-Narval header, OHP for SOPHIE).
+3. **Validation against the pipelines.** The SOPHIE results agree with the
+   DRS BJD (`OHP DRS BJD`) to within about a second, once the DRS's UTC time
+   scale is converted to TDB. The Neo-Narval results are a few minutes later
+   than `BTLA`, the pipeline's barycentric time at the start of the
+   sequence. This is expected, because RVCalPy uses the mid-sequence time
+   instead of the start time. The barycentric correction itself (`BTLA`
+   minus the start time, compared with RVCalPy's BJD minus the mid time)
+   agrees to within about a second. Every run prints both checks as
+   `cross-check:` lines (see
+   [section 7](#7-barycentric-frame-what-the-headers-say-and-who-decides)).
 
 ## 4. Interactive mode
 
