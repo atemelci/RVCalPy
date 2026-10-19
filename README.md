@@ -47,8 +47,6 @@ Required packages (`requirements.txt`):
 
 Optional extras:
 
-- `pip install expecto` — automatic download of PHOENIX model templates when
-  no template file is given (`--teff/--logg/--feh`).
 - `tkinter` — needed only for the graphical interface. It ships with most
   Python installations; on Debian/Ubuntu install it with
   `sudo apt install python3-tk`. Without it the tool falls back to a
