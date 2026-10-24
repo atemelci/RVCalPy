@@ -57,6 +57,15 @@ The BF window (`--vel-range`, default ±500 km/s) and the TODCOR window
 (`--max-rv`, default ±200 km/s) are fixed rather than searched. Widen
 them for a star beyond those limits.
 
+**Since v23 the CCF cleans the spectrum first and reports a width-based
+error**, in every mode. Spikes are rejected and the continuum is
+re-flattened — the step `todcor` uses, with one guard: a pixel between 0
+and 1.2 is never a spike, so the cores of deep lines stay. The RV error is
+the maximum-likelihood error of Zucker (2003) from the width of the
+correlation peak, not the `curve_fit` error of the profile fit, which knows
+nothing of the S/N. `--no-clean` gives the v22 velocities back. See
+[Cleaning and the RV error](#cleaning-and-the-rv-error-since-v23).
+
 **BF (Broadening Function, Rucinski 1992/2002)** — the observed spectrum is
 modelled as the convolution of the template with a velocity-space profile,
 solved linearly via Singular Value Decomposition. Because the method is
@@ -138,12 +147,18 @@ python rv_analysis.py ccf --spectrum examples/example_CCF_SOPHIE_norm.txt \
 
 ```
 Star                : TYC 3844-385-1
-CCF method          : weighted line mask, 3163 lines (Baranne 1996; Pepe 2002; Pino et al. 2018), hydrogen series excluded
+CCF method          : weighted line mask, 3163 lines (Baranne 1996; Pepe 2002; Pino et al. 2018), hydrogen series excluded, spectrum cleaned (spikes, continuum)
 Continuum S/N       : ~405 per pixel
 BJD = 2461123.405687
-RV = -35.7994 ± 0.0069 km/s  (no barycentric correction applied)
+RV = -35.7965 ± 0.0090 km/s  (no barycentric correction applied)
+RV error            : from the CCF width (Zucker 2003): C = 0.8559, N = 199789 px; profile-fit error 0.0067 km/s
 v_bary = -7.8077 km/s (for information only, not applied)
 ```
+
+Up to v22 the spectrum was not cleaned and the error was the profile-fit
+error: −35.7994 ± 0.0069 km/s, which `--no-clean` still gives for the
+velocity. At this S/N the two errors agree; they part at low S/N (see
+[Cleaning and the RV error](#cleaning-and-the-rv-error-since-v23)).
 
 Every run names the **star** at the top of its report (`Star : ...`). The
 result tables carry no star column — they hold the measured values only. The
@@ -656,7 +671,11 @@ Choosing **CCF** brings up **Correlation mode** (**Line mask**, safe for hot
 stars, or **Full template**), **RV min** / **RV max** (km/s; leave either
 empty for the automatic two-stage ±900 km/s search), **RV step** (the fine
 grid, km/s) and **Exclude hydrogen lines**. The hydrogen box only acts on the
-line mask, so it is greyed out under *Full template*.
+line mask, so it is greyed out under *Full template*. Since v23 the spectrum
+is always cleaned before the correlation, and the RV error comes from the
+width of the correlation peak ([Cleaning and the RV
+error](#cleaning-and-the-rv-error-since-v23)); only the command line has
+`--no-clean`.
 
 Choosing **TODCOR** is for an SB2 whose two peaks blend. It reveals a
 third file row in the **Files** group, right under Template — **Template
@@ -762,7 +781,15 @@ fixes that axis. Then PyWD2015's row of three:
 | **Larger text** / **Smaller text** | Every text of the figure — titles, labels, ticks, legend — 1.15× larger or smaller |
 | **Configure subplots...** | The same window as the toolbar's **Subplots**, laid out as in the Qt toolbar: **Borders** (top, bottom, left, right) with **Export values** under it (the six numbers as `top=0.88, bottom=0.1, …`, to copy into a script), **Spacings** (hspace, wspace) with **Tight layout**, **Reset** (the values the window opened with) and **Close**. Fractions of the figure from 0 to 1 in steps of 0.005, applied as they change; a border cannot be moved past the one opposite it |
 | **Figure options...** | The same window as the toolbar's **Customize**, after the Qt figure editor. **Axes** tab: title; X-Axis and Y-Axis min, max, label and scale (linear, log, symlog, logit); *(Re-)Generate automatic legend*; plus tick-label size, grid and **Legend shown** (unticked when the graph opens, since legends start hidden on screen). **Curves** tab: label; *Line* — line style (Solid, Dashed, DashDot, Dotted, None), draw style (Default, Steps), width, colour (RGBA, with a picker); *Marker* — style, size, face colour, edge colour; plus shown or hidden. **Images** tab, for a panel with an image (the TODCOR surface): label, colour map, min and max value, interpolation. Above the tabs the **Figure title** and, for a figure with several panels, the panel to edit. The orbit fit and the Wilson plot (both the **Wilson plot...** result and the orbit window's Wilson tab) open with the figure title **blank** — type one here if you want it; it is drawn above the panels, in the room kept for it. Edits of several curves wait until **Apply** or **OK**; **Cancel** drops what was not applied, and only the fields that were changed are written |
-| **Save figure as...** | The graph as it is now — zoomed, edited — as PNG, PDF, SVG or EPS |
+| **Save figure as...** | The graph as it is now — zoomed, edited — as PNG, PDF, SVG or EPS; the same as the toolbar's **Save** |
+
+The toolbar's **Save** and **Save figure as...** write the graph as it is
+on screen (zoom, edits, Figure options), at 600 dpi (never less: no
+figure file RVCalPy writes is below 600 dpi) and at the figure's own
+size, whatever size its window has been stretched to. The format follows
+the extension typed (PNG when none is). The dialog suggests a name — on
+the Spectrum window e.g. `TYC_3429-458-1_Mg_I_b_triplet_C1.png` — and
+opens in the folder the last figure was saved to.
 
 The menu stays out of the way while the toolbar's pan or zoom tool is
 active, since those use the right button themselves. Changes made this way
@@ -847,6 +874,108 @@ Other GUI features:
   roughly half the orders have no continuum solution at this S/N, the window
   therefore shows ~17 of the 41 orders. Use it as a check on what the fit
   will see.
+
+  **Live line check.** Above the graph, four rows of controls let you lay
+  the spectrum over the template at a line of your choice and mark where
+  each star's lines fall — the two velocities checked by eye, without
+  saving anything. The graph is
+  redrawn after every change (a list choice, a tick, or Enter in a box);
+  **Draw** does it by hand.
+
+  - **Range** — *Whole spectrum* (the plot above), one of the strong lines
+    — *Ca II H & K* (3919–3983 Å), *H gamma* (4310–4370 Å), *H beta*
+    (4831–4891 Å), *Mg I b triplet* (5157.5–5193.5 Å), *H alpha*
+    (6533–6593 Å) — or your own **From** / **to** in Å (press Enter; the
+    list switches to *Custom*). The ranges are rest wavelengths; the line
+    centres are marked with dotted lines. Pick a line the spectrum shows
+    clearly: Ca II H & K and the Mg I b triplet in cool stars, the Balmer
+    lines in hotter ones. The file's own coverage is printed beside the
+    boxes.
+  - **RV1** / **RV2** — the two stars' measured (uncorrected) velocities,
+    filled from the last Run when it was a run of this same file (the
+    line under the controls lists them), or for a `shifted` file its own
+    star's RV from the file header (`RVSHIFT`); type any velocity in
+    instead — from another run, a paper or an orbit's prediction — and
+    press Enter. The spectrum is never moved: it is drawn as it is in the
+    file. At every line centre of the range a dotted line marks where
+    each star's line falls in it: **RV1** in royal blue, **RV2** in
+    maroon (the component colours of every RVCalPy graph, as on the
+    TODCOR figure), with their velocities in the legend. A star with no
+    RV gets no line; with neither, the line centres are marked in grey.
+    In a *Custom* range the centres are the known lines inside it, or
+    else the template's deepest line.
+  - **Template at** — *RV1*, *RV2* or *Rest*: where the template is
+    drawn. A raw or normalized spectrum still carries the stars'
+    velocities, so its lines are at λ₀ · (1 + RV/c), and the template has
+    to be moved there to lie on them; switching between RV1 and RV2 shows
+    which absorption belongs to which star. A `result_*_shifted_C<k>.fits`
+    file is already in star k's rest frame — RVCalPy recognises it from
+    its header (`SPECSYS = SOURCE`, `COMPON`, `RVSHIFT`) and says so
+    beside the buttons — so there star k's lines are at rest and the
+    other star's at its velocity relative to star k, about RV2 − RV1; the
+    dotted lines and the template follow that. The window opens on *RV1*
+    for a raw or normalized file and on *Rest* for a shifted one.
+  - **Template** — draws the main window's **Template** (Template 1)
+    over the spectrum, where **Template at** puts it.
+    **Broaden** applies the main window's **Resolution** and **vsini**
+    first, as the analysis does; **Normalize locally** divides the
+    spectrum and the template, inside the range, by a straight line
+    through their upper envelope, as the line-check fallback panels do.
+    A template that does not cover the range is left out, and the window
+    says so.
+  - **Light fraction f** — dilutes the template to f·T + (1 − f) (e.g.
+    f = 0.5 draws 0.5·T + 0.5), in steps of 0.05 with the arrows or any
+    value typed in and Enter; 1.00, the default, leaves it as it is. In
+    an SB2 each star's lines sit on the light of both stars, so a star
+    giving the fraction f of the light shows lines only f times as deep
+    as a single-star template. Lower f until the template's strong lines
+    are as deep as the observed lines of the star it sits on: f is then
+    a rough estimate of that star's share of the light (with *Template
+    at RV2*, of the companion's; the two shares add up to about 1). It
+    is a by-eye estimate: a template whose Teff or metallicity is off
+    also changes the line depths, so weak lines that stay too deep at
+    the f that fits the strong ones point to the template, not to f.
+    The legend shows the value ("Template at RV1, f = 0.55").
+  - The legend goes where it covers the fewest points (lower right for
+    the whole spectrum). Where every place is crowded, drag it with the
+    mouse (no Pan or Zoom tool on). Save writes it where you put it; a
+    redraw puts it back to the free place.
+  - **Observed** / **Template** — the colour of each curve (a CSS colour
+    name from the list, or any matplotlib colour typed in, e.g. `#4286f4`;
+    the defaults are a black observed spectrum and a crimson template),
+    its style (*Line*, *Steps*, *Dots*, *Line + dots*) and its width. The
+    choice is kept for the next Spectrum window of the session.
+  - The flux axis of a range is scaled to the 0.5–99.5 % range of the
+    observed flux, widened to the template's deepest line and to the
+    continuum at 1, so a single cosmic-ray spike or dead pixel does not
+    squeeze the lines into a strip. To set it yourself, use the toolbar's
+    **Customize** (Figure options → Axes → Y-Axis Min / Max).
+  - The window keeps one graph and redraws it in place, so **Save** always
+    writes what is on the screen: untick **Template** and the saved file
+    has no template. A zoom (toolbar or Customize) is kept when you tick
+    the template on or off or change the colours, RVs or *Template at*;
+    a new range, or Normalize locally switched, starts again from the
+    whole range, and **Home** always goes back to it.
+
+  The graph is titled with the star - the header's object, written one
+  way (`TYC_3429-458-1` and `TYC 3429-458-1` both read *TYC 3429-458-1*,
+  `2234_LL-Aqr` reads *LL Aqr*), else the main window's Target name -
+  and the range; the file name stays in the window's title bar.
+
+  To look for both stars of an SB2, take the epoch with the largest
+  separation and a window of weak, sharp metal lines (the Mg I b and
+  Balmer lines are too broad: a companion 1–1.5 Å away merges into their
+  wings): an absorption feature should sit on each dotted line, and the
+  template should lie on the one set with *Template at RV1* and on the
+  other with *RV2*. A faint companion's lines are
+  shallow, and at low S/N they may not be seen one by one even when the
+  correlation detects the star.
+
+  How to read it: each star's lines sit on its dotted line, and the
+  template, moved to one of them, lies on that star's lines. In an
+  SB2 both stars' lines are diluted by the other star's light, so the
+  observed lines are shallower than the single-star template; that is
+  expected, not a mismatch.
 - **Wilson plot...** — in the bottom row, after the line that separates
   it from Batch... / Run / Save: it uses no spectrum, no
   template, no method and not the Run button — it works on a finished table
@@ -1187,7 +1316,8 @@ detail window moves the card, and the header keeps a running count.
     reason, and the velocity table.
   - **`result_batch_overview.png`** — the gallery itself as one picture:
     every kept epoch's figure at readable size, with its file name above
-    it and no caption below. The figures carry their own BJD, phase and
+    it and no caption below. Like every saved figure it is a 600 dpi
+    image, each epoch's panel 4 in (2400 px) wide. The figures carry their own BJD, phase and
     velocities — BF and CCF in the legend, TODCOR in the line under the
     figure, barycentric values included when the correction was applied
     — so a caption would only repeat them.
@@ -1351,7 +1481,7 @@ python rv_analysis.py batch --spectra 'polarbase/*/[0-9]*i.fts' \
 | `--no-bary` | Compute v_bary but do **not** add it to the RVs (report only) |
 | `--force-bary` | Only silences the warning printed when the header check says "already corrected". Kept for older command lines: the correction is applied with or without it |
 | `--t0/--period`, `--varastro`, `--t0-to-bjd` | Ephemeris for the orbital phase; fetch it from VarAstro; convert T0 HJD → BJD_TDB. T0 may be written full or reduced — see [Julian dates](#julian-dates-full-or-reduced) |
-| `--output`, `--plot`, `--dpi` | Result file, figure file, figure resolution (default 600 dpi) |
+| `--output`, `--plot`, `--dpi` | Result file, figure file, figure resolution (default 600 dpi, also the minimum: a lower `--dpi` is raised to 600, with a note) |
 
 #### Julian dates: full or reduced
 
@@ -1398,6 +1528,79 @@ glance.
 | `--ccf-mode {mask,template}` | `mask` (default): weighted line-mask CCF, hot-star safe. `template`: the full-spectrum cross-covariance |
 | `--mask-depth` | Minimum template line depth for a mask entry |
 | `--keep-balmer` | Keep the hydrogen Balmer/Paschen lines in the mask (default: excluded) |
+| `--no-clean` | Skip the spike rejection and continuum re-flattening done before the correlation (on by default since v23). Gives the v22 velocities back |
+
+#### Cleaning and the RV error (since v23)
+
+**Cleaning.** Before the correlation, every order of the observed spectrum
+goes through the step `todcor` uses: pixels more than 5 MAD above or 10 MAD
+below the median are set to the median, and the continuum is re-flattened
+with the windowed polynomial. Up to v22 only the line-mask mode removed bad
+pixels (flux > 1.2 or < 0); the full-template and FFT modes correlated the
+cosmics, although the code said otherwise. The Neo-Narval spectra of
+HD 105637 (S/N ≈ 10) carry 8–203 spikes in 560–627 nm, with flux up to 10.
+On a synthetic 17 000 K star with 60 cosmics, the full-template and FFT
+velocities were 3–6 km/s off before the cleaning and within 0.2 km/s after.
+
+The CCF adds **one guard** to the `todcor` rule: a pixel between 0 and 1.2
+is never a spike. At high S/N the lines, not the noise, set the MAD, and
+10 MAD below the median falls inside the deep lines. Without the guard each
+of the 16 UVES spectra of the [CCF benchmark](README.md#benchmark) lost
+755–2946 line-core pixels and its velocity moved by up to 0.5 km/s, and the
+17 000 K synthetic lost its correlation peak. With the guard the benchmark
+is unchanged: median |difference| 0.487 km/s (v22: 0.486), slope 1.000156
+(v22: 1.000171); one star moves by 0.095 km/s, the others by less than
+0.015 km/s. In the noisy HD 105637 spectra the MAD limits already lie
+outside 0–1.2, so there the guard changes nothing. `todcor` keeps its own
+rule without the guard.
+
+**The RV error** is the one-dimensional maximum-likelihood error of Zucker
+(2003, MNRAS 342, 1291):
+
+```
+sigma_v^2 = -[ N * C''(v) / C(v) * C(v)^2 / (1 - C(v)^2) ]^-1
+          = (1 - C^2) * sigma^2 / (N * C * A)
+```
+
+where C(v) is the correlation coefficient of the spectrum with the template
+shifted to v, N the number of spectrum pixels, and A and sigma the
+amplitude and width of a Gaussian fitted to C(v) at the measured velocity
+(so C'' = −A/sigma²). The error therefore grows when the S/N falls (C
+drops) and when the lines are broad (sigma grows). The report prints it with
+C, N and the old profile-fit error:
+
+```
+RV error            : from the CCF width (Zucker 2003): C = 0.0942, N = 22752 px; profile-fit error 0.3222 km/s
+```
+
+The same line goes into `result_CCF.txt` as a `#` comment, and the error
+columns of `result_CCF.txt` and `result_RV_curve.txt` hold the width error.
+The profile-fit error is the `curve_fit` covariance of the Gaussian fitted to
+the CCF: it shows how well a Gaussian describes the profile, it shrinks
+with every extra velocity bin, and it knows nothing of the noise. It is
+reported as the error only when C(v) has no positive peak.
+
+HD 105637, 12 Neo-Narval spectra, 560–627 nm, full template, circular orbit
+with the period free:
+
+| RVs | Errors | median error [km/s] | rms [km/s] | χ²_red | jitter [km/s] |
+|---|---|---|---|---|---|
+| v22 (not cleaned) | profile fit | 0.45 | 4.9 | 57 | 4.1 |
+| v22 (not cleaned) | width | 1.88 | 5.1 | 4.1 | 3.5 |
+| v23 (cleaned) | profile fit | 0.48 | 3.8 | 41 | 3.3 |
+| v23 (cleaned) | width | 1.79 | 3.8 | 3.2 | 2.7 |
+
+The jitter is the value added in quadrature to every error so that
+χ²_red = 1. At high S/N the two errors agree (UVES benchmark: width
+0.013–0.039 km/s, profile fit 0.017–0.035 km/s).
+
+Two limits. N counts the pixels of the file: in a spectrum resampled finer
+than its detector pixels (s1d products) neighbouring pixels share their
+noise, and the error is too small by the square root of the oversampling.
+And a template that does not match the star leaves residuals that are not
+noise; the formula does not count them, so a jitter can remain (HD 105637:
+2.7 km/s). C(v) is always computed with the full template, so the line-mask
+and FFT velocities get the error of the same template match.
 
 ### `todcor` — two-dimensional correlation (blended SB2s)
 
@@ -3431,7 +3634,7 @@ SB2 velocities.
 
 | File | Content |
 |---|---|
-| `result_CCF.txt` / `result_BF.txt` | RVs with errors, uncorrected and barycentric-corrected, amplitudes, areas, widths, light ratios, the continuum S/N of the spectrum. A heliocentric spectrum (PolarBase) run with `--no-bary` gets a last `helio_to_bary[km/s]` column holding the term already added to `RV`; `result_TODCOR.txt` and `result_RV_curve.txt` get the same column. The data table holds the values only (no star column; the star is named in the report); low-S/N and low-significance results carry explicit warnings (low S/N is the dominant source of spurious RVs — Katz et al. 2025) |
+| `result_CCF.txt` / `result_BF.txt` | RVs with errors (for the CCF since v23 the error from the width of the correlation peak, with C, N and the profile-fit error in a `# RV error:` line), uncorrected and barycentric-corrected, amplitudes, areas, widths, light ratios, the continuum S/N of the spectrum. A heliocentric spectrum (PolarBase) run with `--no-bary` gets a last `helio_to_bary[km/s]` column holding the term already added to `RV`; `result_TODCOR.txt` and `result_RV_curve.txt` get the same column. The data table holds the values only (no star column; the star is named in the report); low-S/N and low-significance results carry explicit warnings (low S/N is the dominant source of spurious RVs — Katz et al. 2025) |
 | `result_CCF.png` / `result_BF.png` | Fit figure (BF: one dashed profile per component with `amp` and RV in the legend) |
 | `result_CCF_linecheck.png` / `result_BF_linecheck.png` / `result_TODCOR_linecheck.png` | Model reliability check: observed spectrum against the template broadened and shifted to the measured RV, around lines chosen **for this star** from a list of ~95 hydrogen, hot-star (He I/II, Si II–IV, Mg II, C II, N II, O II, Al III, Fe III, Ne I) and cool-star (Ca II H & K, Fe I/II, Ca I, Mg I, Ti II, Sr II, Ba II, and past 700 nm the Ca II infrared triplet 8498/8542/8662) lines. A line is checked only when the model itself shows it: its minimum lies on the catalogue wavelength, it is at least 2 % deep, and at least half as deep as the deepest feature in its window. The strongest **4 per 50-nm band over 400–600 nm** and 2 per band elsewhere are kept, only inside the analysed range, and never two whose windows overlap (Balmer ±30 Å, He ±10–12 Å, metals ±6 Å). Na I D is excluded, since interstellar absorption is in no stellar model. With more than 4 lines the figure has two columns. **Strong-line fallback** (2026-10-14, the user's order): when the metal lines of the window are poor — fewer than 2, or their median r below 0.5 — the check adds the first two of **Ca II H & K → Mg I b triplet → Hβ → Hα** that can be checked, so **Hα is the last option**. They are looked for in the **whole spectrum**, mostly outside the RV window, so they test the same model where the RV was not measured. A line counts as available only where the data fill its panel, the template covers it and the observed pixel-to-pixel S/N is at least 3 (a noise-only panel judges the noise, not the solution). Observed and model are both normalized locally, by a straight line through each panel's upper envelope, so a raw spectrum and the never-reached continuum around Ca II H & K are compared fairly. These panels are titled "(fallback)" and their rows in `result_*.txt` carry the same name. On the PSL Neo-Narval epochs in 634–653 nm the result is usually Hα alone: Ca II H & K are not in the 5215 K template (it starts at 450 nm), Hβ falls in orders the pipeline could not normalize, and the Mg b orders sit at S/N ≈ 2. **CCF:** the CCF measures no line-broadening kernel (its peak width also contains the template's own lines, and for hot stars it is far from Gaussian), so the Gaussian kernel is fitted to the non-hydrogen windows with a free continuum level and depth scale per window. RV and template stay fixed, and the depth ratios printed are those of the unscaled model. **Reading it:** a good RV with a matching template gives r ≈ 1 and depth O/M ≈ 1. A line at the right place but with the wrong strength (He I deeper and metal lines weaker than the model, say) means the template has the wrong temperature, not the wrong RV |
 | `result_TODCOR.txt` / `.png` | `todcor` mode: both velocities with errors, one row per component — with the correction applied as `RV_raw`, `RV_raw_err`, `RV_bary`, `RV_bary_err` and `bary_corr` (the v_bary added), like `result_CCF.txt` / `result_BF.txt` (before 2026-10-14 only the corrected RV was written, and v_bary was in the run log alone); with `--no-bary` as `RV`, `RV_err` and a `# v_bary` comment line — the fitted α and which component is brighter, the peak correlation, and whether the exact or regular normalization ran. The figure has three panels, as in RVCalPy-21: the **2-D surface** with its maximum marked, the **cut at v2** (the surface along the primary velocity at the fitted v2) and the **cut at v1** (along the secondary velocity at the fitted v1), each cut peaking on its dotted line by construction — **v1 in royal blue, v2 in maroon**, the components' colours everywhere else. This is the display of the TODCOR papers (Zucker et al. 2003, A&A 404, 775, Fig. 2) and of the TODCOR code's own example. No Gaussians are drawn: two Gaussians fitted to the ordinary 1-D CCF are not a measurement at small separations — Halbwachs et al. (2017, SF2A, arXiv:1710.02301) find such fits reliable only when the dips are more than about **6 × (σ₁ + σ₂)** apart, because of side lobes — and their centres can lie several km/s from the true velocities (a synthetic test with LL Aqr-like broadening put the weaker one 9 km/s off while TODCOR recovered the input); the 1-D CCF and that fit are kept in the profile table (`ccf_1d`, `ccf_fit`). The reported RVs are TODCOR's. **The template must match the stars' line width**: a template sharper than the stars biases TODCOR too (Mazeh et al. 2001, Gliese 644); give the templates a *v* sin *i* (main window **vsini**, TODCOR settings **vsini of template 2**) and keep the value that gives the highest **Peak correlation** in the report. With the barycentric correction applied the whole figure is on the corrected axis, and the line under it reads `plotted = reported (barycentric)` with v_bary and the measured v1/v2; otherwise it gives the plotted v1/v2, which are then the reported ones |
