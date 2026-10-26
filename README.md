@@ -92,7 +92,6 @@ observatory they came from.
 | The Wilson step ahead of the orbit; circular SB2 orbit fit (`orbit`) | Kovalev, M., & Straumit, I. 2022, MNRAS 510, 1515; Nachmani, G., Faigler, S., & Mazeh, T. 2026, MNRAS 546 (MESS) |
 | Barycentric correction with the relativistic cross term | Wright, J. T., & Eastman, J. D. 2014, PASP 126, 838 |
 | Rotational line profile (`--profile rot`) | Gray, D. F. 1992, *The Observation and Analysis of Stellar Photospheres* |
-| FEROS/MIDAS barycentric accuracy caveat | Müller, A., et al. 2013, A&A 556, A3 |
 | Benchmark: published velocities of LL Aqr | Graczyk, D., Smolec, R., Gazeas, K., et al. 2016, A&A 594, A92 |
 | Benchmark: published velocities of AK For | Hełminiak, K. G., Graczyk, D., Konacki, M., et al. 2014, A&A 567, A64 |
 
