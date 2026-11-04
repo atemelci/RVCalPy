@@ -71,11 +71,7 @@ extent permitted by law.
 
 `examples/` holds the worked examples, described and run step by step in
 [`Guide.txt`](Guide.txt#2-quick-start). The template there is synthetic and
-covered by the same license as the code. The three spectra are **observed
-data** — from the ESO Science Archive (HARPS, programme 084.D-0591(C)), the
-OHP 1.93 m (SOPHIE) and the TBL 2 m (Neo-Narval) — redistributed here as
-example data; any use of them should follow the terms of the archive or
-observatory they came from.
+covered by the same license as the code. 
 
 ## References
 
